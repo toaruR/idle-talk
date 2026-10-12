@@ -1,4 +1,4 @@
-<!-- spec-doc:last-reviewed-commit=<初回実行時に /spec-doc が自動記入> (対象リポジトリ名) reviewed-at=YYYY-MM-DD -->
+<!-- spec-doc:last-reviewed-commit=de4bec873e53ef63ddbbf6bfe3fab6f0387fe665 reviewed-at=2026-10-12 -->
 
 # 仕様書
 
@@ -9,3 +9,209 @@
 - 構成: 対象（機能 / モジュール / API / 設定 など）ごとに節を分ける
 - 実装手順ではなく「何が・どう振る舞うか」（仕様・挙動・設計意図）を書く
 -->
+
+設計の根拠は `docs/design-idle-talk.md`、タスク分解は `docs/plans/plan-idle-talk.json`、起動手順と運用フェーズの実機確認は `README.md` を参照。本書は実装 (`src/idle_talk/`, `web/`) が現在どう振る舞うかをまとめる。
+
+## 全体構成
+
+- 利用者 1 人・Windows 11・ローカル完結の常駐型日本語音声雑談アプリ。
+- 経路: ブラウザ (マイク取り込み / 再生) ⇄ WebSocket ⇄ Director (Python, 単一イベントループ) ⇄ llama-server (LLM) / AivisSpeech (TTS) / ASR ワーカー (faster-whisper)。
+- ネットワークに出るのは RSS Topic Worker のみ。他はすべて 127.0.0.1。
+
+## プロセスと起動
+
+| プロセス | 起動 | 既定ポート | 備考 |
+|---|---|---|---|
+| Director | `python -m idle_talk.main` | WS 8765 | `--data-dir`(既定 `data`)、`--pid-file`、`--llm-url` / `--tts-url` / `--asr-url` |
+| ASR ワーカー | `python -m idle_talk.asr_worker` | 8090 (`--port`) | 127.0.0.1 固定。faster-whisper `small` を CUDA/float16 で起動時に 1 回ロード。未導入なら exit 2 |
+| llama-server | 手動 | 8080 | 起動コマンドは `llm_supervisor.build_llama_command`(`--jinja` + `enable_thinking=false` で思考無効) |
+| AivisSpeech | 手動 | 10101 | 話者 ID 既定 888753760 (`idle_talk.toml` の `[tts].speaker` / `--speaker`) |
+
+- 二重起動は pid ロックで検出し exit 4。
+- `main` は CLI 引数と `idle_talk.toml` のみを使い、環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER` は M0 計測と実機試験だけが読む。
+- 終了時 (Ctrl+C) に `director.close()` が `run_meta` を 1 行書いてからストアを閉じる。
+- 起動中は 60 秒ごとに RSS / VRAM を `soak_sample` として記録する (計測失敗はログのみで継続)。
+- ASR ワーカーのポート 8090 は設計書に定義が無い実装上の既定値 (要確認)。
+
+### ポートと話者の設定 (`idle_talk.toml`)
+
+- 各ポートは共通設定ファイル `idle_talk.toml` の `[ports]` で変更する。キーは `ws` (Director の WS)、`asr`、`llm`、`tts` で、既定値は上表と同じ。`config.load_ports` が読み、`main` / `asr_worker` / M0 計測が使う。
+- 優先順位は CLI 引数 (`--port` / `--*-url`)、設定ファイル、既定値の順。M0 計測では環境変数 `LLAMA_URL` / `AIVIS_URL` が設定ファイルより優先する。
+- 設定ファイルは起動時のカレントディレクトリから読む。リポジトリ直下以外で起動する場合は `--config <path>` で場所を指定する。ファイルが無ければ既定値で動く。
+- 未知のキーや、0〜65535 の整数でない値は起動時に `ValueError` になる。
+- ブラウザ (`web/index.html`) は設定ファイルを読まない。`ws` を変えたら `?port=` で同じ値を指定する。
+- llama-server と AivisSpeech は手動起動のため、`llm` / `tts` を変えたら各サーバ自体の待受ポートも合わせる。
+- 話者 ID は `[tts]` の `speaker` で指定する。AivisSpeech が声 (モデル) とスタイルの組ごとに振る整数で、`/audio_query` と `/cancellable_synthesis` の `speaker` パラメータに渡す。既定は 888753760 (`config.DEFAULT_SPEAKER`)。
+- 話者 ID の優先順位は `--speaker`、設定ファイル、既定値の順。M0 計測では環境変数 `AIVIS_SPEAKER` が設定ファイルより優先する。負数・非整数・`[tts]` の未知キーは `ValueError`。
+- 使える ID は AivisSpeech の `GET /speakers` で確認する。インストールされていない ID を指定すると、合成のたびに AivisSpeech がエラーを返す (起動時には検査しない)。
+
+## WebSocket プロトコル (設計書 §12.1)
+
+### 接続制御
+- バインドは 127.0.0.1 のみ (それ以外の指定は起動時に例外)。
+- Origin のホストが `localhost` / `127.0.0.1` / `::1` 以外なら close 4003。Origin 無しも拒否。
+- 接続は常に 1 本。新しい接続が来たら旧接続を close 4001 で閉じる (後勝ち)。2 回目以降の接続では epoch を +1 して `cancel` を送り、旧音声を無効化する。
+- `hello` の version が 1 以外、または hello がスキーマ違反なら close 4002。
+- サーバは `PING_INTERVAL`(5s) ごとに `ping` を送り、pong 未応答が 2 回続くと切断扱い (close 1001)。
+
+### テキストメッセージ
+JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は `error` 5006 を返して破棄する。
+
+| t | 方向 | 主なフィールド |
+|---|---|---|
+| `hello` | B→S | `version`(=1), `sample_rate`(=16000), `client_id`(1〜64 文字) |
+| `playback` | B→S | `epoch`, `utterance_id`, `chunk_id`, `position_ms`(0〜600000), `state`(started/finished/dropped) |
+| `ui` | B→S | `mute`, `on`, `freq_per_hour`(0〜12), `quiet_start` / `quiet_end`(HH:MM) |
+| `ping` / `pong` | 双方向 | `ts` |
+| `duck` | S→B | `epoch`, `gain`(0〜1) |
+| `cancel` | S→B | `new_epoch` |
+| `resume` | S→B | `epoch` |
+| `state` | S→B | `state`(状態名), `muted` |
+| `error` | S→B | `code`(4000〜5999), `message`(200 字以内) |
+
+- 現行 epoch と異なる `playback` は黙って破棄する。
+- `{"t":"text"}` はスキーマに無く、受信すると 5006 で拒否される。AI 発話の文字表示用メッセージは存在しない (要確認: 設計 §12.1 への追加要否)。
+
+### バイナリフレーム
+- 上り (B→S): 先頭 u32 LE 連番 + 16kHz mono s16le PCM。フレーム長 20〜40ms。1MiB 超・4 byte 未満は破棄。
+- 下り (S→B): 16 byte ヘッダ `<epoch, utterance_id, chunk_id, length>`(u32 LE ×4) + PCM。1 チャンク最大 1MiB。
+
+## エラーコード (設計書 §12.2)
+
+| コード | 種別 | 意味 |
+|---|---|---|
+| 4001 | WS close | 接続の置き換え (設計書の表では 4002 と意味欄が併記されている。要確認) |
+| 4002 | WS close | version 不一致 / 不正 hello |
+| 4003 | WS close | Origin 不許可 |
+| 5001 | error | LLM タイムアウト・停止 |
+| 5002 | error | TTS 失敗・タイムアウト |
+| 5003 | error | ASR 失敗 |
+| 5004 | error | DB 異常 |
+| 5005 | error | マイクデバイス喪失 |
+| 5006 | error | ui / playback の範囲外値、不正メッセージ |
+| exit 4 | プロセス | 二重起動 |
+
+## 状態機械 (設計書 §4)
+
+状態: `idle` / `user_speaking` / `eot_check` / `preparing` / `ai_playing` / `interrupt_check` / `rest`。遷移は副作用の無い純関数 `fsm.transition` で、Director がキューで直列に適用し、遷移ごとに `state` メッセージを 1 件送る。
+
+- `idle` → `user_speaking`: VAD 開始 (ミュート中は無視)。ASR を開始し、バックグラウンド処理を中断する。
+- `user_speaking` → `eot_check`: 区間長が `MIN_SEG`(200ms) 以上で VAD 終了。未満なら雑音として破棄し `idle` へ。
+- `eot_check` → `preparing`: 無音が `T_silence`(400ms) 以上かつ終話判定が真。ASR を確定し LLM を呼ぶ。途中で発話再開なら `user_speaking` へ戻る。
+- `preparing` → `ai_playing`: 現行 epoch の最初の合成可能な節が確定。生成中に利用者が話し始めたら生成を取り消す。
+- `ai_playing`: 利用者発話を検知すると、停止語なら即 cancel、それ以外は `duck`(gain `DUCK_GAIN`=0.2) して `interrupt_check` へ。再生完了で履歴を確定し `idle` へ。
+- `interrupt_check`: 確認窓の判定が相槌なら `resume` して `ai_playing` へ、それ以外は cancel して `user_speaking` へ。
+- 任意の状態 → `rest`: ミュート、無操作 `IDLE_TIMEOUT`(1800s)、連続失敗。生成・再生中なら epoch を +1 して cancel。`rest` からは wake で `idle` に戻る。
+
+## epoch と取消 (設計書 §3.2)
+
+- epoch は u32 の単調増加カウンタで、取消が確定したときだけ +1 する (U32 最大値の次は 0)。
+- 旧 epoch の音声チャンク・再生通知・完了通知はすべて破棄する。取消と完了が同時に起きても、旧 epoch の完了は履歴に確定しない。
+- 取消は LLM / ASR の完了を待たない。通常応答・相槌・自発発話の再生と取消は、同じ経路 (`ResponsePipeline.play_utterance` / `cancel`) だけを通る。
+
+## 割り込み判定 (設計書 §5.1)
+
+- 停止語 `STOP_WORDS`(待って / 違う / ちょっと / ストップ): NFKC 正規化後に一致するか、含んでいて長さが停止語 +2 文字以内なら停止語とみなす。duck を経ずに cancel する。
+- 相槌語 (うん / うんうん / へえ / ふーん / ええ / はい / なるほど / そう / そっか) が確認窓 `[開始, 開始 + T_confirm)`(T_confirm=400ms) の内側なら相槌として再生を再開する。
+- 疑問形 (末尾が ? / ？)、空、判断不能は相槌として扱わず、取り消したまま停止する。
+- 強い発話: 確認窓の終わりまで続くか、AI の平均音量の `STRONG_UTT.volume_ratio`(2.0) 倍以上。
+
+## 履歴 (設計書 §5.2)
+
+- AI 発話の履歴には、ブラウザが `finished` を返したチャンクの本文だけを確定する。
+- 割り込まれた発話は `completed=0` とし、停止位置 `stop_position_ms` を記録する。
+- LLM に渡す履歴は直近 `N_TURNS`(8) ターンで、切り詰めたときはログを 1 件残す。
+
+## 応答パイプライン (設計書 §3.3 / §4.3)
+
+- LLM はストリーミングで受け、句点・読点などで最初の合成可能な節が確定した時点で TTS に渡す。TTS は文単位で直列に合成する。
+- タイムアウト `HTTP_TIMEOUT`:
+  - LLM: 最初のトークン 5s、全体 20s → 5001。
+  - TTS: 1 文 3s → 5002。その文は飛ばして次の文へ続ける。
+  - ASR: 区間長 ×2 + 2s → 5003。その発話は破棄する。
+- LLM が停止したときは定型句に縮退する。llama-server は `LLM_RETRY` に従い、1s → 2s → 4s のバックオフで 600s 窓内に最大 3 回まで再起動する。4 回目は再起動せず `rest` を要求する。
+- AivisSpeech には `/audio_query` → `/cancellable_synthesis` の順で要求し、`/synthesis` は使わない。
+- ASR の幻聴除外: `no_speech_prob` > 0.6、または `compression_ratio` > 2.4 のセグメントは捨てる (境界値ちょうどは採用)。
+
+## 終話判定・相槌・自発発話
+
+- 終話判定: 既定は固定無音 (`FixedSilence`)。Smart Turn v3.2 相当のアダプタを差し替えられ、早切り件数で G4 を比べる。
+- AI 相槌 (§6.1):
+  - 内容に依存しない、事前合成したクリップを使う。
+  - 無音が `SIL_BACKCHANNEL`(300ms) 続いたら、1 発話につき最大 1 回再生し、間隔を `BC_COOLDOWN`(5s) 空ける。
+  - 無音が `T_silence` に達した時点で未完了なら取り消し、`backchannel_misfire` として記録する。
+  - 相槌は G1 の遅延集計から除外する。
+- 自発発話:
+  - 既定はオフで、雑談モードのときだけ動く。オンにすると `freq_per_hour` は 3。
+  - 休止時間帯 22:00〜07:00 は発話しない。
+  - 無反応が続くたびに待ち時間を 2 倍に延ばす。沈黙を同意とはみなさない。
+  - 準備中に利用者が話し始めたら取り消す。
+- 質問率 `RATIO_Q`: 3 応答に 1 回以下。
+
+## データモデル (SQLite, 設計書 §3.4)
+
+DB は `<data-dir>/idle_talk.db`。WAL / synchronous=NORMAL で、書き込みは専用スレッドで直列化する。
+
+| テーブル | 列 |
+|---|---|
+| `events` | id, ts, epoch, kind, payload_json |
+| `turns` | id, ts, role, text, completed(0/1), stop_position_ms, utterance_id |
+| `topic_cards` | id, hook, facts, source_url, published_at, expires_at, angle, used_at, user_reaction |
+| `memories` | id, content, evidence_utterance_id, updated_at, deletable |
+
+- 起動時に `integrity_check` を行う。正常なら `.bak` に 1 世代だけバックアップする。破損時は `.bak` から復元し、`.bak` が無ければ破損ファイルを `.corrupt` に退避して新規作成する (5004 を記録)。
+- 記憶は、根拠となる発話が無いと保存を拒否する。個別に削除できるのは `deletable=1` の行だけ。
+- 話題カードは RSS Topic Worker だけが取得する。停止中は一切ネットワークに接続しない。
+
+### events の kind
+| kind | payload | 用途 |
+|---|---|---|
+| `eot_wait` / `asr_done` / `llm_first_clause` / `tts_first` / `play_start` | `{turn, gpu1_load}` | 段階計測。1 ターン 5 行。G1 = play_start − eot_wait |
+| `playback` | `{epoch, utterance_id, chunk_id, state, position_ms}` | G3・履歴整合 (相槌クリップは除外) |
+| `cancel` | — | 割り込みによる取消 1 回につき 1 行 (`rest` への遷移による取消は含まない) |
+| `echo_chain` | — | 自声起因の応答連鎖 1 回につき 1 行 |
+| `g2_sample` | `{latency_ms}` | 発話開始 → duck / 停止開始 |
+| `soak_sample` | `{rss_mib, vram_mib}` | 常駐試験 |
+| `backchannel` / `backchannel_misfire` | — | 相槌の再生 / 誤発火 |
+| `spontaneous_fire` / `spontaneous_cancel` | — | 自発発話の発火 / 取消 |
+| `run_meta` | `{host, started_at, ended_at, app_commit, sample_count}` | 終了時に 1 行。記録の出所を検証するのに使う |
+
+- `echo_chain` の検出則: AI 再生中に始まった発話の ASR 結果から句読点と空白を除き、それが直近の AI 発話本文の部分文字列なら 1 件と数える。設計書に具体的な則が無いため最小の解釈で実装している。短い語の偶然一致による誤検出があり得る (要確認)。
+
+## 計測と合否判定 (設計書 §1.2 / §11.1)
+
+| ゲート | 判定 |
+|---|---|
+| G1 応答遅延 | 50 ターンで p50 ≤ 1200ms かつ p95 ≤ 2000ms。`gpu1_load=true` の標本は別集計 (E9: GPU1 負荷下で p50 ≤ 1200ms) |
+| G2 割り込み反応 | p95 ≤ 250ms |
+| G3 旧世代音声 | 旧 epoch の再生 0 件 |
+| 履歴整合 | turns と playback の照合で不整合 0 件 |
+| G5 常駐 | 8 時間・1 分ごと記録で RSS の回帰傾きが 1.0 MiB/h 以下 (`analyze_soak`) |
+| E10 / M5 | 20 分の記録で自声起因の応答連鎖 0 回、cancel 1 件以上 (`evaluate_echo_chain`) |
+
+- `validate_run_meta` は、run_meta の 5 キー、期間の下限、ts の単調性、`sample_count` と実際の行数の一致を検査し、不備があれば `ProvenanceError` を投げる。
+- 常駐試験の間隔検査 (`interval_ms=60000`) は、run_meta 以外の全行の隣接 ts 間隔にかかる。`soak_sample` の行だけではない。運用フェーズで確認する (README「運用フェーズでの確認事項」)。
+
+## 設定既定値 (`config.Config`, 設計書 §8.1)
+
+時間は特記なき限り ms。
+
+- 発話区間と割り込み: `T_silence`=400、`MIN_SEG`=200、`T_confirm`=400 (300〜500)、`OVERLAP_MAX`=300、`DUCK_GAIN`=0.2。
+- 相槌と自発発話: `SIL_BACKCHANNEL`=300 (250〜350 かつ `T_silence` 未満)、`BC_COOLDOWN`=5s、`freq_per_hour` 0〜12。
+- 通信と休止: `PING_INTERVAL`=5s、`IDLE_TIMEOUT`=1800s。
+- 遅延予算と試験: `VAR_SUM`=750、`G2_SUM`=130、`TTS_RATIO_MAX`=0.7、`TTS_GPU_THRESH`=300、`TEST_N`=20、`N_TURNS`=8、`DB_BACKUP`=1。
+- 範囲外の値は、`Config` を生成した時点で `ValueError` になる。
+
+## ブラウザ (web/)
+
+- `index.html` + `client.js`: WS の接続・再接続と state / error の表示。`?port=` で接続先ポートを指定できる (既定 8765)。`idle_talk.toml` の `ws` は自動では反映されない。
+- `worklet.js`: AudioWorklet で 16kHz mono s16le の 20ms フレームに区切り、u32 の連番を付ける。実レートが 16kHz でなければ変換する。
+- `player.js`: epoch ごとの再生、`duck` / `cancel` / `resume` の処理、`playback` の通知。旧 epoch のチャンクは再生しない。
+- `capture_check.html` / `capture_check.js`: 取り込みの実現性 C1〜C4 (echoCancellation 制約、フレームの配信、連番の連続性、フレーム長) を判定し、結果 JSON を保存する。
+- `aec_probe.js`: `getUserMedia({echoCancellation:true})` を使う AEC の実測プローブ。
+- 画面の静的配信の仕組みは無い。`index.html` はファイルとして直接開く。
+
+## テスト
+
+- 既定: `pytest`(`-m 'not integration'`)と `node --test web/tests/*.test.js`。実サービスは不要。
+- 実機: `pytest -m integration` と `web/tests/capture_record_live.js`。運用フェーズで実施する (手順と合格条件は README)。実機テストは skip を使わず、前提が欠けていれば失敗する。

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
-from .config import Config
+from .config import SETTINGS_FILE, Config, load_ports, load_speaker
 from .director import IdleTalkDirector
 from .metrics import MetricsRecorder
 from .portlock import acquire_or_exit
@@ -48,7 +48,7 @@ def git_commit() -> str:
 def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> IdleTalkDirector:
     store = Store(data_dir / "idle_talk.db", bool(cfg.DB_BACKUP))
     llm = LlmClient(args.llm_url, cfg)
-    tts = TtsClient(args.tts_url, config=cfg)
+    tts = TtsClient(args.tts_url, args.speaker, cfg)
     asr = AsrClient(_asr_send(args.asr_url), cfg)
     return IdleTalkDirector(store, llm.stream_chat, tts.synthesize, lambda: None, EnergyVad(), asr, cfg,
                             metrics=MetricsRecorder(store), app_commit=git_commit())
@@ -82,13 +82,21 @@ async def _run(director: IdleTalkDirector, port: int) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="idle-talk")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--config", default=SETTINGS_FILE)
+    p.add_argument("--port", type=int, default=None)
     p.add_argument("--data-dir", default="data")
     p.add_argument("--pid-file", default=None)
-    p.add_argument("--llm-url", default="http://127.0.0.1:8080")
-    p.add_argument("--tts-url", default="http://127.0.0.1:10101")
-    p.add_argument("--asr-url", default="http://127.0.0.1:8090")
+    p.add_argument("--llm-url", default=None)
+    p.add_argument("--tts-url", default=None)
+    p.add_argument("--asr-url", default=None)
+    p.add_argument("--speaker", type=int, default=None)
     args = p.parse_args(argv)
+    ports = load_ports(args.config)  # CLI 指定が設定ファイルより優先
+    args.port = ports.ws if args.port is None else args.port
+    args.llm_url = args.llm_url or f"http://127.0.0.1:{ports.llm}"
+    args.tts_url = args.tts_url or f"http://127.0.0.1:{ports.tts}"
+    args.asr_url = args.asr_url or f"http://127.0.0.1:{ports.asr}"
+    args.speaker = load_speaker(args.config) if args.speaker is None else args.speaker
     data_dir = Path(args.data_dir)
     lock = acquire_or_exit(args.pid_file or data_dir / "idle_talk.pid")  # 二重起動は SystemExit(4)
     director = None

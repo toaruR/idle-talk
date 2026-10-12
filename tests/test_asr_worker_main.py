@@ -79,3 +79,15 @@ def test_missing_faster_whisper_exits_nonzero_with_message(monkeypatch, capsys):
     rc = asr_worker.main(["--port", "0"], run=lambda s: (_ for _ in ()).throw(AssertionError("served")))
     assert rc != 0
     assert "faster_whisper is not installed" in capsys.readouterr().err
+
+
+def test_port_from_settings_file_and_cli_override(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(asr_worker, "make_server",
+                        lambda tr, host, port: seen.append(port) or SimpleNamespace(server_close=lambda: None))
+    f = tmp_path / "s.toml"
+    f.write_text("[ports]\nasr = 9191\n", encoding="utf-8")
+    assert asr_worker.main(["--config", str(f)], load_model=lambda: object(), run=lambda s: None) == 0
+    assert asr_worker.main(["--config", str(f), "--port", "9292"], load_model=lambda: object(),
+                           run=lambda s: None) == 0
+    assert seen == [9191, 9292]

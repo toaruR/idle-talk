@@ -174,3 +174,49 @@ def test_pytest_config():
     cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
     assert any(m.startswith("integration:") for m in cfg["markers"])
     assert cfg["addopts"] == "-m 'not integration' --strict-markers"
+
+
+def test_load_ports_defaults_when_missing(tmp_path):
+    from idle_talk.config import Ports, load_ports
+    assert load_ports(tmp_path / "none.toml") == Ports() == (8765, 8090, 8080, 10101)
+
+
+def test_load_ports_partial_override(tmp_path):
+    from idle_talk.config import load_ports
+    f = tmp_path / "s.toml"
+    f.write_text("[ports]\nws = 9000\ntts = 50021\n", encoding="utf-8")
+    assert load_ports(f)._asdict() == {"ws": 9000, "asr": 8090, "llm": 8080, "tts": 50021}
+
+
+@pytest.mark.parametrize("body", ["[ports]\nwss = 1\n", "[ports]\nws = \"1\"\n", "[ports]\nws = 70000\n",
+                                  "[ports]\nws = true\n"])
+def test_load_ports_rejects_invalid(tmp_path, body):
+    from idle_talk.config import load_ports
+    f = tmp_path / "s.toml"
+    f.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_ports(f)
+
+
+def test_repo_settings_file_is_valid():
+    from idle_talk.config import DEFAULT_SPEAKER, SETTINGS_FILE, load_ports, load_speaker
+    assert DEFAULT_SPEAKER == 888753760
+    load_ports(ROOT / SETTINGS_FILE)  # 利用者が値を変えてもよいので、読めることだけ確認
+    load_speaker(ROOT / SETTINGS_FILE)
+
+
+def test_load_speaker(tmp_path):
+    from idle_talk.config import DEFAULT_SPEAKER, load_speaker
+    f = tmp_path / "s.toml"
+    assert load_speaker(f) == DEFAULT_SPEAKER
+    f.write_text("[tts]\nspeaker = 1234\n", encoding="utf-8")
+    assert load_speaker(f) == 1234
+
+
+@pytest.mark.parametrize("body", ["[tts]\nspeeker = 1\n", "[tts]\nspeaker = \"1\"\n", "[tts]\nspeaker = -1\n"])
+def test_load_speaker_rejects_invalid(tmp_path, body):
+    from idle_talk.config import load_speaker
+    f = tmp_path / "s.toml"
+    f.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_speaker(f)

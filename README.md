@@ -13,11 +13,11 @@
 ```
 python -m idle_talk.asr_worker [--port 8090]   # 127.0.0.1 固定。モデルは起動時に1回ロード
 python -m idle_talk.main [--port 8765] [--data-dir data] [--pid-file P] \
-    [--llm-url ...] [--tts-url ...] [--asr-url http://127.0.0.1:8090]
+    [--llm-url ...] [--tts-url ...] [--asr-url http://127.0.0.1:8090] [--speaker ID]
 ```
 ブラウザで `web/index.html` を開く (`?port=` で WS ポート指定、既定 8765)。二重起動は exit 4。DB は `data/idle_talk.db`。
 
-環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER`(既定 888753760) は `m0_bench` と `-m integration` の試験が参照する。`main` 本体は上記 `--*-url` 引数を使い環境変数は読まない。
+環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER`(既定 888753760) は `m0_bench` と `-m integration` の試験が参照する (`m0_bench` は未設定時に `idle_talk.toml` の値を使う)。`main` 本体は上記の引数と設定ファイルを使い環境変数は読まない。
 
 ## テスト
 - 既定: `pytest` (addopts `-m 'not integration'`。実サービス不要)

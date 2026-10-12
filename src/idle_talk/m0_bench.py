@@ -15,7 +15,7 @@ import wave
 from collections.abc import Callable
 
 from .clients import LlmClient, TtsClient
-from .config import Config
+from .config import Config, load_ports, load_speaker
 
 GIB = 1024 ** 3
 LLM_VRAM_MAX_GIB = 9.0  # §1.4 LLM は GPU0 で 9GiB 以内
@@ -118,9 +118,10 @@ def run_m0(llm_url: str | None = None, aivis_url: str | None = None, speaker: in
            clock: Callable[[], float] = time.monotonic) -> dict:
     """実サービスに対し M0 測定を実行し測定値 dict を返す。接続不能は例外 (失敗)。"""
     cfg = cfg or Config()
-    llm_url = llm_url or os.environ.get("LLAMA_URL", "http://127.0.0.1:8080")
-    aivis_url = aivis_url or os.environ.get("AIVIS_URL", "http://127.0.0.1:10101")
-    speaker = speaker if speaker is not None else int(os.environ.get("AIVIS_SPEAKER", "888753760"))
+    ports = load_ports()
+    llm_url = llm_url or os.environ.get("LLAMA_URL", f"http://127.0.0.1:{ports.llm}")
+    aivis_url = aivis_url or os.environ.get("AIVIS_URL", f"http://127.0.0.1:{ports.tts}")
+    speaker = speaker if speaker is not None else int(os.environ.get("AIVIS_SPEAKER", load_speaker()))
     llm = llm or LlmClient(llm_url, cfg)
     tts = tts or TtsClient(aivis_url, speaker, cfg)
     if transcribe is None:

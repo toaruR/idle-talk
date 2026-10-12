@@ -10,7 +10,7 @@ from multiprocessing import shared_memory
 
 from jsonschema import Draft7Validator
 
-from .config import Config
+from .config import SETTINGS_FILE, Config, load_ports
 from .errors import ERR_ASR_FAILED
 
 ASR_REQ_SCHEMA = {"type":"object","required":["utterance_id","pcm_ref","lang"],"additionalProperties":False,"properties":{"utterance_id":{"type":"integer","minimum":0,"maximum":4294967295},"pcm_ref":{"type":"string","minLength":1},"lang":{"const":"ja"}}}
@@ -94,15 +94,17 @@ def main(argv: list[str] | None = None, load_model: Callable[[], object] = load_
          run: Callable[[HTTPServer], None] | None = None) -> int:
     """python -m idle_talk.asr_worker。モデルは起動時に 1 回だけ読み込む。"""
     p = argparse.ArgumentParser(prog="idle-talk-asr")
-    p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--config", default=SETTINGS_FILE)
+    p.add_argument("--port", type=int, default=None)
     args = p.parse_args(argv)
+    port = load_ports(args.config).asr if args.port is None else args.port
     try:
         model = load_model()
     except ImportError as e:
         print(f"asr_worker: faster_whisper is not installed ({e}); pip install faster-whisper",
               file=sys.stderr)
         return 2
-    server = make_server(make_transcribe(model), "127.0.0.1", args.port)
+    server = make_server(make_transcribe(model), "127.0.0.1", port)
     try:
         (run or (lambda s: s.serve_forever()))(server)
     except KeyboardInterrupt:

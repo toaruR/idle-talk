@@ -1,8 +1,12 @@
 """Options (設計書 8.1 既定値表)。時間は特記なき限り ms。"""
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NamedTuple
+
+SETTINGS_FILE = "idle_talk.toml"
 
 
 class LlmRetry(NamedTuple):
@@ -87,3 +91,44 @@ class Config:
             raise ValueError(f"freq_per_hour must be in [0, 12]: {self.freq_per_hour}")
         if not (_hhmm_ok(self.quiet_start) and _hhmm_ok(self.quiet_end)):
             raise ValueError("quiet_start/quiet_end must be HH:MM")
+
+
+class Ports(NamedTuple):
+    """サーバ/接続先ポート。共通設定ファイル (idle_talk.toml の [ports]) で上書きする。"""
+    ws: int = 8765
+    asr: int = 8090
+    llm: int = 8080
+    tts: int = 10101
+
+
+DEFAULT_SPEAKER = 888753760  # AivisSpeech の話者 (スタイル) ID
+
+
+def _read_section(path: str | Path, section: str, keys: tuple[str, ...]) -> dict:
+    """設定ファイルの [section] を読む。ファイルが無ければ空。未知キーは ValueError。"""
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    with p.open("rb") as f:
+        raw = tomllib.load(f).get(section, {})
+    unknown = set(raw) - set(keys)
+    if unknown:
+        raise ValueError(f"unknown [{section}] keys in {p}: {sorted(unknown)}")
+    return raw
+
+
+def load_ports(path: str | Path = SETTINGS_FILE) -> Ports:
+    """[ports] を読む。ファイルが無ければ既定値。未知キー・非整数は ValueError。"""
+    raw = _read_section(path, "ports", Ports._fields)
+    for k, v in raw.items():
+        if type(v) is not int or not 0 <= v <= 65535:
+            raise ValueError(f"[ports].{k} must be an int in [0, 65535]: {v!r}")
+    return Ports(**raw)
+
+
+def load_speaker(path: str | Path = SETTINGS_FILE) -> int:
+    """[tts].speaker を読む。無ければ DEFAULT_SPEAKER。非整数・負数は ValueError。"""
+    v = _read_section(path, "tts", ("speaker",)).get("speaker", DEFAULT_SPEAKER)
+    if type(v) is not int or v < 0:
+        raise ValueError(f"[tts].speaker must be a non-negative int: {v!r}")
+    return v

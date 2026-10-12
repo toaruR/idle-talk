@@ -113,3 +113,25 @@ def test_wav_to_pcm():
     wav = b"RIFF" + b"\0\0\0\0" + b"WAVE" + b"fmt " + (4).to_bytes(4, "little") + b"abcd" + b"data" + (2).to_bytes(4, "little") + b"xy"
     assert wav_to_pcm(wav) == b"xy"
     assert wav_to_pcm(b"RIFF....WAVE") == b"RIFF....WAVE"
+
+
+def test_main_ports_from_settings_file(monkeypatch, tmp_path):
+    from idle_talk import main as main_mod
+    seen = {}
+
+    class D:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
+    monkeypatch.setattr(main_mod, "_run", lambda director, port: seen.update(run_port=port) or asyncio.sleep(0))
+    f = tmp_path / "s.toml"
+    f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\n[tts]\nspeaker = 42\n", encoding="utf-8")
+    base = ["--config", str(f), "--data-dir", str(tmp_path), "--pid-file", str(tmp_path / "p.pid")]
+    assert main_mod.main(base) == 0
+    assert seen["run_port"] == 9000
+    assert (seen["llm_url"], seen["tts_url"], seen["asr_url"]) == (
+        "http://127.0.0.1:9001", "http://127.0.0.1:9002", "http://127.0.0.1:9003")
+    assert seen["speaker"] == 42
+    assert main_mod.main(base + ["--port", "7000", "--llm-url", "http://h:1", "--speaker", "7"]) == 0
+    assert seen["run_port"] == 7000 and seen["llm_url"] == "http://h:1" and seen["speaker"] == 7

@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable, Iterator
 from jsonschema import Draft7Validator
 
 from .asr_worker import ASR_REQ_SCHEMA, ASR_RES_SCHEMA, is_hallucination
-from .config import Config
+from .config import DEFAULT_SPEAKER, Config
 from .errors import ERR_ASR_FAILED, ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 
 LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":True},"max_tokens":{"const":120}}}
@@ -137,7 +137,7 @@ class LlmClient:
 # ---------------- TTS ----------------
 
 class TtsClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:10101", speaker: int = 888753760,
+    def __init__(self, base_url: str = "http://127.0.0.1:10101", speaker: int = DEFAULT_SPEAKER,
                  config: Config | None = None, clock: Callable[[], float] = time.monotonic,
                  post: Callable[[str, bytes | None, float], bytes] = _http_post):
         self.base_url = base_url.rstrip("/")
