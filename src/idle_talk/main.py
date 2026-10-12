@@ -31,6 +31,9 @@ log = logging.getLogger("idle_talk.main")
 
 LLM_READY_TIMEOUT_S = 120  # 起動時のモデル読込待ち上限 (4B Q4 の実測は約 5s)
 SPONT_TICK_S = 1.0  # 自発発話の判定周期 (沈黙秒数の分解能)
+STOP_POLL_S = 0.5  # 停止ファイル (ctl stop) の確認周期
+PID_FILE = "idle_talk.pid"  # data_dir 直下。二重起動検査と ctl の停止対象
+STOP_FILE = "idle_talk.stop"  # data_dir 直下。置かれたら正常終了する (ctl stop)
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"  # src レイアウト前提 (リポジトリ直下の web/)
 
 
@@ -190,19 +193,37 @@ async def spontaneous_loop(director: IdleTalkDirector, interval_s: float = SPONT
         director.spontaneous_tick()
 
 
-async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None = None) -> None:
+async def stop_watch(path: Path, stop: Callable[[], None], interval_s: float = STOP_POLL_S,
+                     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    """path が現れたら削除して stop を呼ぶ (ctl stop からの正常終了要求)。キャンセルで終了。"""
+    while True:
+        await sleep(interval_s)
+        if path.exists():
+            path.unlink(missing_ok=True)
+            log.info("stop requested: %s", path)
+            stop()
+            return
+
+
+async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None = None,
+               stop_file: Path | None = None) -> None:
     server, pinger = await serve(director.core, port)
     log.info("listening on 127.0.0.1:%d", port)
     sampler = ResourceSampler(director.store, clock=director.now_ms)
     loop = asyncio.get_running_loop()
+    stopped = asyncio.Event()
     tasks = [pinger, loop.create_task(soak_loop(sampler)), loop.create_task(spontaneous_loop(director))]
     if sup is not None:
         tasks.append(loop.create_task(llm_watch(director, sup)))
+    if stop_file is not None:
+        tasks.append(loop.create_task(stop_watch(stop_file, stopped.set)))
     try:
-        await server.serve_forever()
+        await stopped.wait()  # Ctrl+C はキャンセルで抜ける
     finally:
         for t in tasks:
             t.cancel()
+        server.close()
+        await server.wait_closed()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -226,14 +247,16 @@ def main(argv: list[str] | None = None) -> int:
     args.speaker_from_cli = args.speaker is not None
     args.speaker = load_speaker(args.config) if args.speaker is None else args.speaker
     data_dir = Path(args.data_dir)
-    lock = acquire_or_exit(args.pid_file or data_dir / "idle_talk.pid")  # 二重起動は SystemExit(4)
+    lock = acquire_or_exit(args.pid_file or data_dir / PID_FILE)  # 二重起動は SystemExit(4)
+    stop_file = data_dir / STOP_FILE
+    stop_file.unlink(missing_ok=True)  # 前回の停止要求の残りで即終了しない
     director = sup = web = None
     try:
         cfg = Config(**load_spontaneous(args.config))
         web = start_web(args.web_port, args.port, ui_defaults(cfg))
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
-        asyncio.run(_run(director, args.port, sup))
+        asyncio.run(_run(director, args.port, sup, stop_file))
     except KeyboardInterrupt:
         pass
     finally:

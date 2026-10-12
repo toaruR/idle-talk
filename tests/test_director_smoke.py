@@ -125,7 +125,7 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
-    monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None: seen.update(run_port=port) or asyncio.sleep(0))
+    monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None, stop_file=None: seen.update(run_port=port) or asyncio.sleep(0))
     monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui: seen.update(web=(port, ws_port), ui=ui))
     f = tmp_path / "s.toml"
     f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\nweb = 9004\n"

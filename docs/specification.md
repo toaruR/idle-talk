@@ -27,7 +27,9 @@
 | llama-server | `[llm].model` 設定時は Director が起動・監督、未設定なら手動 | 8080 | 起動引数は `llm_supervisor.build_llama_argv`(`--jinja` + `enable_thinking=false` で思考無効) |
 | AivisSpeech | 手動 | 10101 | 話者 ID 既定 888753760 (`idle_talk.toml` の `[tts].speaker` / `--speaker`) |
 
-- 二重起動は pid ロックで検出し exit 4。
+- 二重起動は pid ロックで検出し exit 4。`asr_worker` も `--pid-file` 指定時は同じ検査をする。
+- `python -m idle_talk.ctl start|stop|restart|status` (Windows は `idle-talk.cmd`) が ASR ワーカーと Director を端末から切り離して起動する。PID ファイル (`data/idle_talk.pid` / `data/asr_worker.pid`) の生存確認で二重起動を拒否し (exit 4)、出力は `data/idle_talk.log` / `data/asr_worker.log` に追記する。
+- 停止: `ctl stop` が `data/idle_talk.stop` を置き、Director は `main.stop_watch` (0.5 秒周期) で検知して Ctrl+C と同じ終了処理をする。`ctl.STOP_TIMEOUT_S`=20 秒以内に終わらなければ強制終了する (このとき llama-server が残ることがある)。ASR ワーカーは即時に強制終了する。Director は起動時に残っていた停止ファイルを消す。
 - `main` は CLI 引数と `idle_talk.toml` のみを使い、環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER` は M0 計測と実機試験だけが読む。
 - 終了時 (Ctrl+C) に `director.close()` が `run_meta` を 1 行書いてからストアを閉じる。
 - 起動中は 60 秒ごとに RSS / VRAM を `soak_sample` として記録する (計測失敗はログのみで継続)。

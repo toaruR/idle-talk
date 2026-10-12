@@ -10,6 +10,16 @@
 - 実機試験のみ psutil
 
 ## 起動
+ラッパー (asr_worker と main をバックグラウンドで起動・停止):
+```
+idle-talk start     # 二重起動なら exit 4。出力は data/idle_talk.log, data/asr_worker.log
+idle-talk stop      # main は正常終了 (run_meta 記録・llama-server 停止) を待ち、20 秒で強制終了
+idle-talk restart
+idle-talk status    # 停止中は exit 3
+```
+`idle-talk.cmd` は Windows 用 (`python -m idle_talk.ctl ...` と同じ。`--data-dir` / `--config` 可)。停止は `data/idle_talk.stop` を置いて main に知らせる。
+
+個別に起動する場合:
 ```
 python -m idle_talk.asr_worker [--port 8090]   # 127.0.0.1 固定。モデルは起動時に1回ロード
 python -m idle_talk.main [--port 8765] [--web-port 8000] [--data-dir data] [--pid-file P] \
