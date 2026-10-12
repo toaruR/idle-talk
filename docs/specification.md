@@ -22,7 +22,7 @@
 
 | プロセス | 起動 | 既定ポート | 備考 |
 |---|---|---|---|
-| Director | `python -m idle_talk.main` | WS 8765 | `--data-dir`(既定 `data`)、`--pid-file`、`--llm-url` / `--tts-url` / `--asr-url` |
+| Director | `python -m idle_talk.main` | WS 8765 / Web 8000 | `--web-port`、`--data-dir`(既定 `data`)、`--pid-file`、`--llm-url` / `--tts-url` / `--asr-url` |
 | ASR ワーカー | `python -m idle_talk.asr_worker` | 8090 (`--port`) | 127.0.0.1 固定。faster-whisper `small` を CUDA/float16 で起動時に 1 回ロード。未導入なら exit 2 |
 | llama-server | `[llm].model` 設定時は Director が起動・監督、未設定なら手動 | 8080 | 起動引数は `llm_supervisor.build_llama_argv`(`--jinja` + `enable_thinking=false` で思考無効) |
 | AivisSpeech | 手動 | 10101 | 話者 ID 既定 888753760 (`idle_talk.toml` の `[tts].speaker` / `--speaker`) |
@@ -35,11 +35,11 @@
 
 ### ポートと話者の設定 (`idle_talk.toml`)
 
-- 各ポートは共通設定ファイル `idle_talk.toml` の `[ports]` で変更する。キーは `ws` (Director の WS)、`asr`、`llm`、`tts` で、既定値は上表と同じ。`config.load_ports` が読み、`main` / `asr_worker` / M0 計測が使う。
-- 優先順位は CLI 引数 (`--port` / `--*-url`)、設定ファイル、既定値の順。M0 計測では環境変数 `LLAMA_URL` / `AIVIS_URL` が設定ファイルより優先する。
+- 各ポートは共通設定ファイル `idle_talk.toml` の `[ports]` で変更する。キーは `ws` (Director の WS)、`asr`、`llm`、`tts`、`web` (`web/` の静的配信) で、既定値は上表と同じ。`config.load_ports` が読み、`main` / `asr_worker` / M0 計測が使う。
+- 優先順位は CLI 引数 (`--port` / `--web-port` / `--*-url`)、設定ファイル、既定値の順。M0 計測では環境変数 `LLAMA_URL` / `AIVIS_URL` が設定ファイルより優先する。
 - 設定ファイルは起動時のカレントディレクトリから読む。リポジトリ直下以外で起動する場合は `--config <path>` で場所を指定する。ファイルが無ければ既定値で動く。
 - 未知のキーや、0〜65535 の整数でない値は起動時に `ValueError` になる。
-- ブラウザ (`web/index.html`) は設定ファイルを読まない。`ws` を変えたら `?port=` で同じ値を指定する。
+- `main` は `[ports].web` で `web/` を 127.0.0.1 に配信し (`main.start_web`、標準ライブラリ `http.server`)、`/config.json` で `{"ws_port": <ws>}` を返す。`index.html` はこれを読んで接続するため、ポート番号を持たない。`?port=` 指定があればそちらを使う。
 - AivisSpeech と、監督しない llama-server は手動起動のため、`llm` / `tts` を変えたら各サーバ自体の待受ポートも合わせる。Director が起動する llama-server には `[ports].llm` (または `--llm-url` のポート) が渡される。
 - 話者 ID は `[tts]` の `speaker` で指定する。AivisSpeech が声 (モデル) とスタイルの組ごとに振る整数で、`/audio_query` と `/synthesis` の `speaker` パラメータに渡す。既定は 888753760 (`config.DEFAULT_SPEAKER`)。
 - 話者 ID の優先順位は `--speaker`、設定ファイル、既定値の順。M0 計測では環境変数 `AIVIS_SPEAKER` が設定ファイルより優先する。負数・非整数・`[tts]` の未知キーは `ValueError`。
@@ -209,7 +209,7 @@ DB は `<data-dir>/idle_talk.db`。WAL / synchronous=NORMAL で、書き込み�
 
 ## ブラウザ (web/)
 
-- `index.html` + `client.js`: WS の接続・再接続と state / error の表示。`?port=` で接続先ポートを指定できる (既定 8765)。`idle_talk.toml` の `ws` は自動では反映されない。
+- `index.html` + `client.js`: WS の接続・再接続と state / error の表示。接続先ポートは `?port=`、無ければ配信元の `/config.json` の `ws_port`。
 - `worklet.js`: AudioWorklet で 16kHz mono s16le の 20ms フレームに区切り、u32 の連番を付ける。実レートが 16kHz でなければ変換する。
 - `player.js`: epoch ごとの再生、`duck` / `cancel` / `resume` の処理、`playback` の通知。旧 epoch のチャンクは再生しない。
 - `capture_check.html` / `capture_check.js`: 取り込みの実現性 C1〜C4 (echoCancellation 制約、フレームの配信、連番の連続性、フレーム長) を判定し、結果 JSON を保存する。

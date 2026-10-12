@@ -1,5 +1,6 @@
 """Director 結線の結合試験 (模擬ブラウザ + 模擬 LLM/TTS/ASR)。"""
 import asyncio
+import json
 import os
 import threading
 
@@ -70,7 +71,7 @@ def test_state_names(tmp_path):
             await until(lambda: ai_rows(store, 1))
             states = b.of("state")
             assert [s["state"] for s in states] == [
-                "user_speaking", "eot_check", "preparing", "ai_playing", "idle"]
+                "idle", "user_speaking", "eot_check", "preparing", "ai_playing", "idle"]
             assert all(s["state"] in STATE_ENUM and validate_message(s) for s in states)
         finally:
             store.close()
@@ -125,16 +126,38 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
     monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None: seen.update(run_port=port) or asyncio.sleep(0))
+    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port: seen.update(web=(port, ws_port)))
     f = tmp_path / "s.toml"
-    f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\n[tts]\nspeaker = 42\n", encoding="utf-8")
+    f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\nweb = 9004\n[tts]\nspeaker = 42\n", encoding="utf-8")
     base = ["--config", str(f), "--data-dir", str(tmp_path), "--pid-file", str(tmp_path / "p.pid")]
     assert main_mod.main(base) == 0
     assert seen["run_port"] == 9000
     assert (seen["llm_url"], seen["tts_url"], seen["asr_url"]) == (
         "http://127.0.0.1:9001", "http://127.0.0.1:9002", "http://127.0.0.1:9003")
     assert seen["speaker"] == 42
+    assert seen["web"] == (9004, 9000)
     assert main_mod.main(base + ["--port", "7000", "--llm-url", "http://h:1", "--speaker", "7"]) == 0
     assert seen["run_port"] == 7000 and seen["llm_url"] == "http://h:1" and seen["speaker"] == 7
+    assert main_mod.main(base + ["--web-port", "7001"]) == 0
+    assert seen["web"] == (7001, 9000)
+
+
+def test_start_web_serves_dir_and_ws_port(tmp_path):
+    import http.client
+    from idle_talk.main import start_web
+    (tmp_path / "index.html").write_text("hi", encoding="utf-8")
+    httpd = start_web(0, 9123, root=tmp_path)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        c.request("GET", "/config.json")
+        r = c.getresponse()
+        assert (r.status, json.loads(r.read())) == (200, {"ws_port": 9123})
+        c.request("GET", "/")
+        r = c.getresponse()
+        assert (r.status, r.read(), r.getheader("Cache-Control")) == (200, b"hi", "no-cache")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_request_rest_moves_to_rest_and_notifies(tmp_path):
@@ -144,5 +167,13 @@ def test_request_rest_moves_to_rest_and_notifies(tmp_path):
         d.request_rest()  # LLM_RETRY 超過時に main.llm_watch から呼ばれる
         assert d.fsm.ctx.state is State.REST
         assert any(m.get("t") == "state" and m.get("state") == "rest" for m in b.texts)
+    finally:
+        store.close()
+
+
+def test_hello_gets_current_state(tmp_path):
+    d, b, store = make(tmp_path)  # make() が attach (hello 送信) 済み
+    try:
+        assert b.of("state") == [{"t": "state", "state": "idle", "muted": False}]
     finally:
         store.close()

@@ -178,14 +178,14 @@ def test_pytest_config():
 
 def test_load_ports_defaults_when_missing(tmp_path):
     from idle_talk.config import Ports, load_ports
-    assert load_ports(tmp_path / "none.toml") == Ports() == (8765, 8090, 8080, 10101)
+    assert load_ports(tmp_path / "none.toml") == Ports() == (8765, 8090, 8080, 10101, 8000)
 
 
 def test_load_ports_partial_override(tmp_path):
     from idle_talk.config import load_ports
     f = tmp_path / "s.toml"
     f.write_text("[ports]\nws = 9000\ntts = 50021\n", encoding="utf-8")
-    assert load_ports(f)._asdict() == {"ws": 9000, "asr": 8090, "llm": 8080, "tts": 50021}
+    assert load_ports(f)._asdict() == {"ws": 9000, "asr": 8090, "llm": 8080, "tts": 50021, "web": 8000}
 
 
 @pytest.mark.parametrize("body", ["[ports]\nwss = 1\n", "[ports]\nws = \"1\"\n", "[ports]\nws = 70000\n",

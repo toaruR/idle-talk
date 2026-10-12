@@ -60,7 +60,8 @@ class WsCore:
                  clock: Callable[[], float] = time.monotonic, host: str = BIND_HOST,
                  on_audio: Callable[[int, bytes], None] | None = None,
                  on_playback: Callable[[dict], None] | None = None,
-                 on_ui: Callable[[dict], None] | None = None) -> None:
+                 on_ui: Callable[[dict], None] | None = None,
+                 on_hello: Callable[[], None] | None = None) -> None:
         self.host = check_bind_host(host)
         self.cfg = cfg or Config()
         self.epoch = epoch or Epoch()
@@ -68,6 +69,7 @@ class WsCore:
         self.on_audio = on_audio
         self.on_playback = on_playback
         self.on_ui = on_ui
+        self.on_hello = on_hello
         self.settings: dict = {"mute": False, "on": False,
                                "freq_per_hour": self.cfg.freq_per_hour,
                                "quiet_start": self.cfg.quiet_start,
@@ -157,6 +159,8 @@ class WsCore:
                 conn.close(CLOSE_VERSION_MISMATCH)
                 return
             self.hello_done = True
+            if self.on_hello:  # 接続直後に現在の状態を知らせる (状態遷移が起きるまで表示が「未接続」のままになるため)
+                self.on_hello()
         elif t == "pong":
             self._unanswered = False
             self._missed = 0

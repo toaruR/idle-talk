@@ -7,9 +7,11 @@ import json
 import logging
 import sqlite3
 import subprocess
+import threading
 import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
@@ -26,6 +28,7 @@ from .vad import EnergyVad
 log = logging.getLogger("idle_talk.main")
 
 LLM_READY_TIMEOUT_S = 120  # 起動時のモデル読込待ち上限 (4B Q4 の実測は約 5s)
+WEB_DIR = Path(__file__).resolve().parents[2] / "web"  # src レイアウト前提 (リポジトリ直下の web/)
 
 
 def _asr_send(url: str):
@@ -58,6 +61,39 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     asr = AsrClient(_asr_send(args.asr_url), cfg)
     return IdleTalkDirector(store, llm.stream_chat, tts.synthesize, lambda: None, EnergyVad(), asr, cfg,
                             metrics=MetricsRecorder(store), app_commit=git_commit())
+
+
+def start_web(port: int, ws_port: int, root: Path = WEB_DIR) -> ThreadingHTTPServer:
+    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポートをブラウザへ渡す。
+
+    file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
+    config = json.dumps({"ws_port": ws_port}).encode("utf-8")
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(root), **kw)
+
+        def do_GET(self):
+            if self.path == "/config.json":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(config)))
+                self.end_headers()
+                self.wfile.write(config)
+                return
+            super().do_GET()
+
+        def end_headers(self):  # 毎回再検証させる (JS 更新後に古いキャッシュで動かないように)
+            self.send_header("Cache-Control", "no-cache")
+            super().end_headers()
+
+        def log_message(self, format, *args):  # アクセスログは出さない
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=httpd.serve_forever, name="web", daemon=True).start()
+    log.info("web ui: http://127.0.0.1:%d/", httpd.server_address[1])
+    return httpd
 
 
 def start_llm(args: argparse.Namespace, data_dir: Path, cfg: Config) -> LlmSupervisor | None:
@@ -117,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="idle-talk")
     p.add_argument("--config", default=SETTINGS_FILE)
     p.add_argument("--port", type=int, default=None)
+    p.add_argument("--web-port", type=int, default=None)
     p.add_argument("--data-dir", default="data")
     p.add_argument("--pid-file", default=None)
     p.add_argument("--llm-url", default=None)
@@ -126,14 +163,16 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     ports = load_ports(args.config)  # CLI 指定が設定ファイルより優先
     args.port = ports.ws if args.port is None else args.port
+    args.web_port = ports.web if args.web_port is None else args.web_port
     args.llm_url = args.llm_url or f"http://127.0.0.1:{ports.llm}"
     args.tts_url = args.tts_url or f"http://127.0.0.1:{ports.tts}"
     args.asr_url = args.asr_url or f"http://127.0.0.1:{ports.asr}"
     args.speaker = load_speaker(args.config) if args.speaker is None else args.speaker
     data_dir = Path(args.data_dir)
     lock = acquire_or_exit(args.pid_file or data_dir / "idle_talk.pid")  # 二重起動は SystemExit(4)
-    director = sup = None
+    director = sup = web = None
     try:
+        web = start_web(args.web_port, args.port)
         cfg = Config()
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
@@ -145,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
             director.close()
         if sup is not None:
             sup.stop()
+        if web is not None:
+            web.shutdown()
+            web.server_close()
         lock.release()
     return 0
 

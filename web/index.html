@@ -34,6 +34,12 @@
       quiet_end: $('quiet_end').value,
     };
   }
+  // WS ポートは配信元 (idle_talk.main) が idle_talk.toml の [ports].ws から返す。
+  async function wsPortFromServer() {
+    const res = await fetch('config.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`config.json: HTTP ${res.status}`);
+    return String((await res.json()).ws_port);
+  }
   function pushUi() { if (client) client.sendUi(readUi()); }
   for (const id of ['mute', 'on', 'freq_per_hour', 'quiet_start', 'quiet_end']) {
     $(id).addEventListener('change', pushUi);
@@ -41,8 +47,8 @@
 
   $('start').addEventListener('click', async () => {
     try {
-      const port = new URLSearchParams(location.search).get('port') || location.port || '8765';
       const actx = new AudioContext();
+      const port = new URLSearchParams(location.search).get('port') || await wsPortFromServer();
       const player = IdleTalkPlayer.createPlayer({
         sink: IdleTalkPlayer.createWebAudioSink(actx),
         send: (m) => { if (client) client.sendJson(m); },

@@ -99,6 +99,7 @@ class Ports(NamedTuple):
     asr: int = 8090
     llm: int = 8080
     tts: int = 10101
+    web: int = 8000  # web/ の静的配信 (main が起動)
 
 
 DEFAULT_SPEAKER = 888753760  # AivisSpeech の話者 (スタイル) ID

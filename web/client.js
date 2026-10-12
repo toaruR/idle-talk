@@ -1,87 +1,90 @@
 'use strict';
-// Browser client: WebSocket <-> Director (design 3.1, 12.1). Browser APIs are injected.
+// ブラウザでは classic script として共通のグローバルスコープに読まれるため、IIFE で閉じる。
+(function () {
+  // Browser client: WebSocket <-> Director (design 3.1, 12.1). Browser APIs are injected.
 
-const W = (typeof module !== 'undefined' && module.exports)
-  ? require('./worklet.js') : globalThis.IdleTalkWorklet;
-const P = (typeof module !== 'undefined' && module.exports)
-  ? require('./player.js') : globalThis.IdleTalkPlayer;
+  const W = (typeof module !== 'undefined' && module.exports)
+    ? require('./worklet.js') : globalThis.IdleTalkWorklet;
+  const P = (typeof module !== 'undefined' && module.exports)
+    ? require('./player.js') : globalThis.IdleTalkPlayer;
 
-const PROTOCOL_VERSION = 1;
-const SAMPLE_RATE = 16000;
-const FRAME_SAMPLES = 320; // 20ms @16kHz
+  const PROTOCOL_VERSION = 1;
+  const SAMPLE_RATE = 16000;
+  const FRAME_SAMPLES = 320; // 20ms @16kHz
 
-function wsUrl(port) {
-  return `ws://127.0.0.1:${port}/ws`;
-}
-
-function micConstraints() {
-  return { audio: { echoCancellation: true, channelCount: 1 } };
-}
-
-function makeHello(clientId) {
-  return { t: 'hello', version: PROTOCOL_VERSION, sample_rate: SAMPLE_RATE, client_id: clientId };
-}
-
-function makeUi(settings) {
-  const out = { t: 'ui' };
-  for (const k of ['mute', 'on', 'freq_per_hour', 'quiet_start', 'quiet_end']) {
-    if (settings && settings[k] !== undefined) out[k] = settings[k];
+  function wsUrl(port) {
+    return `ws://127.0.0.1:${port}/ws`;
   }
-  return out;
-}
 
-function stateLabel(msg, names) {
-  const label = (names && names[msg.state]) || msg.state;
-  return msg.muted ? `${label} (ミュート)` : label;
-}
+  function micConstraints() {
+    return { audio: { echoCancellation: true, channelCount: 1 } };
+  }
 
-// opts: { port, WebSocketCtor, player, onState(msg), onError(msg), clientId }
-function createClient(opts) {
-  const { port, WebSocketCtor, player, onState, onError } = opts;
-  const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
-  const ws = new WebSocketCtor(wsUrl(port));
-  ws.binaryType = 'arraybuffer';
-  const sendJson = (m) => ws.send(JSON.stringify(m));
+  function makeHello(clientId) {
+    return { t: 'hello', version: PROTOCOL_VERSION, sample_rate: SAMPLE_RATE, client_id: clientId };
+  }
 
-  ws.onopen = () => sendJson(makeHello(clientId));
-  ws.onmessage = (ev) => {
-    const d = ev.data;
-    if (typeof d !== 'string') { if (player) player.pushBinary(d); return; }
-    let msg;
-    try { msg = JSON.parse(d); } catch (_e) { return; }
-    if (!msg || typeof msg !== 'object') return;
-    if (msg.t === 'ping') sendJson({ t: 'pong', ts: msg.ts });
-    else if (msg.t === 'state') { if (onState) onState(msg); }
-    else if (msg.t === 'error') { if (onError) onError(msg); }
-    else if (player) player.handleMessage(msg);
+  function makeUi(settings) {
+    const out = { t: 'ui' };
+    for (const k of ['mute', 'on', 'freq_per_hour', 'quiet_start', 'quiet_end']) {
+      if (settings && settings[k] !== undefined) out[k] = settings[k];
+    }
+    return out;
+  }
+
+  function stateLabel(msg, names) {
+    const label = (names && names[msg.state]) || msg.state;
+    return msg.muted ? `${label} (ミュート)` : label;
+  }
+
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), clientId }
+  function createClient(opts) {
+    const { port, WebSocketCtor, player, onState, onError } = opts;
+    const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
+    const ws = new WebSocketCtor(wsUrl(port));
+    ws.binaryType = 'arraybuffer';
+    const sendJson = (m) => ws.send(JSON.stringify(m));
+
+    ws.onopen = () => sendJson(makeHello(clientId));
+    ws.onmessage = (ev) => {
+      const d = ev.data;
+      if (typeof d !== 'string') { if (player) player.pushBinary(d); return; }
+      let msg;
+      try { msg = JSON.parse(d); } catch (_e) { return; }
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.t === 'ping') sendJson({ t: 'pong', ts: msg.ts });
+      else if (msg.t === 'state') { if (onState) onState(msg); }
+      else if (msg.t === 'error') { if (onError) onError(msg); }
+      else if (player) player.handleMessage(msg);
+    };
+
+    return {
+      ws,
+      clientId,
+      sendFrame(frame) { ws.send(frame); },
+      sendUi(settings) { sendJson(makeUi(settings)); },
+      sendJson,
+      close() { ws.close(); },
+    };
+  }
+
+  // Start mic capture -> worklet frames -> client.sendFrame. Browser only.
+  async function startCapture({ getUserMedia, AudioContextCtor, workletUrl, client }) {
+    const stream = await getUserMedia(micConstraints());
+    const ctx = new AudioContextCtor();
+    await ctx.audioWorklet.addModule(workletUrl);
+    const node = new AudioWorkletNode(ctx, 'capture-processor', {
+      processorOptions: { inRate: ctx.sampleRate, frameSamples: FRAME_SAMPLES },
+    });
+    node.port.onmessage = (ev) => client.sendFrame(ev.data);
+    ctx.createMediaStreamSource(stream).connect(node);
+    return { ctx, stream, node };
+  }
+
+  const api = {
+    PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, W, P,
+    wsUrl, micConstraints, makeHello, makeUi, stateLabel, createClient, startCapture,
   };
-
-  return {
-    ws,
-    clientId,
-    sendFrame(frame) { ws.send(frame); },
-    sendUi(settings) { sendJson(makeUi(settings)); },
-    sendJson,
-    close() { ws.close(); },
-  };
-}
-
-// Start mic capture -> worklet frames -> client.sendFrame. Browser only.
-async function startCapture({ getUserMedia, AudioContextCtor, workletUrl, client }) {
-  const stream = await getUserMedia(micConstraints());
-  const ctx = new AudioContextCtor();
-  await ctx.audioWorklet.addModule(workletUrl);
-  const node = new AudioWorkletNode(ctx, 'capture-processor', {
-    processorOptions: { inRate: ctx.sampleRate, frameSamples: FRAME_SAMPLES },
-  });
-  node.port.onmessage = (ev) => client.sendFrame(ev.data);
-  ctx.createMediaStreamSource(stream).connect(node);
-  return { ctx, stream, node };
-}
-
-const api = {
-  PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, W, P,
-  wsUrl, micConstraints, makeHello, makeUi, stateLabel, createClient, startCapture,
-};
-if (typeof module !== 'undefined' && module.exports) module.exports = api;
-else if (typeof globalThis !== 'undefined') globalThis.IdleTalkClient = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else if (typeof globalThis !== 'undefined') globalThis.IdleTalkClient = api;
+})();

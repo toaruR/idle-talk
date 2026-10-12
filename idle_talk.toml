@@ -1,10 +1,11 @@
 # idle-talk 共通設定。起動時のカレントディレクトリから読む (--config で変更可)。
 # CLI 引数 (--port / --*-url / --speaker) が指定されればそちらが優先。
 [ports]
-ws = 8765    # idle_talk.main の WebSocket サーバ (ブラウザは web/index.html?port= で合わせる)
+ws = 8765    # idle_talk.main の WebSocket サーバ (ブラウザへは /config.json で渡す)
 asr = 8090   # idle_talk.asr_worker
 llm = 8091   # llama-server
 tts = 10101  # AivisSpeech
+web = 8000   # web/ の配信 (main が起動。ブラウザは http://127.0.0.1:8000/ を開く)
 
 [tts]
 speaker = 888753760  # AivisSpeech の話者 (スタイル) ID。一覧は AivisSpeech の GET /speakers

@@ -99,7 +99,7 @@ class IdleTalkDirector:
         self._ic_start_ms = 0  # INTERRUPT_CHECK 突入時刻 (clock 基準 ms)
         self.path_calls: list[tuple[str, str]] = []  # (route, 関数名): 不変条件 3 の記録
         self.core = WsCore(self.cfg, self.epoch, clock, on_audio=self._on_up_audio,
-                           on_playback=self._on_playback, on_ui=self._on_ui)
+                           on_playback=self._on_playback, on_ui=self._on_ui, on_hello=self._on_hello)
         self.fsm = StateDirector(self.cfg, self.epoch, on_actions=self._run_actions, on_state=self._send_state)
         self.history = PlaybackHistory(store, self.cfg)
         self._synthesize = synthesize
@@ -202,6 +202,10 @@ class IdleTalkDirector:
     def _emit(self, msg: dict) -> None:
         if self.core.conn is not None:
             self.core.conn.send_text(json.dumps(msg, ensure_ascii=False))
+
+    def _on_hello(self) -> None:
+        ctx = self.fsm.ctx
+        self._emit({"t": "state", "state": ctx.state.value, "muted": ctx.muted})
 
     def _send_state(self, ctx: Ctx) -> None:
         self._emit({"t": "state", "state": ctx.state.value, "muted": ctx.muted})
