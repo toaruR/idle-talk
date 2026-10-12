@@ -13,14 +13,23 @@ from idle_talk.clients import (
     _http_stream,
     build_llm_request,
 )
-from idle_talk.config import Config
+from idle_talk.config import Config, load_ports, load_speaker
 
 pytestmark = pytest.mark.integration
 
 CFG = Config()
-LLAMA = os.environ.get("LLAMA_URL", "http://127.0.0.1:8080")
-AIVIS = os.environ.get("AIVIS_URL", "http://127.0.0.1:10101")
-SPEAKER = int(os.environ.get("AIVIS_SPEAKER", "888753760"))
+PORTS = load_ports()
+LLAMA = os.environ.get("LLAMA_URL", f"http://127.0.0.1:{PORTS.llm}")
+AIVIS = os.environ.get("AIVIS_URL", f"http://127.0.0.1:{PORTS.tts}")
+SPEAKER = int(os.environ.get("AIVIS_SPEAKER", load_speaker()))
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _tts_warm():
+    """本番 (main.build_director) と同じく、初回合成の遅延を計測前に済ませる。"""
+    assert TtsClient(AIVIS, SPEAKER, CFG).warmup(), "tts warmup failed"
+
+
 MSGS = [{"role": "user", "content": "こんにちは。一言で挨拶して。"}]
 
 

@@ -4,6 +4,12 @@
 基礎資料：`docs/plans/2026-10-11-idle-talk-final-architecture.md`（合議結果。以下「合議書」）
 対象：Windows 11、利用者1人、常駐する日本語の音声雑談アプリ
 状態：設計確定版。既定値は §8.1 で決定済みで、M0/M1 の実測では値のみを更新する（設計構造は変更しない）。
+改訂：2026-10-12 実機接続で判明した外部サービスの制約に合わせて TTS 合成方式と LLM 応答スキーマを改訂（下記「改訂履歴」）。初版は `docs/design-idle-talk.initial-2026-10-11.md` に保存。
+
+改訂履歴：
+- 2026-10-12：AivisSpeech Engine 1.2.0 は `/cancellable_synthesis` が 501 Not Implemented（有効化オプションも無い）のため、`/synthesis` に変更。中止は epoch 不一致での破棄で代替し、切断後に残る計算は合成中の 1 文ぶん（`HTTP_TIMEOUT.tts_sentence` 以内）とする。T-E8 の合否もそれに合わせて変更。初回合成の遅延（実測約 14 秒）は起動時のウォームアップで吸収する（§3 外部サービス、§12.1、§12.3）。
+- 2026-10-12：E7 の再起動を実装するため、Director が llama-server を起動・監督する方式を明記（設定ファイル `[llm]` で起動引数を与え、プロセス終了を検知して `LLM_RETRY` で再起動、上限超過で休止 + warn）。初版は再起動の主体が未定義で、llama-server は手動起動だった（§3、§12.3）。
+- 2026-10-12：llama-server（b11564）はストリーム最初のチャンクで `delta.content` が `null` のため、SSE data 行スキーマの `content` を string または null に変更（§12.1）。
 
 ---
 
@@ -27,7 +33,7 @@
 ### 1.4 制約・前提
 - 利用者1人、ヘッドホン利用を初期前提。ブラウザは localhost のみ接続。
 - 資源上限（超えたら構成見直し）：LLM は GPU0 で 9GiB 以内、ASR 追加 3GiB 以内、アプリ全体で追加 RAM 8GiB 以内。GPU1 は既存アプリ優先。
-- 常駐プロセスは3つ：Python 本体（Director）、llama-server、AivisSpeech Engine。
+- 常駐プロセスは3つ：Python 本体（Director）、llama-server、AivisSpeech Engine。llama-server は Director が子プロセスとして起動・監督し、異常終了を `LLM_RETRY` で再起動する（起動引数は設定ファイルの `[llm]`）。
 
 ---
 
@@ -70,10 +76,10 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |相手|呼び出し|タイムアウト|失敗時|
 |---|---|---|---|
 | llama-server | `/v1/chat/completions` stream | `HTTP_TIMEOUT`（§8.1） | 定型句で応答しログ。再試行は `LLM_RETRY` |
-| AivisSpeech | `/cancellable_synthesis`（§12.1。その停止検証は T-E8） | `HTTP_TIMEOUT` | 該当文を飛ばし、テキストのみ UI に表示 |
+| AivisSpeech | `/synthesis`（§12.1。中止後の残計算の検証は T-E8） | `HTTP_TIMEOUT` | 該当文を飛ばし、テキストのみ UI に表示 |
 |ASR ワーカー|内部キュー|`HTTP_TIMEOUT`|該当発話を破棄しログ。次の発話へ|
 
-制約：AivisSpeech は `/cancellable_synthesis` を使い、計算停止は T-E8 で検証する（通常の `/synthesis` は切断後も計算が続く）。
+制約：AivisSpeech は `/synthesis` を使う（`/cancellable_synthesis` は AivisSpeech Engine 1.2.0 で未実装）。`/synthesis` は切断後も計算が続くため、合成は 1 文ずつ要求して残計算を 1 文ぶん（`HTTP_TIMEOUT.tts_sentence` 以内）に抑え、中止した文の結果は epoch 不一致で破棄する。残計算の収束は T-E8 で検証する。初回合成は GPU 初期化で遅いため、Director 起動時に 1 回空合成してから待ち受ける（失敗はログのみで起動は続行）。
 
 ### 3.4 SQLite スキーマ（概要）
 |テーブル|主な列|
@@ -198,7 +204,7 @@ E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 |`G2_SUM`|130ms（VAD 40 + 送出 60 + ブラウザ 30 の予算上限）|G2 の内訳の唯一の定義|M1|
 |`TTS_RATIO_MAX`|0.7|連続再生で途切れない上限（処理時間÷音声長 p95 <）|M0|
 |`TEST_N`|同一シナリオの反復は 20 回、割り込み注入は G3 の試行数、負荷試験は 10 分・§1.2 の G1 の試行数|反復数の唯一の定義|M1|
-|`E_PARAMS`|無音入力試験 60s／無音フレーム連続 3s で休止／cancel 後 2s 以内に TTS CPU が待機時 +5pt 以内|E4/E6/E8 の試験定数|M1|
+|`E_PARAMS`|無音入力試験 60s／無音フレーム連続 3s で休止／cancel 後 tts_sentence + 2s 以内に TTS CPU が待機時 +5pt 以内|E4/E6/E8 の試験定数|M1|
 | `DB_BACKUP` | 起動時に DB を 1 世代コピー（`.bak`）、破損時に復元 | E14 の復元元 | M1 |
 |`MIN_SEG`（最短発話区間）|200ms|これ未満は咳・クリック雑音として破棄|M0|
 |`T_confirm`（割り込み確認窓）|400ms（範囲 300〜500）|相槌と割り込みの判別に必要な最短観測時間|M1|
@@ -271,8 +277,8 @@ E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 
 外部サービス（JSON Schema draft-07。req=要求、res=応答。エラー応答は共通 `err`）：
 - `err`（HTTP 4xx/5xx）：`{"type":"object","required":["error"],"properties":{"error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"integer"},"message":{"type":"string"}}}}}`
-- llama-server req：`{"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":false,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":true},"max_tokens":{"const":120}}}`。res は SSE 各 data 行：`{"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":"string"}}}}}}}}`、終端は `[DONE]`。エラー：`err` または `HTTP_TIMEOUT` 超過→定型句 + `LLM_RETRY`。
-- AivisSpeech：`POST /audio_query?text=..&speaker=<id>` → JSON(AudioQuery)、続けて `POST /cancellable_synthesis?speaker=<id>`（body=AudioQuery）→ WAV。通常の `/synthesis` はキャンセル不可のため使わない。エラー：`err` または `HTTP_TIMEOUT` 超過→該当文を飛ばす。
+- llama-server req：`{"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":false,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":true},"max_tokens":{"const":120}}}`。res は SSE 各 data 行：`{"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}`、終端は `[DONE]`。エラー：`err` または `HTTP_TIMEOUT` 超過→定型句 + `LLM_RETRY`。
+- AivisSpeech：`POST /audio_query?text=..&speaker=<id>` → JSON(AudioQuery)、続けて `POST /synthesis?speaker=<id>`（body=AudioQuery）→ WAV。`/synthesis` はキャンセル不可のため、中止は epoch 不一致での破棄で代替する（`/cancellable_synthesis` は AivisSpeech Engine 1.2.0 で 501）。エラー：`err` または `HTTP_TIMEOUT` 超過→該当文を飛ばす。
 - ASR ワーカー req：`{"type":"object","required":["utterance_id","pcm_ref","lang"],"additionalProperties":false,"properties":{"utterance_id":{"type":"integer","minimum":0,"maximum":4294967295},"pcm_ref":{"type":"string","minLength":1},"lang":{"const":"ja"}}}`（pcm_ref は共有メモリ名）。res：`{"type":"object","required":["utterance_id","text","no_speech_prob","compression_ratio"],"additionalProperties":false,"properties":{"utterance_id":{"type":"integer","minimum":0},"text":{"type":"string"},"no_speech_prob":{"type":"number","minimum":0,"maximum":1},"compression_ratio":{"type":"number","minimum":0}}}`。エラー：不正 req→HTTP 400 + `err`、`HTTP_TIMEOUT` 超過→発話を破棄しログ。
 
 
@@ -300,7 +306,7 @@ E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 | E5 | `PING_INTERVAL` + epoch+1 | T-E5：WS 強制切断。`PING_INTERVAL` x 2 以内に検知、再接続後の旧音声 0 |
 | E6 | 無音フレーム連続（`E_PARAMS`）で休止 | T-E6：デバイス抜去から `E_PARAMS` の休止条件 + 2 秒以内に `休止` 表示 + 5005 |
 | E7 | `LLM_RETRY` + 定型句 | T-E7：llama-server プロセスを kill。`HTTP_TIMEOUT` 内に定型句、`LLM_RETRY` の初回バックオフ内に再起動し次ターンで応答 |
-|E8|キャンセル可能合成 + 直列化|T-E8：cancel 後 `E_PARAMS` 内に TTS CPU が待機水準へ|
+|E8|1 文単位の合成 + 直列化 + epoch 破棄|T-E8：合成中に切断し、`HTTP_TIMEOUT.tts_sentence` + `E_PARAMS` 内に TTS CPU が待機水準へ|
 |E9|ASR/LLM を GPU0 固定|T-E9：GPU1 で GPU 使用率 90% の負荷（`TEST_N`）をかけ、G1 を満たす|
 |E10|ヘッドホン前提（防御対象外。M5）|M5：再生中の自己認識による応答連鎖 0 回 / 20 分|
 |E11|M0 で重なり遅延を測定|T-E11：割り込み重なりを `TEST_N` 再現し、追加遅延 p95 が `OVERLAP_MAX` 以内。超過で ASR を GPU1 へ|

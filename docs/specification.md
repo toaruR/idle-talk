@@ -24,7 +24,7 @@
 |---|---|---|---|
 | Director | `python -m idle_talk.main` | WS 8765 | `--data-dir`(既定 `data`)、`--pid-file`、`--llm-url` / `--tts-url` / `--asr-url` |
 | ASR ワーカー | `python -m idle_talk.asr_worker` | 8090 (`--port`) | 127.0.0.1 固定。faster-whisper `small` を CUDA/float16 で起動時に 1 回ロード。未導入なら exit 2 |
-| llama-server | 手動 | 8080 | 起動コマンドは `llm_supervisor.build_llama_command`(`--jinja` + `enable_thinking=false` で思考無効) |
+| llama-server | `[llm].model` 設定時は Director が起動・監督、未設定なら手動 | 8080 | 起動引数は `llm_supervisor.build_llama_argv`(`--jinja` + `enable_thinking=false` で思考無効) |
 | AivisSpeech | 手動 | 10101 | 話者 ID 既定 888753760 (`idle_talk.toml` の `[tts].speaker` / `--speaker`) |
 
 - 二重起動は pid ロックで検出し exit 4。
@@ -40,8 +40,8 @@
 - 設定ファイルは起動時のカレントディレクトリから読む。リポジトリ直下以外で起動する場合は `--config <path>` で場所を指定する。ファイルが無ければ既定値で動く。
 - 未知のキーや、0〜65535 の整数でない値は起動時に `ValueError` になる。
 - ブラウザ (`web/index.html`) は設定ファイルを読まない。`ws` を変えたら `?port=` で同じ値を指定する。
-- llama-server と AivisSpeech は手動起動のため、`llm` / `tts` を変えたら各サーバ自体の待受ポートも合わせる。
-- 話者 ID は `[tts]` の `speaker` で指定する。AivisSpeech が声 (モデル) とスタイルの組ごとに振る整数で、`/audio_query` と `/cancellable_synthesis` の `speaker` パラメータに渡す。既定は 888753760 (`config.DEFAULT_SPEAKER`)。
+- AivisSpeech と、監督しない llama-server は手動起動のため、`llm` / `tts` を変えたら各サーバ自体の待受ポートも合わせる。Director が起動する llama-server には `[ports].llm` (または `--llm-url` のポート) が渡される。
+- 話者 ID は `[tts]` の `speaker` で指定する。AivisSpeech が声 (モデル) とスタイルの組ごとに振る整数で、`/audio_query` と `/synthesis` の `speaker` パラメータに渡す。既定は 888753760 (`config.DEFAULT_SPEAKER`)。
 - 話者 ID の優先順位は `--speaker`、設定ファイル、既定値の順。M0 計測では環境変数 `AIVIS_SPEAKER` が設定ファイルより優先する。負数・非整数・`[tts]` の未知キーは `ValueError`。
 - 使える ID は AivisSpeech の `GET /speakers` で確認する。インストールされていない ID を指定すると、合成のたびに AivisSpeech がエラーを返す (起動時には検査しない)。
 
@@ -129,8 +129,13 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
   - LLM: 最初のトークン 5s、全体 20s → 5001。
   - TTS: 1 文 3s → 5002。その文は飛ばして次の文へ続ける。
   - ASR: 区間長 ×2 + 2s → 5003。その発話は破棄する。
-- LLM が停止したときは定型句に縮退する。llama-server は `LLM_RETRY` に従い、1s → 2s → 4s のバックオフで 600s 窓内に最大 3 回まで再起動する。4 回目は再起動せず `rest` を要求する。
-- AivisSpeech には `/audio_query` → `/cancellable_synthesis` の順で要求し、`/synthesis` は使わない。
+- LLM が停止したときは定型句に縮退する。llama-server は `LLM_RETRY` に従い、1s → 2s → 4s のバックオフで 600s 窓内に最大 3 回まで再起動する。4 回目は再起動せず、Director を休止 (`rest`) に移して警告ログを出す。
+- 再起動が働くのは Director が llama-server を起動した場合だけ。`idle_talk.toml` の `[llm]` (`server` 実行ファイル、`model` gguf パス、`ngl`、`ctx`) で `model` を指定すると、`main` が起動時に llama-server を起動し、`/health` が 200 になるまで最大 `LLM_READY_TIMEOUT_S` (120s) 待ってから続ける。出力は `<data-dir>/llama-server.log` に追記する。
+- 監督は `llm_supervisor.watch` が `WATCH_INTERVAL_S` (0.5s) ごとにプロセス終了を調べ、終了していれば `LlmSupervisor.on_crash` (バックオフ + 再起動) を呼ぶ。Director 終了時は監督中の llama-server も止める。
+- `[llm].model` が空、または起動時に既に同じポートで llama-server が応答している場合は、起動も監督もしない (二重起動を避けるため。後者は警告ログを出す)。この場合 llama-server が落ちても再起動されない。
+- AivisSpeech には `/audio_query` → `/synthesis` の順で要求する。`/cancellable_synthesis` は AivisSpeech Engine 1.2.0 で 501 Not Implemented のため使わない。`/synthesis` は切断後も計算が続くので、中止した文の結果は epoch 不一致で破棄し、残る計算は合成中の 1 文ぶん (`tts_sentence` 以内) になる。
+- Director は起動時に `TtsClient.warmup` で 1 回空合成してから待ち受ける。初回合成は GPU (DirectML) 初期化で約 14 秒かかり `tts_sentence` (3s) を超えるため。タイムアウトは `WARMUP_TIMEOUT_S` (60s)。失敗は警告ログのみで起動は続ける。
+- LLM の SSE チャンクは `delta.content` が null でも受け付け、読み飛ばす (llama-server は最初のチャンクで null を送る)。
 - ASR の幻聴除外: `no_speech_prob` > 0.6、または `compression_ratio` > 2.4 のセグメントは捨てる (境界値ちょうどは採用)。
 
 ## 終話判定・相槌・自発発話

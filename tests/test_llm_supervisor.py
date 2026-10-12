@@ -1,8 +1,18 @@
 import asyncio
+from types import SimpleNamespace
 
 from mocks import FakeClock
 
-from idle_talk.llm_supervisor import FALLBACK_PHRASE, LlmSupervisor, build_llama_command
+from idle_talk.config import LlmLaunch
+from idle_talk.llm_supervisor import (
+    FALLBACK_PHRASE,
+    NO_THINK_KWARGS,
+    LlmSupervisor,
+    build_llama_argv,
+    build_llama_command,
+    wait_ready,
+    watch,
+)
 from idle_talk.pipeline import ResponsePipeline
 
 
@@ -60,3 +70,108 @@ def test_llama_command_disables_thinking():
     cmd = build_llama_command("model.gguf")
     assert "--jinja" in cmd
     assert "enable_thinking" in cmd and "false" in cmd
+
+
+class FakeProc:
+    def __init__(self):
+        self.code = None
+        self.terminated = False
+
+    def poll(self):
+        return self.code
+
+    def terminate(self):
+        self.terminated = True
+        self.code = 1
+
+    def wait(self, timeout=None):
+        return self.code
+
+
+def make_procs():
+    clock = FakeClock()
+    procs, rests = [], []
+
+    def start():
+        procs.append(FakeProc())
+        return procs[-1]
+    sup = LlmSupervisor(start, clock=clock, sleep=clock.advance, request_rest=lambda: rests.append(1))
+    sup.start()
+    return sup, procs, rests
+
+
+def test_watch_restarts_on_exit_and_returns_rest_over_limit():
+    sup, procs, rests = make_procs()
+    ticks = []
+
+    async def sleep(s):
+        ticks.append(s)
+        if len(ticks) % 2 == 0:  # 2 回に 1 回、監督中のプロセスを落とす
+            procs[-1].code = -9
+
+    assert asyncio.run(watch(sup, sleep=sleep)) == "rest"
+    assert len(procs) == 4 and rests == [1]  # 初回起動 + 再起動 3 回、4 回目の終了で rest
+
+
+def test_exited_and_stop():
+    sup, procs, _rests = make_procs()
+    assert not sup.exited()
+    sup.stop()
+    assert procs[0].terminated and sup.exited()
+    assert not LlmSupervisor(lambda: None).exited()  # 未起動
+
+
+def test_llm_watch_requests_director_rest(monkeypatch):
+    from idle_talk import main as main_mod
+    rests = []
+
+    async def fake_watch(sup):
+        return "rest"
+    monkeypatch.setattr(main_mod, "watch", fake_watch)
+    asyncio.run(main_mod.llm_watch(SimpleNamespace(request_rest=lambda: rests.append(1)), object()))
+    assert rests == [1]
+
+
+def test_build_llama_argv_matches_command():
+    argv = build_llama_argv(LlmLaunch(server="srv.exe", model="m.gguf", ngl=10, ctx=2048), 8091)
+    assert argv[0] == "srv.exe" and argv[argv.index("-m") + 1] == "m.gguf"
+    assert argv[argv.index("--port") + 1] == "8091" and argv[argv.index("--host") + 1] == "127.0.0.1"
+    assert argv[argv.index("-ngl") + 1] == "10" and argv[argv.index("-c") + 1] == "2048"
+    assert "--jinja" in argv and argv[argv.index("--chat-template-kwargs") + 1] == NO_THINK_KWARGS
+
+
+def test_wait_ready_polls_until_ready_or_timeout():
+    clock = FakeClock()
+    answers = iter([False, False, True])
+    assert wait_ready("u", 10, 0.5, clock, clock.advance, lambda u: next(answers))
+    assert clock() == 1.0
+    clock2 = FakeClock()
+    assert not wait_ready("u", 2, 0.5, clock2, clock2.advance, lambda u: False)
+
+
+def test_start_llm_skips_when_unconfigured_or_already_running(monkeypatch, tmp_path):
+    from idle_talk import main as main_mod
+    from idle_talk.config import Config
+    args = SimpleNamespace(config=str(tmp_path / "none.toml"), llm_url="http://127.0.0.1:8091")
+    assert main_mod.start_llm(args, tmp_path, Config()) is None  # [llm].model 未設定 = 手動起動
+    f = tmp_path / "s.toml"
+    f.write_text('[llm]\nmodel = "m.gguf"\n', encoding="utf-8")
+    args.config = str(f)
+    monkeypatch.setattr(main_mod, "is_ready", lambda url: True)
+    assert main_mod.start_llm(args, tmp_path, Config()) is None  # 既に応答中なら二重起動しない
+
+
+def test_start_llm_launches_and_waits(monkeypatch, tmp_path):
+    from idle_talk import main as main_mod
+    from idle_talk.config import Config
+    f = tmp_path / "s.toml"
+    f.write_text('[llm]\nserver = "srv.exe"\nmodel = "m.gguf"\n', encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(main_mod, "is_ready", lambda url: False)
+    monkeypatch.setattr(main_mod, "popen_starter", lambda argv, log: seen.update(argv=argv, log=log) or FakeProc)
+    monkeypatch.setattr(main_mod, "wait_ready", lambda url, t: seen.update(wait=(url, t)) or True)
+    sup = main_mod.start_llm(SimpleNamespace(config=str(f), llm_url="http://127.0.0.1:8091"), tmp_path, Config())
+    assert isinstance(sup.proc, FakeProc)
+    assert seen["argv"][:3] == ["srv.exe", "-m", "m.gguf"] and "8091" in seen["argv"]
+    assert seen["log"] == tmp_path / "llama-server.log"
+    assert seen["wait"] == ("http://127.0.0.1:8091", main_mod.LLM_READY_TIMEOUT_S)

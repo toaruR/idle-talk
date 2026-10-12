@@ -223,6 +223,11 @@ class IdleTalkDirector:
         self._pump()
         return True
 
+    def request_rest(self) -> None:
+        """LLM_RETRY 超過など復旧不能な障害で休止へ移る (設計書 12.4「超過で休止 + warn」)。"""
+        self.fsm.enqueue(Event(Ev.FAILURES))
+        self._pump()
+
     def _judge_interrupt(self, text: str) -> str:
         """INTERRUPT_CHECK 中の ASR 結果を判定して JUDGED を送る (設計書 5.1)。"""
         t_ms = int(self.clock() * 1000)

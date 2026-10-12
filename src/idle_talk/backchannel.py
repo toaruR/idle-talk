@@ -20,7 +20,7 @@ MISFIRE_KIND = "backchannel_misfire"
 
 
 def synthesize_clips(tts_client) -> list[tuple[str, bytes]]:
-    """固定語を tts_client.synthesize (/audio_query -> /cancellable_synthesis) で事前合成する。
+    """固定語を tts_client.synthesize (/audio_query -> /synthesis) で事前合成する。
     失敗した語は除外する。(text, wav) のリストを返す。"""
     clips: list[tuple[str, bytes]] = []
     for text in BACKCHANNEL_PHRASES:

@@ -15,7 +15,7 @@ from .config import DEFAULT_SPEAKER, Config
 from .errors import ERR_ASR_FAILED, ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 
 LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":True},"max_tokens":{"const":120}}}
-LLM_CHUNK_SCHEMA = {"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":"string"}}}}}}}}
+LLM_CHUNK_SCHEMA = {"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}
 
 _LLM_REQ = Draft7Validator(LLM_REQ_SCHEMA)
 _LLM_CHUNK = Draft7Validator(LLM_CHUNK_SCHEMA)
@@ -23,6 +23,8 @@ _ASR_REQ = Draft7Validator(ASR_REQ_SCHEMA)
 _ASR_RES = Draft7Validator(ASR_RES_SCHEMA)
 
 DONE = "[DONE]"
+WARMUP_TEXT = "あ"
+WARMUP_TIMEOUT_S = 60  # 初回合成は DirectML 初期化で十数秒かかる
 
 
 class ClientError(Exception):
@@ -147,7 +149,10 @@ class TtsClient:
         self._post = post
 
     def synthesize(self, text: str) -> bytes:
-        """/audio_query -> /cancellable_synthesis。1 文 tts_sentence 秒超過で TtsTimeout(5002)。"""
+        """/audio_query -> /synthesis。1 文 tts_sentence 秒超過で TtsTimeout(5002)。
+
+        AivisSpeech 1.2.0 は /cancellable_synthesis が 501 のため /synthesis を使う。
+        中止は epoch 不一致での破棄で代替し、切断後も計算は最大 1 文ぶん続く。"""
         limit = self.cfg.HTTP_TIMEOUT.tts_sentence
         start = self.clock()
         try:
@@ -156,7 +161,7 @@ class TtsClient:
                 None, limit)
             if self.clock() - start > limit:
                 raise TtsTimeout(f"tts > {limit}s")
-            wav = self._post(f"{self.base_url}/cancellable_synthesis?speaker={self.speaker}", q, limit)
+            wav = self._post(f"{self.base_url}/synthesis?speaker={self.speaker}", q, limit)
         except ClientError:
             raise
         except OSError as e:
@@ -166,6 +171,17 @@ class TtsClient:
         if self.clock() - start > limit:
             raise TtsTimeout(f"tts > {limit}s")
         return wav
+
+    def warmup(self, text: str = WARMUP_TEXT, timeout: float = WARMUP_TIMEOUT_S) -> bool:
+        """起動時に 1 回合成して初回の遅延 (GPU 初期化) を済ませる。失敗は False で、致命ではない。"""
+        try:
+            q = self._post(
+                f"{self.base_url}/audio_query?text={urllib.parse.quote(text)}&speaker={self.speaker}",
+                None, timeout)
+            self._post(f"{self.base_url}/synthesis?speaker={self.speaker}", q, timeout)
+            return True
+        except OSError:
+            return False
 
     def synthesize_sentences(self, sentences: Iterable[str]) -> list[tuple[str, bytes | None]]:
         """失敗した文は (text, None) とし、次文へ続行する (テキストのみ UI 表示用)。"""

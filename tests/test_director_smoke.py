@@ -124,7 +124,7 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
-    monkeypatch.setattr(main_mod, "_run", lambda director, port: seen.update(run_port=port) or asyncio.sleep(0))
+    monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None: seen.update(run_port=port) or asyncio.sleep(0))
     f = tmp_path / "s.toml"
     f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\n[tts]\nspeaker = 42\n", encoding="utf-8")
     base = ["--config", str(f), "--data-dir", str(tmp_path), "--pid-file", str(tmp_path / "p.pid")]
@@ -135,3 +135,14 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
     assert seen["speaker"] == 42
     assert main_mod.main(base + ["--port", "7000", "--llm-url", "http://h:1", "--speaker", "7"]) == 0
     assert seen["run_port"] == 7000 and seen["llm_url"] == "http://h:1" and seen["speaker"] == 7
+
+
+def test_request_rest_moves_to_rest_and_notifies(tmp_path):
+    from idle_talk.fsm import State
+    d, b, store = make(tmp_path)
+    try:
+        d.request_rest()  # LLM_RETRY 超過時に main.llm_watch から呼ばれる
+        assert d.fsm.ctx.state is State.REST
+        assert any(m.get("t") == "state" and m.get("state") == "rest" for m in b.texts)
+    finally:
+        store.close()

@@ -7,13 +7,15 @@ import json
 import logging
 import sqlite3
 import subprocess
+import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
-from .config import SETTINGS_FILE, Config, load_ports, load_speaker
+from .config import SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker
 from .director import IdleTalkDirector
+from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
@@ -22,6 +24,8 @@ from .store import Store
 from .vad import EnergyVad
 
 log = logging.getLogger("idle_talk.main")
+
+LLM_READY_TIMEOUT_S = 120  # 起動時のモデル読込待ち上限 (4B Q4 の実測は約 5s)
 
 
 def _asr_send(url: str):
@@ -49,9 +53,29 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     store = Store(data_dir / "idle_talk.db", bool(cfg.DB_BACKUP))
     llm = LlmClient(args.llm_url, cfg)
     tts = TtsClient(args.tts_url, args.speaker, cfg)
+    if not tts.warmup():
+        log.warning("tts warmup failed: %s", args.tts_url)
     asr = AsrClient(_asr_send(args.asr_url), cfg)
     return IdleTalkDirector(store, llm.stream_chat, tts.synthesize, lambda: None, EnergyVad(), asr, cfg,
                             metrics=MetricsRecorder(store), app_commit=git_commit())
+
+
+def start_llm(args: argparse.Namespace, data_dir: Path, cfg: Config) -> LlmSupervisor | None:
+    """[llm].model があれば llama-server を起動して監督する。無ければ手動起動扱いで None。
+
+    既に同じポートで応答している llama-server がある場合は二重起動せず、監督もしない。"""
+    launch = load_llm_launch(args.config)
+    if not launch.model:
+        return None
+    if is_ready(args.llm_url):
+        log.warning("llama-server already running at %s: not supervised", args.llm_url)
+        return None
+    argv = build_llama_argv(launch, urllib.parse.urlparse(args.llm_url).port)
+    sup = LlmSupervisor(popen_starter(argv, data_dir / "llama-server.log"), cfg, warn=log.warning)
+    sup.start()
+    if not wait_ready(args.llm_url, LLM_READY_TIMEOUT_S):
+        log.warning("llama-server not ready within %ds: %s", LLM_READY_TIMEOUT_S, args.llm_url)
+    return sup
 
 
 async def soak_loop(sampler: ResourceSampler, interval_ms: int = SAMPLE_INTERVAL_MS,
@@ -68,16 +92,25 @@ async def soak_loop(sampler: ResourceSampler, interval_ms: int = SAMPLE_INTERVAL
             log.exception("soak sample failed")
 
 
-async def _run(director: IdleTalkDirector, port: int) -> None:
+async def llm_watch(director: IdleTalkDirector, sup: LlmSupervisor) -> None:
+    """llama-server の異常終了を LLM_RETRY に従って再起動し、上限超過で休止へ移す (E7)。"""
+    if await watch(sup) == "rest":
+        director.request_rest()
+
+
+async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None = None) -> None:
     server, pinger = await serve(director.core, port)
     log.info("listening on 127.0.0.1:%d", port)
     sampler = ResourceSampler(director.store, clock=director.now_ms)
-    soak = asyncio.get_running_loop().create_task(soak_loop(sampler))
+    loop = asyncio.get_running_loop()
+    tasks = [pinger, loop.create_task(soak_loop(sampler))]
+    if sup is not None:
+        tasks.append(loop.create_task(llm_watch(director, sup)))
     try:
         await server.serve_forever()
     finally:
-        pinger.cancel()
-        soak.cancel()
+        for t in tasks:
+            t.cancel()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,15 +132,19 @@ def main(argv: list[str] | None = None) -> int:
     args.speaker = load_speaker(args.config) if args.speaker is None else args.speaker
     data_dir = Path(args.data_dir)
     lock = acquire_or_exit(args.pid_file or data_dir / "idle_talk.pid")  # 二重起動は SystemExit(4)
-    director = None
+    director = sup = None
     try:
-        director = build_director(data_dir, args, Config())
-        asyncio.run(_run(director, args.port))
+        cfg = Config()
+        sup = start_llm(args, data_dir, cfg)
+        director = build_director(data_dir, args, cfg)
+        asyncio.run(_run(director, args.port, sup))
     except KeyboardInterrupt:
         pass
     finally:
         if director is not None:
             director.close()
+        if sup is not None:
+            sup.stop()
         lock.release()
     return 0
 

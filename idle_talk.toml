@@ -8,3 +8,11 @@ tts = 10101  # AivisSpeech
 
 [tts]
 speaker = 888753760  # AivisSpeech の話者 (スタイル) ID。一覧は AivisSpeech の GET /speakers
+
+[llm]
+# model を指定すると Director が llama-server を起動・監督し、異常終了時に LLM_RETRY で再起動する。
+# 空なら手動起動 (監督なし)。起動時に既に [ports].llm で応答していれば二重起動せず監督もしない。
+server = "D:/tools/llama.cpp/llama-server.exe"
+model = "D:/models/Qwen3.5-4B-Q4_K_M.gguf"
+ngl = 99
+ctx = 4096

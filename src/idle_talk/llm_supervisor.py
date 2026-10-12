@@ -1,10 +1,17 @@
 """llama-server の起動コマンドと再起動監督 (設計書 3.3 / 12.4, E7)。時計・sleep・起動は注入可能。"""
 from __future__ import annotations
 
+import asyncio
+import logging
+import subprocess
 import time
-from collections.abc import Callable
+import urllib.request
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 
-from .config import Config
+from .config import Config, LlmLaunch
+
+log = logging.getLogger("idle_talk.llm_supervisor")
 
 FALLBACK_PHRASE = "ちょっと考え込んじゃいました。もう一度お願いします。"
 NO_THINK_KWARGS = '{"enable_thinking":false}'
@@ -14,6 +21,44 @@ def build_llama_command(model_path: str, port: int = 8080, ngl: int = 99) -> str
     """思考無効のテンプレート設定 (--jinja + enable_thinking=false) を含む起動コマンド文字列。"""
     return (f"llama-server -m {model_path} --port {port} -ngl {ngl} "
             f"--jinja --chat-template-kwargs '{NO_THINK_KWARGS}'")
+
+
+def build_llama_argv(launch: LlmLaunch, port: int) -> list[str]:
+    """build_llama_command と同じ起動内容を、シェルを介さない Popen 用の引数リストで返す。"""
+    return [launch.server, "-m", launch.model, "--host", "127.0.0.1", "--port", str(port),
+            "-ngl", str(launch.ngl), "-c", str(launch.ctx),
+            "--jinja", "--chat-template-kwargs", NO_THINK_KWARGS]
+
+
+def popen_starter(argv: list[str], log_path: Path) -> Callable[[], subprocess.Popen]:
+    """起動ごとに log_path へ追記する Popen を返す関数。"""
+    def start() -> subprocess.Popen:
+        log.info("starting llama-server: %s", argv)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as out:
+            return subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    return start
+
+
+def is_ready(base_url: str, timeout: float = 1.0) -> bool:
+    """llama-server の /health が 200 (モデル読込完了) なら True。読込中 (503) や接続不能は False。"""
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/health", timeout=timeout) as r:
+            return r.status == 200
+    except OSError:
+        return False
+
+
+def wait_ready(base_url: str, timeout_s: float, interval_s: float = 0.5,
+               clock: Callable[[], float] = time.monotonic,
+               sleep: Callable[[float], None] = time.sleep,
+               ready: Callable[[str], bool] = is_ready) -> bool:
+    deadline = clock() + timeout_s
+    while clock() < deadline:
+        if ready(base_url):
+            return True
+        sleep(interval_s)
+    return False
 
 
 class LlmSupervisor:
@@ -37,6 +82,19 @@ class LlmSupervisor:
     def start(self) -> None:
         self.proc = self._start()
 
+    def exited(self) -> bool:
+        """監督中のプロセスが終了していれば True。未起動 (proc なし) は False。"""
+        return self.proc is not None and self.proc.poll() is not None
+
+    def stop(self) -> None:
+        """Director 終了時に監督中のプロセスを止める。"""
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
     def on_crash(self) -> str:
         """'restarted' | 'rest'。"""
         r = self.cfg.LLM_RETRY
@@ -51,3 +109,19 @@ class LlmSupervisor:
         self._sleep(r.backoff_s[min(n - 1, len(r.backoff_s) - 1)])
         self.start()
         return "restarted"
+
+
+WATCH_INTERVAL_S = 0.5  # プロセス終了の検知間隔 (初回バックオフ 1s より短くする)
+
+
+async def watch(sup: LlmSupervisor, interval_s: float = WATCH_INTERVAL_S,
+                sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> str:
+    """プロセス終了を検知するたびに on_crash() で再起動する。'rest' になったら監督を終えて 'rest' を返す。"""
+    while True:
+        await sleep(interval_s)
+        if not sup.exited():
+            continue
+        log.warning("llama-server exited (code %s)", sup.proc.poll())
+        result = await asyncio.to_thread(sup.on_crash)  # バックオフの sleep でループを止めない
+        if result == "rest":
+            return result

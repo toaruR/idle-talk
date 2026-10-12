@@ -132,3 +132,21 @@ def load_speaker(path: str | Path = SETTINGS_FILE) -> int:
     if type(v) is not int or v < 0:
         raise ValueError(f"[tts].speaker must be a non-negative int: {v!r}")
     return v
+
+
+class LlmLaunch(NamedTuple):
+    """[llm]: Director が llama-server を起動・監督するための設定。model が空なら手動起動 (監督なし)。"""
+    server: str = "llama-server"
+    model: str = ""
+    ngl: int = 99
+    ctx: int = 4096
+
+
+def load_llm_launch(path: str | Path = SETTINGS_FILE) -> LlmLaunch:
+    """[llm] を読む。無ければ既定値 (監督なし)。型違い・未知キーは ValueError。"""
+    raw = _read_section(path, "llm", LlmLaunch._fields)
+    for k, v in raw.items():
+        want = str if k in ("server", "model") else int
+        if type(v) is not want or (want is int and v < 0):
+            raise ValueError(f"[llm].{k} must be a {'string' if want is str else 'non-negative int'}: {v!r}")
+    return LlmLaunch(**raw)

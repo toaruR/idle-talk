@@ -16,6 +16,7 @@ from idle_talk.clients import (
     LlmTimeout,
     TtsClient,
     TtsTimeout,
+    WARMUP_TIMEOUT_S,
     build_llm_request,
     parse_sse,
 )
@@ -75,14 +76,38 @@ def test_timeout_tts_sentence():
     assert ok.synthesize("a").startswith(b"RIFF")
 
 
-def test_no_synthesis_endpoint_and_skip_failed_sentence():
+def test_synthesis_endpoint_and_skip_failed_sentence():
     clk = FakeClock()
     post = mock_tts_post(clk, fail_texts=("二文目",))
     t = TtsClient(clock=clk, post=post)
     out = t.synthesize_sentences(["一文目", "二文目", "三文目"])
     assert [w is not None for _, w in out] == [True, False, True]
-    assert any("/cancellable_synthesis" in u for u in post.calls)
-    assert not any("/synthesis" in u.replace("/cancellable_synthesis", "") for u in post.calls)
+    assert any("/synthesis?" in u for u in post.calls)
+    assert not any("/cancellable_synthesis" in u for u in post.calls)  # AivisSpeech 1.2.0 では 501
+
+
+def test_llm_null_content_chunk_is_skipped():
+    # llama-server は最初のチャンクで delta.content を null にする
+    lines = ['data: {"choices":[{"delta":{"role":"assistant","content":null}}]}\n',
+             'data: {"choices":[{"delta":{"content":"やあ"}}]}\n', "data: [DONE]\n"]
+    assert list(parse_sse(lines)) == ["やあ"]
+    with pytest.raises(ValueError):
+        list(parse_sse(['data: {"choices":[{"delta":{"content":1}}]}\n']))
+
+
+def test_tts_warmup_uses_long_timeout_and_swallows_failure():
+    seen = []
+
+    def post(url, body, timeout):
+        seen.append((url.split("?")[0], timeout))
+        return b"{}" if "audio_query" in url else b"RIFF"
+    assert TtsClient(post=post).warmup() is True
+    assert seen == [("http://127.0.0.1:10101/audio_query", WARMUP_TIMEOUT_S),
+                    ("http://127.0.0.1:10101/synthesis", WARMUP_TIMEOUT_S)]
+
+    def down(url, body, timeout):
+        raise OSError("connection refused")
+    assert TtsClient(post=down).warmup() is False
 
 
 def test_timeout_asr_discard():
