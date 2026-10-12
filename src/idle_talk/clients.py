@@ -25,6 +25,7 @@ _ASR_RES = Draft7Validator(ASR_RES_SCHEMA)
 DONE = "[DONE]"
 WARMUP_TEXT = "あ"
 WARMUP_TIMEOUT_S = 60  # 初回合成は DirectML 初期化で十数秒かかる
+TTS_RATE = 24000  # 下り PCM のサンプリング周波数。web/player.js の DEFAULT_PCM_RATE と一致させる
 
 
 class ClientError(Exception):
@@ -141,9 +142,11 @@ class LlmClient:
 class TtsClient:
     def __init__(self, base_url: str = "http://127.0.0.1:10101", speaker: int = DEFAULT_SPEAKER,
                  config: Config | None = None, clock: Callable[[], float] = time.monotonic,
-                 post: Callable[[str, bytes | None, float], bytes] = _http_post):
+                 post: Callable[[str, bytes | None, float], bytes] = _http_post,
+                 voice: dict[str, float] | None = None):
         self.base_url = base_url.rstrip("/")
         self.speaker = speaker
+        self.voice = dict(voice or {})  # AudioQuery の上書き (config.load_voice)
         self.cfg = config or Config()
         self.clock = clock
         self._post = post
@@ -156,9 +159,7 @@ class TtsClient:
         limit = self.cfg.HTTP_TIMEOUT.tts_sentence
         start = self.clock()
         try:
-            q = self._post(
-                f"{self.base_url}/audio_query?text={urllib.parse.quote(text)}&speaker={self.speaker}",
-                None, limit)
+            q = self._query(text, limit)
             if self.clock() - start > limit:
                 raise TtsTimeout(f"tts > {limit}s")
             wav = self._post(f"{self.base_url}/synthesis?speaker={self.speaker}", q, limit)
@@ -172,12 +173,22 @@ class TtsClient:
             raise TtsTimeout(f"tts > {limit}s")
         return wav
 
+    def _query(self, text: str, timeout: float) -> bytes:
+        """/audio_query。声パラメータで上書きし、出力を TTS_RATE のモノラルに固定して返す。
+
+        AivisSpeech の既定出力は 44.1kHz で、ブラウザは TTS_RATE として再生するため、
+        固定しないと遅く低い声になる。"""
+        q = self._post(f"{self.base_url}/audio_query?text={urllib.parse.quote(text)}&speaker={self.speaker}",
+                       None, timeout)
+        d = json.loads(q)
+        d.update(self.voice)
+        d.update(outputSamplingRate=TTS_RATE, outputStereo=False)
+        return json.dumps(d).encode("utf-8")
+
     def warmup(self, text: str = WARMUP_TEXT, timeout: float = WARMUP_TIMEOUT_S) -> bool:
         """起動時に 1 回合成して初回の遅延 (GPU 初期化) を済ませる。失敗は False で、致命ではない。"""
         try:
-            q = self._post(
-                f"{self.base_url}/audio_query?text={urllib.parse.quote(text)}&speaker={self.speaker}",
-                None, timeout)
+            q = self._query(text, timeout)
             self._post(f"{self.base_url}/synthesis?speaker={self.speaker}", q, timeout)
             return True
         except OSError:

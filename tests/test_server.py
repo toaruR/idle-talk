@@ -113,11 +113,11 @@ def test_pong_keeps_connection():
 def test_ui_range_error_5006_keeps_settings():
     core, _, c = setup()
     before = dict(core.settings)
-    core.on_text(c, json.dumps({"t": "ui", "freq_per_hour": 13}))
+    core.on_text(c, json.dumps({"t": "ui", "interval_s": 9}))
     assert c.of("error")[0]["code"] == 5006
     assert core.settings == before
-    core.on_text(c, json.dumps({"t": "ui", "freq_per_hour": 5}))
-    assert core.settings["freq_per_hour"] == 5
+    core.on_text(c, json.dumps({"t": "ui", "interval_s": 30}))
+    assert core.settings["interval_s"] == 30
 
 
 def test_stale_playback_epoch_dropped(caplog):

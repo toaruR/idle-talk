@@ -114,6 +114,14 @@ function fakeWs() {
   return { WS, created };
 }
 
+test('client: onOpen runs after hello', () => {
+  const { WS, created } = fakeWs();
+  const order = [];
+  C.createClient({ port: 1, WebSocketCtor: WS, onOpen: () => order.push(JSON.parse(created[0].sent[0]).t) });
+  created[0].onopen();
+  assert.deepStrictEqual(order, ['hello']);
+});
+
 test('client: hello on open, pong on ping, url, constraints, uplink frame', () => {
   const { WS, created } = fakeWs();
   const m = mk();
@@ -146,9 +154,9 @@ test('client: downlink binary and cancel routed to player; state/ui', () => {
   assert.strictEqual(m.player.minEpoch, 2);
   ws.onmessage({ data: JSON.stringify({ t: 'state', state: 'idle', muted: false }) });
   assert.strictEqual(states[0].state, 'idle');
-  client.sendUi({ mute: true, on: false, freq_per_hour: 3, quiet_start: '23:00', quiet_end: '07:00' });
+  client.sendUi({ mute: true, on: false, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
   assert.deepStrictEqual(JSON.parse(ws.sent[ws.sent.length - 1]), {
-    t: 'ui', mute: true, on: false, freq_per_hour: 3, quiet_start: '23:00', quiet_end: '07:00' });
+    t: 'ui', mute: true, on: false, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
 });
 
 test('client direct: malformed/non-object JSON ignored, error routed to onError, no player ok', () => {

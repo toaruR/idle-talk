@@ -10,6 +10,7 @@ from mocks import FakeClock, mock_asr_send, mock_llm_stream, mock_tts_post
 from idle_talk.asr_worker import handle_request, is_hallucination, make_server
 from idle_talk.clients import (
     LLM_REQ_SCHEMA,
+    TTS_RATE,
     AsrClient,
     AsrTimeout,
     LlmClient,
@@ -93,6 +94,29 @@ def test_llm_null_content_chunk_is_skipped():
     assert list(parse_sse(lines)) == ["やあ"]
     with pytest.raises(ValueError):
         list(parse_sse(['data: {"choices":[{"delta":{"content":1}}]}\n']))
+
+
+def test_tts_voice_overrides_audio_query():
+    sent = []
+
+    def post(url, body, timeout):
+        if "audio_query" in url:
+            return b'{"speedScale": 1.0, "pitchScale": 0.0}'
+        sent.append(json.loads(body))
+        return b"RIFF"
+    fixed = {"outputSamplingRate": TTS_RATE, "outputStereo": False}
+    TtsClient(post=post, voice={"speedScale": 1.4}).synthesize("a")
+    assert sent == [{"speedScale": 1.4, "pitchScale": 0.0, **fixed}]
+    sent.clear()
+    TtsClient(post=post).synthesize("a")
+    assert sent == [{"speedScale": 1.0, "pitchScale": 0.0, **fixed}]
+
+
+def test_tts_rate_matches_web_player():
+    import pathlib
+    import re
+    js = (pathlib.Path(__file__).resolve().parents[1] / "web" / "player.js").read_text(encoding="utf-8")
+    assert int(re.search(r"DEFAULT_PCM_RATE = (\d+);", js).group(1)) == TTS_RATE
 
 
 def test_tts_warmup_uses_long_timeout_and_swallows_failure():

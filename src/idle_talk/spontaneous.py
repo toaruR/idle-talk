@@ -1,6 +1,7 @@
 """自発発話スケジューラ (設計書 6.1 / 8.1 / 4.3-5)。既定オフ・雑談モードのみ。
 
 発火可否の判定と待ち時間の管理だけを持つ純ロジック。再生は Director が通常応答と同じ経路で行う。
+待ち時間は「IDLE になってから (直前の発話が終わってから) の沈黙秒数」で、基本値は interval_s。
 沈黙は同意ではない: 無反応が続くたびに待ち時間を 2 倍に延ばし、決して短縮・連続発火しない。
 """
 from __future__ import annotations
@@ -37,7 +38,7 @@ class Spontaneous:
                  record: Callable[[str, dict], None] | None = None, mode: str = CHAT_MODE) -> None:
         self.cfg = cfg or Config()
         self.enabled = self.cfg.spontaneous_enabled
-        self.freq_per_hour = self.cfg.freq_per_hour
+        self.interval_s = self.cfg.spont_interval_s
         self.quiet_start = self.cfg.quiet_start
         self.quiet_end = self.cfg.quiet_end
         self.mode = mode
@@ -48,53 +49,46 @@ class Spontaneous:
         self.pending = False  # 準備中 (発話生成・合成中)
         self.fired = 0
         self.cancelled = 0
-        self.intervals: list[float] = []  # 発火直後に設定した次回までの待ち時間 (秒)
-        self.next_at: float | None = None
+        self.intervals: list[float] = []  # 各発火で使った待ち時間 (秒)
 
     # ---- 設定 ----
     def apply_settings(self, s: dict) -> None:
         """core.settings (検証済み) を取り込む。範囲外は ValueError (5006 相当)。"""
-        f = s.get("freq_per_hour", self.freq_per_hour)
-        if not isinstance(f, int) or isinstance(f, bool) or not 0 <= f <= 12:
-            raise ValueError(f"freq_per_hour must be in [0, 12]: {f}")
-        Config(freq_per_hour=f, quiet_start=s.get("quiet_start", self.quiet_start),
-               quiet_end=s.get("quiet_end", self.quiet_end))  # HH:MM 検証
-        self.freq_per_hour = f
+        iv = s.get("interval_s", self.interval_s)
+        Config(spont_interval_s=iv, quiet_start=s.get("quiet_start", self.quiet_start),
+               quiet_end=s.get("quiet_end", self.quiet_end))  # 範囲・HH:MM 検証
+        self.interval_s = iv
         self.quiet_start = s.get("quiet_start", self.quiet_start)
         self.quiet_end = s.get("quiet_end", self.quiet_end)
         if "on" in s:
             self.enabled = bool(s["on"])
-            if not self.enabled:
-                self.next_at = None
 
     @property
-    def base_interval(self) -> float:
-        return 3600.0 / self.freq_per_hour if self.freq_per_hour else float("inf")
+    def wait_s(self) -> float:
+        """次の発火までに必要な沈黙秒数。直前の自発発話が無反応なら 2 倍ずつ延びる。"""
+        return float(self.interval_s * 2 ** (self.silent_count + int(self.awaiting_reaction)))
 
     def is_quiet(self) -> bool:
         return in_quiet_hours(self._minutes(), self.quiet_start, self.quiet_end)
 
     # ---- 発火判定 ----
-    def should_fire(self, now: float, idle: bool) -> bool:
-        if not self.enabled or self.mode != CHAT_MODE or not idle or self.pending:
+    def should_fire(self, now: float, idle_since: float | None) -> bool:
+        """idle_since: IDLE になった時刻 (IDLE でなければ None)。"""
+        if not self.enabled or self.mode != CHAT_MODE or idle_since is None or self.pending:
             return False
-        if self.freq_per_hour <= 0 or self.is_quiet():
+        if self.is_quiet():
             return False
-        if self.next_at is None:  # 有効化後の初回は 1 周期待つ
-            self.next_at = now + self.base_interval
-            return False
-        return now >= self.next_at
+        return now - idle_since >= self.wait_s
 
     def fire(self, now: float) -> None:
-        """発火確定。直前の自発発話に反応が無ければ待ち時間を倍にする。"""
+        """発火確定。直前の自発発話に反応が無ければ無反応回数を数える (待ち時間が倍になる)。"""
+        wait = self.wait_s
         if self.awaiting_reaction:
             self.silent_count += 1
         self.pending, self.awaiting_reaction = True, True
         self.fired += 1
-        interval = self.base_interval * (2 ** self.silent_count)
-        self.intervals.append(interval)
-        self.next_at = now + interval
-        self._record("spontaneous_fire", {"silent_count": self.silent_count, "interval_s": interval})
+        self.intervals.append(wait)
+        self._record("spontaneous_fire", {"silent_count": self.silent_count, "interval_s": wait})
 
     def done(self) -> None:
         self.pending = False

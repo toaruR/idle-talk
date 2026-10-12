@@ -40,7 +40,14 @@ def test_defaults_structs():
 def test_defaults_spontaneous():
     c = Config()
     assert c.spontaneous_enabled is False
-    assert (c.freq_per_hour, c.quiet_start, c.quiet_end) == (3, "22:00", "07:00")
+    assert (c.spont_interval_s, c.quiet_start, c.quiet_end) == (1200, "22:00", "07:00")
+
+
+@pytest.mark.parametrize("v", [9, 3601, 1.5, True])
+def test_spont_interval_range(v):
+    with pytest.raises(ValueError):
+        Config(spont_interval_s=v)
+    assert Config(spont_interval_s=10).spont_interval_s == 10
 
 
 def test_defaults_field_names():
@@ -49,7 +56,7 @@ def test_defaults_field_names():
         "OVERLAP_MAX", "HTTP_TIMEOUT", "DUCK_GAIN", "VAR_SUM", "G2_SUM", "TTS_RATIO_MAX",
         "TEST_N", "E_PARAMS", "DB_BACKUP", "MIN_SEG", "T_confirm", "STOP_WORDS", "N_TURNS",
         "SIL_BACKCHANNEL", "BC_COOLDOWN", "RATIO_Q", "ASR_HALLU",
-        "spontaneous_enabled", "freq_per_hour", "quiet_start", "quiet_end",
+        "spontaneous_enabled", "spont_interval_s", "quiet_start", "quiet_end",
     }
     assert len(expected) == 27
     assert {f.name for f in dataclasses.fields(Config)} == expected
@@ -78,7 +85,7 @@ def test_range_sil_backchannel():
 POSITIVE = [
     {"t": "hello", "version": 1, "sample_rate": 16000, "client_id": "abc"},
     {"t": "playback", "epoch": 1, "utterance_id": 2, "chunk_id": 3, "position_ms": 600000, "state": "started"},
-    {"t": "ui", "mute": True, "on": False, "freq_per_hour": 12, "quiet_start": "22:00", "quiet_end": "07:00"},
+    {"t": "ui", "mute": True, "on": False, "interval_s": 3600, "quiet_start": "22:00", "quiet_end": "07:00"},
     {"t": "ping", "ts": 123},
     {"t": "pong", "ts": 123},
     {"t": "duck", "epoch": 1, "gain": 0.2},
@@ -97,7 +104,8 @@ def test_schema_positive():
 
 def test_schema_negative():
     neg = [
-        {"t": "ui", "freq_per_hour": 13},
+        {"t": "ui", "interval_s": 3601},
+        {"t": "ui", "interval_s": 9},
         {"t": "playback", "epoch": 1, "utterance_id": 2, "chunk_id": 3, "position_ms": 600001, "state": "started"},
         {"t": "error", "code": 3999, "message": "x"},
         {"t": "state", "state": "foo", "muted": False},
@@ -203,6 +211,10 @@ def test_repo_settings_file_is_valid():
     assert DEFAULT_SPEAKER == 888753760
     load_ports(ROOT / SETTINGS_FILE)  # 利用者が値を変えてもよいので、読めることだけ確認
     load_speaker(ROOT / SETTINGS_FILE)
+    from idle_talk.config import load_voice
+    load_voice(ROOT / SETTINGS_FILE)
+    from idle_talk.config import load_spontaneous
+    Config(**load_spontaneous(ROOT / SETTINGS_FILE))
 
 
 def test_load_speaker(tmp_path):
@@ -220,6 +232,49 @@ def test_load_speaker_rejects_invalid(tmp_path, body):
     f.write_text(body, encoding="utf-8")
     with pytest.raises(ValueError):
         load_speaker(f)
+
+
+def test_load_voice(tmp_path):
+    from idle_talk.config import load_speaker, load_voice
+    f = tmp_path / "s.toml"
+    assert load_voice(f) == {}
+    f.write_text("[tts]\nspeaker = 7\nspeed = 1.3\npitch = -0.05\ntempo_dynamics = 2\npost_silence = 0\n",
+                 encoding="utf-8")
+    assert load_speaker(f) == 7
+    assert load_voice(f) == {"speedScale": 1.3, "pitchScale": -0.05, "tempoDynamicsScale": 2.0,
+                             "postPhonemeLength": 0.0}
+
+
+@pytest.mark.parametrize("body", ["[tts]\nspeed = 0.4\n", "[tts]\nspeed = 2.1\n", "[tts]\nspeed = \"1\"\n",
+                                  "[tts]\nspeed = true\n", "[tts]\npitch = 0.2\n", "[tts]\npause = -1\n",
+                                  "[tts]\nspeedScale = 1.0\n"])
+def test_load_voice_rejects_invalid(tmp_path, body):
+    from idle_talk.config import load_voice
+    f = tmp_path / "s.toml"
+    f.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_voice(f)
+
+
+def test_load_spontaneous(tmp_path):
+    from idle_talk.config import load_spontaneous
+    f = tmp_path / "s.toml"
+    assert load_spontaneous(f) == {}
+    f.write_text('[spontaneous]\non = true\ninterval_s = 30\nquiet_start = "23:00"\n', encoding="utf-8")
+    kw = load_spontaneous(f)
+    assert kw == {"spontaneous_enabled": True, "spont_interval_s": 30, "quiet_start": "23:00"}
+    c = Config(**kw)
+    assert (c.spontaneous_enabled, c.spont_interval_s, c.quiet_end) == (True, 30, "07:00")
+
+
+@pytest.mark.parametrize("body", ["[spontaneous]\non = 1\n", "[spontaneous]\ninterval_s = 30.0\n",
+                                  "[spontaneous]\nfreq_per_hour = 3\n", "[spontaneous]\nquiet_start = 2300\n"])
+def test_load_spontaneous_rejects_invalid(tmp_path, body):
+    from idle_talk.config import load_spontaneous
+    f = tmp_path / "s.toml"
+    f.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_spontaneous(f)
 
 
 def test_load_llm_launch(tmp_path):

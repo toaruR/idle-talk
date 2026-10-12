@@ -43,6 +43,10 @@
 - AivisSpeech と、監督しない llama-server は手動起動のため、`llm` / `tts` を変えたら各サーバ自体の待受ポートも合わせる。Director が起動する llama-server には `[ports].llm` (または `--llm-url` のポート) が渡される。
 - 話者 ID は `[tts]` の `speaker` で指定する。AivisSpeech が声 (モデル) とスタイルの組ごとに振る整数で、`/audio_query` と `/synthesis` の `speaker` パラメータに渡す。既定は 888753760 (`config.DEFAULT_SPEAKER`)。
 - 話者 ID の優先順位は `--speaker`、設定ファイル、既定値の順。M0 計測では環境変数 `AIVIS_SPEAKER` が設定ファイルより優先する。負数・非整数・`[tts]` の未知キーは `ValueError`。
+- 声パラメータは `[tts]` の `speed` / `intonation` / `tempo_dynamics` / `pitch` / `volume` / `pause` / `pre_silence` / `post_silence` で指定する (`config.VOICE_PARAMS`、`config.load_voice`)。それぞれ AudioQuery の `speedScale` / `intonationScale` / `tempoDynamicsScale` / `pitchScale` / `volumeScale` / `pauseLengthScale` / `prePhonemeLength` / `postPhonemeLength` に対応する。
+- `TtsClient` は `/audio_query` の結果を指定キーだけ上書きして `/synthesis` に渡す。未指定のキーは AivisSpeech の既定値のまま。出力は `clients.TTS_RATE`=24000Hz モノラルに固定する (`web/player.js` の再生レートと一致させる)。
+- `[tts]` は起動後も反映される。`main.TtsSettingsReloader` が合成のたびに設定ファイルの更新時刻を見て、変わっていれば話者と声パラメータを読み直す (次の発話から効く)。不正な値は警告して前の値を保つ。`--speaker` 指定時は話者を上書きしない。起動時に合成済みの相槌クリップは再起動まで前の声のまま。他のセクション (`[ports]` / `[spontaneous]` / `[llm]`) は起動時のみ読む。
+- 範囲は AivisSpeech Engine 1.2.0 の openapi の記載に従う (speed 0.5〜2.0、intonation / tempo_dynamics / volume 0〜2、pitch -0.15〜0.15、pause と無音長は 0 以上)。範囲外・非数値は `ValueError`。
 - 使える ID は AivisSpeech の `GET /speakers` で確認する。インストールされていない ID を指定すると、合成のたびに AivisSpeech がエラーを返す (起動時には検査しない)。
 
 ## WebSocket プロトコル (設計書 §12.1)
@@ -61,7 +65,7 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 |---|---|---|
 | `hello` | B→S | `version`(=1), `sample_rate`(=16000), `client_id`(1〜64 文字) |
 | `playback` | B→S | `epoch`, `utterance_id`, `chunk_id`, `position_ms`(0〜600000), `state`(started/finished/dropped) |
-| `ui` | B→S | `mute`, `on`, `freq_per_hour`(0〜12), `quiet_start` / `quiet_end`(HH:MM) |
+| `ui` | B→S | `mute`, `on`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM) |
 | `ping` / `pong` | 双方向 | `ts` |
 | `duck` | S→B | `epoch`, `gain`(0〜1) |
 | `cancel` | S→B | `new_epoch` |
@@ -147,9 +151,11 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
   - 無音が `T_silence` に達した時点で未完了なら取り消し、`backchannel_misfire` として記録する。
   - 相槌は G1 の遅延集計から除外する。
 - 自発発話:
-  - 既定はオフで、雑談モードのときだけ動く。オンにすると `freq_per_hour` は 3。
-  - 休止時間帯 22:00〜07:00 は発話しない。
-  - 無反応が続くたびに待ち時間を 2 倍に延ばす。沈黙を同意とはみなさない。
+  - 既定はオフで、雑談モードのときだけ動く。`idle_talk.toml` の `[spontaneous]` (`on` / `interval_s` / `quiet_start` / `quiet_end`、`config.load_spontaneous`) で起動時の値を指定する。画面の設定欄の初期値は `/config.json` の `ui` で同じ値が渡り、接続時にページが `ui` メッセージで送り返す。
+  - IDLE の沈黙が `interval_s` 秒 (既定 1200、10〜3600) 続いたら話しかける。沈黙は IDLE になった時刻 (応答の再生終了、自発発話の再生終了) から測る。`main.spontaneous_loop` が `SPONT_TICK_S`=1 秒ごとに `director.spontaneous_tick` を呼ぶ (無操作休止 `IDLE_TIMEOUT` の判定も同じ呼び出し)。
+  - 休止時間帯 (既定 22:00〜07:00) は発話しない。
+  - 無反応が続くたびに待ち時間を 2 倍に延ばす (30 秒なら 30, 60, 120…)。利用者が話すと基本値に戻る。沈黙を同意とはみなさない。
+  - 利用者の操作 (発話・応答・設定変更) が `IDLE_TIMEOUT`=1800 秒無いと休止 (`rest`) に入り、自発発話も止まる。
   - 準備中に利用者が話し始めたら取り消す。
 - 質問率 `RATIO_Q`: 3 応答に 1 回以下。
 
@@ -202,7 +208,7 @@ DB は `<data-dir>/idle_talk.db`。WAL / synchronous=NORMAL で、書き込み�
 時間は特記なき限り ms。
 
 - 発話区間と割り込み: `T_silence`=400、`MIN_SEG`=200、`T_confirm`=400 (300〜500)、`OVERLAP_MAX`=300、`DUCK_GAIN`=0.2。
-- 相槌と自発発話: `SIL_BACKCHANNEL`=300 (250〜350 かつ `T_silence` 未満)、`BC_COOLDOWN`=5s、`freq_per_hour` 0〜12。
+- 相槌と自発発話: `SIL_BACKCHANNEL`=300 (250〜350 かつ `T_silence` 未満)、`BC_COOLDOWN`=5s、`spont_interval_s` 10〜3600 (既定 1200)。
 - 通信と休止: `PING_INTERVAL`=5s、`IDLE_TIMEOUT`=1800s。
 - 遅延予算と試験: `VAR_SUM`=750、`G2_SUM`=130、`TTS_RATIO_MAX`=0.7、`TTS_GPU_THRESH`=300、`TEST_N`=20、`N_TURNS`=8、`DB_BACKUP`=1。
 - 範囲外の値は、`Config` を生成した時点で `ValueError` になる。

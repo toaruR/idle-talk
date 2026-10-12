@@ -49,6 +49,9 @@ def _hhmm_ok(s: str) -> bool:
     return bool(re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", s))
 
 
+SPONT_INTERVAL_RANGE = (10, 3600)  # 自発発話の沈黙秒数の受付範囲 (protocol の ui.interval_s と同じ)
+
+
 @dataclass(frozen=True)
 class Config:
     T_silence: int = 400
@@ -76,7 +79,7 @@ class Config:
     ASR_HALLU: AsrHallu = field(default_factory=AsrHallu)
     # 自発発話 (既定オフ)
     spontaneous_enabled: bool = False
-    freq_per_hour: int = 3
+    spont_interval_s: int = 1200  # 沈黙がこの秒数続いたら話しかける (旧 freq_per_hour=3 相当)
     quiet_start: str = "22:00"
     quiet_end: str = "07:00"
 
@@ -87,8 +90,9 @@ class Config:
             raise ValueError(f"SIL_BACKCHANNEL must be in [250, 350]: {self.SIL_BACKCHANNEL}")
         if self.SIL_BACKCHANNEL >= self.T_silence:
             raise ValueError("SIL_BACKCHANNEL must be < T_silence")
-        if not 0 <= self.freq_per_hour <= 12:
-            raise ValueError(f"freq_per_hour must be in [0, 12]: {self.freq_per_hour}")
+        lo, hi = SPONT_INTERVAL_RANGE
+        if type(self.spont_interval_s) is not int or not lo <= self.spont_interval_s <= hi:
+            raise ValueError(f"spont_interval_s must be an int in [{lo}, {hi}]: {self.spont_interval_s!r}")
         if not (_hhmm_ok(self.quiet_start) and _hhmm_ok(self.quiet_end)):
             raise ValueError("quiet_start/quiet_end must be HH:MM")
 
@@ -127,12 +131,56 @@ def load_ports(path: str | Path = SETTINGS_FILE) -> Ports:
     return Ports(**raw)
 
 
+# [tts] の声パラメータ: 設定キー -> (AivisSpeech AudioQuery のフィールド, 下限, 上限)。
+# 範囲は AivisSpeech Engine 1.2.0 の openapi の説明に従う (無音長と句読点の倍率は上限の記載なし)。
+VOICE_PARAMS: dict[str, tuple[str, float, float]] = {
+    "speed": ("speedScale", 0.5, 2.0),              # 話速
+    "intonation": ("intonationScale", 0.0, 2.0),    # スタイルの感情表現の強さ
+    "tempo_dynamics": ("tempoDynamicsScale", 0.0, 2.0),  # テンポの緩急
+    "pitch": ("pitchScale", -0.15, 0.15),           # 音高 (0 以外は音質が劣化する)
+    "volume": ("volumeScale", 0.0, 2.0),            # 音量
+    "pause": ("pauseLengthScale", 0.0, float("inf")),     # 句読点の無音の倍率
+    "pre_silence": ("prePhonemeLength", 0.0, float("inf")),   # 音声の前の無音 (秒)
+    "post_silence": ("postPhonemeLength", 0.0, float("inf")),  # 音声の後の無音 (秒)
+}
+_TTS_KEYS = ("speaker", *VOICE_PARAMS)
+
+
 def load_speaker(path: str | Path = SETTINGS_FILE) -> int:
     """[tts].speaker を読む。無ければ DEFAULT_SPEAKER。非整数・負数は ValueError。"""
-    v = _read_section(path, "tts", ("speaker",)).get("speaker", DEFAULT_SPEAKER)
+    v = _read_section(path, "tts", _TTS_KEYS).get("speaker", DEFAULT_SPEAKER)
     if type(v) is not int or v < 0:
         raise ValueError(f"[tts].speaker must be a non-negative int: {v!r}")
     return v
+
+
+def load_voice(path: str | Path = SETTINGS_FILE) -> dict[str, float]:
+    """[tts] の声パラメータを AudioQuery のフィールド名で返す (指定されたキーのみ)。
+
+    数値でない・VOICE_PARAMS の範囲外は ValueError。"""
+    raw = _read_section(path, "tts", _TTS_KEYS)
+    out: dict[str, float] = {}
+    for k, (field, lo, hi) in VOICE_PARAMS.items():
+        if k not in raw:
+            continue
+        v = raw[k]
+        if type(v) not in (int, float) or not lo <= v <= hi:
+            raise ValueError(f"[tts].{k} must be a number in [{lo}, {hi}]: {v!r}")
+        out[field] = float(v)
+    return out
+
+
+def load_spontaneous(path: str | Path = SETTINGS_FILE) -> dict:
+    """[spontaneous] (on / interval_s / quiet_start / quiet_end) を Config の引数名で返す (指定キーのみ)。
+
+    型違い・未知キーは ValueError。範囲と HH:MM は Config 生成時に検証される。"""
+    raw = _read_section(path, "spontaneous", ("on", "interval_s", "quiet_start", "quiet_end"))
+    types = {"on": bool, "interval_s": int, "quiet_start": str, "quiet_end": str}
+    for k, v in raw.items():
+        if type(v) is not types[k]:
+            raise ValueError(f"[spontaneous].{k} must be {types[k].__name__}: {v!r}")
+    names = {"on": "spontaneous_enabled", "interval_s": "spont_interval_s"}
+    return {names.get(k, k): v for k, v in raw.items()}
 
 
 class LlmLaunch(NamedTuple):

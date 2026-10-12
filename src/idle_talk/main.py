@@ -8,6 +8,7 @@ import logging
 import sqlite3
 import subprocess
 import threading
+import tomllib
 import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
@@ -15,7 +16,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
-from .config import SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker
+from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
+                     load_voice)
 from .director import IdleTalkDirector
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
@@ -28,6 +30,7 @@ from .vad import EnergyVad
 log = logging.getLogger("idle_talk.main")
 
 LLM_READY_TIMEOUT_S = 120  # 起動時のモデル読込待ち上限 (4B Q4 の実測は約 5s)
+SPONT_TICK_S = 1.0  # 自発発話の判定周期 (沈黙秒数の分解能)
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"  # src レイアウト前提 (リポジトリ直下の web/)
 
 
@@ -52,22 +55,67 @@ def git_commit() -> str:
         return "unknown"
 
 
+class TtsSettingsReloader:
+    """設定ファイルの更新時刻が変わったら [tts] (話者・声パラメータ) を読み直して tts に反映する。
+
+    合成のたびに呼ぶので、ファイルを保存すれば再起動なしで次の発話から効く。
+    不正な値は警告して前の値を使い続ける。--speaker 指定時は話者を上書きしない。"""
+
+    def __init__(self, tts: TtsClient, path: str | Path, fixed_speaker: bool = False) -> None:
+        self.tts = tts
+        self.path = Path(path)
+        self.fixed_speaker = fixed_speaker
+        self._mtime = self._stat()
+
+    def _stat(self) -> float | None:
+        try:
+            return self.path.stat().st_mtime
+        except OSError:
+            return None
+
+    def reload_if_changed(self) -> bool:
+        mtime = self._stat()
+        if mtime == self._mtime:
+            return False
+        self._mtime = mtime
+        try:
+            speaker = self.tts.speaker if self.fixed_speaker else load_speaker(self.path)
+            voice = load_voice(self.path)
+        except (ValueError, OSError, tomllib.TOMLDecodeError) as e:
+            log.warning("tts settings not reloaded (keeping previous): %s", e)
+            return False
+        self.tts.speaker, self.tts.voice = speaker, voice
+        log.info("tts settings reloaded: speaker=%d voice=%s", speaker, voice)
+        return True
+
+    def synthesize(self, text: str) -> bytes:
+        self.reload_if_changed()
+        return self.tts.synthesize(text)
+
+
 def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> IdleTalkDirector:
     store = Store(data_dir / "idle_talk.db", bool(cfg.DB_BACKUP))
     llm = LlmClient(args.llm_url, cfg)
-    tts = TtsClient(args.tts_url, args.speaker, cfg)
+    tts = TtsClient(args.tts_url, args.speaker, cfg, voice=load_voice(args.config))
     if not tts.warmup():
         log.warning("tts warmup failed: %s", args.tts_url)
     asr = AsrClient(_asr_send(args.asr_url), cfg)
-    return IdleTalkDirector(store, llm.stream_chat, tts.synthesize, lambda: None, EnergyVad(), asr, cfg,
+    reloader = TtsSettingsReloader(tts, args.config, fixed_speaker=args.speaker_from_cli)
+    return IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None, EnergyVad(), asr, cfg,
                             metrics=MetricsRecorder(store), app_commit=git_commit())
 
 
-def start_web(port: int, ws_port: int, root: Path = WEB_DIR) -> ThreadingHTTPServer:
-    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポートをブラウザへ渡す。
+def ui_defaults(cfg: Config) -> dict:
+    """画面の設定欄の初期値 (ui メッセージと同じキー)。idle_talk.toml の [spontaneous] を反映した cfg から作る。"""
+    return {"on": cfg.spontaneous_enabled, "interval_s": cfg.spont_interval_s,
+            "quiet_start": cfg.quiet_start, "quiet_end": cfg.quiet_end}
+
+
+def start_web(port: int, ws_port: int, ui: dict | None = None, root: Path = WEB_DIR) -> ThreadingHTTPServer:
+    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポートと設定欄の初期値をブラウザへ渡す。
 
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
-    config = json.dumps({"ws_port": ws_port}).encode("utf-8")
+    config = json.dumps({"ws_port": ws_port, "ui": ui or {}}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -134,12 +182,20 @@ async def llm_watch(director: IdleTalkDirector, sup: LlmSupervisor) -> None:
         director.request_rest()
 
 
+async def spontaneous_loop(director: IdleTalkDirector, interval_s: float = SPONT_TICK_S,
+                           sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    """interval_s ごとに自発発話と無操作休止 (IDLE_TIMEOUT) を判定する。キャンセルで終了。"""
+    while True:
+        await sleep(interval_s)
+        director.spontaneous_tick()
+
+
 async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None = None) -> None:
     server, pinger = await serve(director.core, port)
     log.info("listening on 127.0.0.1:%d", port)
     sampler = ResourceSampler(director.store, clock=director.now_ms)
     loop = asyncio.get_running_loop()
-    tasks = [pinger, loop.create_task(soak_loop(sampler))]
+    tasks = [pinger, loop.create_task(soak_loop(sampler)), loop.create_task(spontaneous_loop(director))]
     if sup is not None:
         tasks.append(loop.create_task(llm_watch(director, sup)))
     try:
@@ -167,13 +223,14 @@ def main(argv: list[str] | None = None) -> int:
     args.llm_url = args.llm_url or f"http://127.0.0.1:{ports.llm}"
     args.tts_url = args.tts_url or f"http://127.0.0.1:{ports.tts}"
     args.asr_url = args.asr_url or f"http://127.0.0.1:{ports.asr}"
+    args.speaker_from_cli = args.speaker is not None
     args.speaker = load_speaker(args.config) if args.speaker is None else args.speaker
     data_dir = Path(args.data_dir)
     lock = acquire_or_exit(args.pid_file or data_dir / "idle_talk.pid")  # 二重起動は SystemExit(4)
     director = sup = web = None
     try:
-        web = start_web(args.web_port, args.port)
-        cfg = Config()
+        cfg = Config(**load_spontaneous(args.config))
+        web = start_web(args.web_port, args.port, ui_defaults(cfg))
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
         asyncio.run(_run(director, args.port, sup))

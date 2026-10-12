@@ -26,7 +26,7 @@
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'freq_per_hour', 'quiet_start', 'quiet_end']) {
+    for (const k of ['mute', 'on', 'interval_s', 'quiet_start', 'quiet_end']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;
@@ -37,15 +37,18 @@
     return msg.muted ? `${label} (ミュート)` : label;
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), clientId }
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onOpen(), clientId }
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onOpen } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
     const ws = new WebSocketCtor(wsUrl(port));
     ws.binaryType = 'arraybuffer';
     const sendJson = (m) => ws.send(JSON.stringify(m));
 
-    ws.onopen = () => sendJson(makeHello(clientId));
+    ws.onopen = () => {
+      sendJson(makeHello(clientId));
+      if (onOpen) onOpen(); // hello の後 (サーバは hello 前のメッセージを受け付けない)
+    };
     ws.onmessage = (ev) => {
       const d = ev.data;
       if (typeof d !== 'string') { if (player) player.pushBinary(d); return; }

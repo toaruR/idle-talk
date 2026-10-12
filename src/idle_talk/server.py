@@ -31,7 +31,7 @@ PROTOCOL_VERSION = 1
 ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 BIND_HOST = "127.0.0.1"
 MISSED_PINGS_LIMIT = 2
-UI_FIELDS = ("mute", "on", "freq_per_hour", "quiet_start", "quiet_end")
+UI_FIELDS = ("mute", "on", "interval_s", "quiet_start", "quiet_end")
 
 
 class Conn(Protocol):
@@ -70,8 +70,8 @@ class WsCore:
         self.on_playback = on_playback
         self.on_ui = on_ui
         self.on_hello = on_hello
-        self.settings: dict = {"mute": False, "on": False,
-                               "freq_per_hour": self.cfg.freq_per_hour,
+        self.settings: dict = {"mute": False, "on": self.cfg.spontaneous_enabled,
+                               "interval_s": self.cfg.spont_interval_s,
                                "quiet_start": self.cfg.quiet_start,
                                "quiet_end": self.cfg.quiet_end}
         self.conn: Conn | None = None
@@ -149,7 +149,7 @@ class WsCore:
                 log.warning("invalid hello rejected")
                 conn.close(CLOSE_VERSION_MISMATCH)
                 return
-            log.warning("out-of-range message rejected: %r", msg.get("t") if isinstance(msg, dict) else msg)
+            log.warning("out-of-range message rejected: %.200r", msg)  # 原因の値を残す (200 字で打ち切り)
             self._error(conn, ERR_OUT_OF_RANGE, "invalid or out-of-range value")
             return
         t = msg["t"]

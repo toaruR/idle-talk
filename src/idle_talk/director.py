@@ -124,6 +124,7 @@ class IdleTalkDirector:
         self.spontaneous = Spontaneous(self.cfg, record=self._bc_record)  # 既定オフ (設計書 6.1 / 8.1)
         self._spont_task: asyncio.Task | None = None
         self._last_op = clock()  # 最後の利用者操作時刻 (IDLE_TIMEOUT 判定)
+        self._idle_since: float | None = clock()  # IDLE になった時刻 (自発発話の沈黙計測)。IDLE 以外は None
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -205,9 +206,18 @@ class IdleTalkDirector:
 
     def _on_hello(self) -> None:
         ctx = self.fsm.ctx
+        if self.spontaneous.pending:  # 前の接続で再生されずに残った自発発話は完了通知が来ないので取消す
+            self._cancel_spontaneous()
+        self.spontaneous.on_user_speech()  # 新しい聞き手: 無反応による待ち時間の延長を戻す
+        if ctx.state is State.IDLE:  # 沈黙は接続時から測る (接続前の時間で即座に話しかけない)
+            self._idle_since = self.clock()
         self._emit({"t": "state", "state": ctx.state.value, "muted": ctx.muted})
 
     def _send_state(self, ctx: Ctx) -> None:
+        if ctx.state is not State.IDLE:
+            self._idle_since = None
+        elif self._idle_since is None:
+            self._idle_since = self.clock()
         self._emit({"t": "state", "state": ctx.state.value, "muted": ctx.muted})
         if ctx.state is State.INTERRUPT_CHECK:
             self._ic_start_ms = int(self.clock() * 1000)
@@ -334,6 +344,7 @@ class IdleTalkDirector:
             if c is None or (c["chunks"] and c["finished"] >= c["chunks"]):  # 自発発話の再生完了
                 self._finalize_utterance("spontaneous", interrupted=False)
                 self.spontaneous.done()
+                self._idle_since = self.clock()  # 自発発話は IDLE のまま再生するので、沈黙の計測をここで始め直す
             return
         if c and self._gen_done and c["chunks"] and c["finished"] >= c["chunks"]:
             self.fsm.enqueue(Event(Ev.PLAYBACK_DONE, epoch=c["epoch"]))
@@ -400,7 +411,8 @@ class IdleTalkDirector:
             self.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
             self._pump()
             return "rest"
-        if self.spontaneous.should_fire(now, idle):
+        listening = self.core.conn is not None and self.core.hello_done  # 聞き手がいないと再生完了が来ない
+        if listening and self.spontaneous.should_fire(now, self._idle_since if idle else None):
             self.spontaneous.fire(now)
             self._gen_done = False
             self._spont_task = asyncio.get_running_loop().create_task(self._spontaneous_respond())
