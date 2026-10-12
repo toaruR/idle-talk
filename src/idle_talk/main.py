@@ -19,6 +19,7 @@ from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
                      load_voice)
 from .director import IdleTalkDirector
+from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
 from .portlock import acquire_or_exit
@@ -226,6 +227,17 @@ async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None 
         await server.wait_closed()
 
 
+def open_talk_log(path: Path) -> logging.Handler:
+    """発話文言 (USER / AI) を path に UTF-8 で追記する。他のログ (idle_talk.log) には流さない。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h = logging.FileHandler(path, encoding="utf-8")
+    h.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    talk_log.addHandler(h)
+    talk_log.setLevel(logging.INFO)
+    talk_log.propagate = False
+    return h
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="idle-talk")
     p.add_argument("--config", default=SETTINGS_FILE)
@@ -251,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     stop_file = data_dir / STOP_FILE
     stop_file.unlink(missing_ok=True)  # 前回の停止要求の残りで即終了しない
     director = sup = web = None
+    talk = open_talk_log(data_dir / TALK_LOG_FILE)
     try:
         cfg = Config(**load_spontaneous(args.config))
         web = start_web(args.web_port, args.port, ui_defaults(cfg))
@@ -267,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         if web is not None:
             web.shutdown()
             web.server_close()
+        talk_log.removeHandler(talk)
+        talk.close()
         lock.release()
     return 0
 

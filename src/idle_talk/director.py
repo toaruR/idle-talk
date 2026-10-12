@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import socket
 import time
 from collections.abc import Callable
@@ -21,7 +22,7 @@ from .epoch import Epoch
 from .errors import ERR_OUT_OF_RANGE
 from .fsm import Action, Ctx, Ev, Event, State, transition
 from .fsm import Director as FsmDirector
-from .history import PlaybackHistory, history_window
+from .history import PlaybackHistory, history_window, talk_log
 from .ingress import Ingress
 from .interrupt import judge
 from .metrics import MetricsRecorder
@@ -34,7 +35,13 @@ from .vad import Vad
 
 log = logging.getLogger("idle_talk.director")
 
-SYSTEM_PROMPT = "あなたは気さくな日本語の雑談相手です。短い文で自然に返答してください。"
+SYSTEM_PROMPT = ("あなたは気さくな日本語の雑談相手です。話し言葉で 2〜4 文ほど自然に返答してください。"
+                 "相づちだけで終わらせず、自分の感想や小さな体験談を添え、ときどき質問や関連する新しい話題を自分から振ってください。"
+                 "箇条書きや記号は使わないでください。")
+# 自発発話で振る話題の種。毎回ランダムに 1 つ渡して、同じ話題の繰り返しを避ける。
+SPONT_TOPICS = ("最近の天気や季節", "食べ物や料理", "休日の過ごし方", "最近気になっていること", "子どもの頃の思い出",
+                "好きな音楽や映画", "旅行してみたい場所", "ちょっとした豆知識", "動物や生き物", "今日あったこと",
+                "趣味や習い事", "仕事や勉強の息抜き", "もしもの話", "身近な道具や家電")
 FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 
 
@@ -275,8 +282,8 @@ class IdleTalkDirector:
         muted = bool(settings.get("mute"))
         if muted and not self.fsm.ctx.muted:
             self.fsm.enqueue(Event(Ev.MUTE))
-        elif not muted and self.fsm.ctx.muted:
-            self.fsm.enqueue(Event(Ev.WAKE))
+        elif not muted and (self.fsm.ctx.muted or self.fsm.ctx.state is State.REST):
+            self.fsm.enqueue(Event(Ev.WAKE))  # 無操作・連続失敗による休止もミュートなしの操作で解除する
         self._pump()
 
     def _on_transcript(self, uid: int, text: str) -> None:
@@ -286,6 +293,7 @@ class IdleTalkDirector:
         if self.fsm.ctx.state is State.INTERRUPT_CHECK and self._judge_interrupt(text) == "backchannel":
             self._m_abandon()
             return  # 相槌は履歴に積まない
+        talk_log.info("USER: %s", text)
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
 
     def _record_echo_chain(self, uid: int, text: str) -> None:
@@ -423,7 +431,9 @@ class IdleTalkDirector:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
             {"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
             for t in history_window(self.store, self.cfg) if t["text"]]
-        messages.append({"role": "user", "content": "(利用者は黙っています。短く自然に話しかけてください)"})
+        messages.append({"role": "user", "content": (
+            "(利用者は黙っています。これまでの会話と違う話題を自分から振ってください。"
+            f"例えば「{random.choice(SPONT_TOPICS)}」について、自分の話を一言添えて 2〜3 文で話しかけ、最後に軽く質問してください)")})
         self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
         me = asyncio.current_task()
         await self.pipeline.respond(messages)

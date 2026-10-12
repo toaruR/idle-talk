@@ -173,6 +173,20 @@ def test_request_rest_moves_to_rest_and_notifies(tmp_path):
         store.close()
 
 
+def test_ui_without_mute_wakes_from_rest(tmp_path):
+    import json
+    from idle_talk.fsm import State
+    d, b, store = make(tmp_path)
+    try:
+        d.request_rest()  # 無操作 (IDLE_TIMEOUT) と同じく muted=False の休止
+        d.core.on_text(b, json.dumps({"t": "ui", "mute": False}))  # 画面の「開始」は接続時に ui を送る
+        assert d.fsm.ctx.state is State.IDLE
+        d.core.on_text(b, json.dumps({"t": "ui", "mute": True}))
+        assert d.fsm.ctx.state is State.REST
+    finally:
+        store.close()
+
+
 def test_hello_gets_current_state(tmp_path):
     d, b, store = make(tmp_path)  # make() が attach (hello 送信) 済み
     try:

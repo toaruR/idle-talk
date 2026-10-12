@@ -9,6 +9,7 @@ from mocks import FakeClock, mock_asr_send, mock_llm_stream, mock_tts_post
 
 from idle_talk.asr_worker import handle_request, is_hallucination, make_server
 from idle_talk.clients import (
+    LLM_MAX_TOKENS,
     LLM_REQ_SCHEMA,
     TTS_RATE,
     AsrClient,
@@ -32,7 +33,7 @@ def test_llm_request_schema_and_done():
     url, body = cap[0]
     assert url.endswith("/v1/chat/completions")
     assert Draft7Validator(LLM_REQ_SCHEMA).is_valid(body)
-    assert body["model"] == "local" and body["stream"] is True and body["max_tokens"] == 120
+    assert body["model"] == "local" and body["stream"] is True and body["max_tokens"] == LLM_MAX_TOKENS
     assert set(body) == {"model", "messages", "stream", "max_tokens"}
     # [DONE] で終端: 以降の行は読まない
     lines = ["data: [DONE]\n", 'data: {"choices":[{"delta":{"content":"x"}}]}\n']

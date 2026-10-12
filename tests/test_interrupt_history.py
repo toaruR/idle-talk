@@ -113,3 +113,27 @@ def test_history_window_limit_and_log(store, caplog):
     assert len(w) <= CFG.N_TURNS == 8
     assert w[-1]["text"] == "t999"
     assert len([r for r in caplog.records if r.name == "idle_talk.history"]) == 1
+
+
+def test_talk_log_records_played_text(store, tmp_path):
+    from idle_talk.history import talk_log
+    from idle_talk.main import open_talk_log
+    path = tmp_path / "talk.log"
+    handler = open_talk_log(path)
+    try:
+        h = PlaybackHistory(store)
+        h.register_chunk(1, 1, 0, "こんにちは。")
+        h.register_chunk(1, 1, 1, "未再生。")
+        h.on_playback(_pb(0, "finished", 500))
+        h.commit(1, 1, 10)
+        h.register_chunk(1, 2, 0, "途中。")
+        h.register_chunk(1, 2, 1, "続き。")
+        h.on_playback(_pb(0, "finished", 300, u=2))
+        h.on_playback(_pb(1, "started", 100, u=2))
+        h.commit(1, 3, 30, interrupted=True)  # 再生済みが無い中断は記録しない
+        h.commit(1, 2, 20, interrupted=True)
+    finally:
+        talk_log.removeHandler(handler)
+        handler.close()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert [ln.split(" ", 2)[2] for ln in lines] == ["AI: こんにちは。", "AI(中断): 途中。"]

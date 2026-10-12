@@ -14,7 +14,8 @@ from .asr_worker import ASR_REQ_SCHEMA, ASR_RES_SCHEMA, is_hallucination
 from .config import DEFAULT_SPEAKER, Config
 from .errors import ERR_ASR_FAILED, ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 
-LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":True},"max_tokens":{"const":120}}}
+LLM_MAX_TOKENS = 300  # 応答 1 回の生成上限 (日本語で 2〜5 文程度)
+LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":True},"max_tokens":{"const":LLM_MAX_TOKENS}}}
 LLM_CHUNK_SCHEMA = {"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}
 
 _LLM_REQ = Draft7Validator(LLM_REQ_SCHEMA)
@@ -60,7 +61,7 @@ def _is_timeout(e: Exception) -> bool:
 # ---------------- LLM ----------------
 
 def build_llm_request(messages: list[dict]) -> dict:
-    req = {"model": "local", "messages": messages, "stream": True, "max_tokens": 120}
+    req = {"model": "local", "messages": messages, "stream": True, "max_tokens": LLM_MAX_TOKENS}
     errs = list(_LLM_REQ.iter_errors(req))
     if errs:
         raise ValueError(f"invalid llm request: {errs[0].message}")

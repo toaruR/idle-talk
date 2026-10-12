@@ -18,6 +18,7 @@ idle-talk restart
 idle-talk status    # 停止中は exit 3
 ```
 `idle-talk.cmd` は Windows 用 (`python -m idle_talk.ctl ...` と同じ。`--data-dir` / `--config` 可)。停止は `data/idle_talk.stop` を置いて main に知らせる。
+発話の文言は `data/talk.log` に追記される (`日時 USER: …` / `日時 AI: …`)。
 
 個別に起動する場合:
 ```

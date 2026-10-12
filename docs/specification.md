@@ -29,6 +29,7 @@
 
 - 二重起動は pid ロックで検出し exit 4。`asr_worker` も `--pid-file` 指定時は同じ検査をする。
 - `python -m idle_talk.ctl start|stop|restart|status` (Windows は `idle-talk.cmd`) が ASR ワーカーと Director を端末から切り離して起動する。PID ファイル (`data/idle_talk.pid` / `data/asr_worker.pid`) の生存確認で二重起動を拒否し (exit 4)、出力は `data/idle_talk.log` / `data/asr_worker.log` に追記する。
+- 発話文言は `data/talk.log` (UTF-8) に `日時 USER: …` / `日時 AI: …` で追記する (ロガー `idle_talk.talk`、他のログには流さない)。利用者は ASR 確定時、AI は DB の turns と同じく再生を終えたチャンクだけを確定時に書き、途中で止まった発話は `AI(中断):` とする。
 - 停止: `ctl stop` が `data/idle_talk.stop` を置き、Director は `main.stop_watch` (0.5 秒周期) で検知して Ctrl+C と同じ終了処理をする。`ctl.STOP_TIMEOUT_S`=20 秒以内に終わらなければ強制終了する (このとき llama-server が残ることがある)。ASR ワーカーは即時に強制終了する。Director は起動時に残っていた停止ファイルを消す。
 - `main` は CLI 引数と `idle_talk.toml` のみを使い、環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER` は M0 計測と実機試験だけが読む。
 - 終了時 (Ctrl+C) に `director.close()` が `run_meta` を 1 行書いてからストアを閉じる。
@@ -154,10 +155,10 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
   - 相槌は G1 の遅延集計から除外する。
 - 自発発話:
   - 既定はオフで、雑談モードのときだけ動く。`idle_talk.toml` の `[spontaneous]` (`on` / `interval_s` / `quiet_start` / `quiet_end`、`config.load_spontaneous`) で起動時の値を指定する。画面の設定欄の初期値は `/config.json` の `ui` で同じ値が渡り、接続時にページが `ui` メッセージで送り返す。
-  - IDLE の沈黙が `interval_s` 秒 (既定 1200、10〜3600) 続いたら話しかける。沈黙は IDLE になった時刻 (応答の再生終了、自発発話の再生終了) から測る。`main.spontaneous_loop` が `SPONT_TICK_S`=1 秒ごとに `director.spontaneous_tick` を呼ぶ (無操作休止 `IDLE_TIMEOUT` の判定も同じ呼び出し)。
+  - IDLE の沈黙が `interval_s` 秒 (既定 1200、10〜3600) 続いたら話しかける。沈黙は IDLE になった時刻 (応答の再生終了、自発発話の再生終了) から測る。`main.spontaneous_loop` が `SPONT_TICK_S`=1 秒ごとに `director.spontaneous_tick` を呼ぶ (無操作休止 `IDLE_TIMEOUT` の判定も同じ呼び出し)。自発発話の指示には `director.SPONT_TOPICS` から話題の種を 1 つ無作為に添え、前の会話と違う話題を振らせる。応答の生成上限は `clients.LLM_MAX_TOKENS`=300 (2〜4 文程度)。
   - 休止時間帯 (既定 22:00〜07:00) は発話しない。
   - 無反応が続くたびに待ち時間を 2 倍に延ばす (30 秒なら 30, 60, 120…)。利用者が話すと基本値に戻る。沈黙を同意とはみなさない。
-  - 利用者の操作 (発話・応答・設定変更) が `IDLE_TIMEOUT`=1800 秒無いと休止 (`rest`) に入り、自発発話も止まる。
+  - 利用者の操作 (発話・応答・設定変更) が `IDLE_TIMEOUT`=1800 秒無いと休止 (`rest`) に入り、自発発話も止まる。ミュートなしの `ui` (画面の「開始」による接続、設定変更) で待機に戻る (無操作・連続失敗の休止も同じ)。
   - 準備中に利用者が話し始めたら取り消す。
 - 質問率 `RATIO_Q`: 3 応答に 1 回以下。
 

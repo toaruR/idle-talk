@@ -7,6 +7,8 @@ from .config import Config
 from .store import Store
 
 log = logging.getLogger("idle_talk.history")
+talk_log = logging.getLogger("idle_talk.talk")  # 発話文言の記録 (main が data/talk.log に出す)
+TALK_LOG_FILE = "talk.log"
 
 
 class PlaybackHistory:
@@ -36,9 +38,12 @@ class PlaybackHistory:
         if interrupted:
             unfinished = [c for c in states if states[c] != "finished"]
             stop = poss[max(unfinished)] if unfinished else (poss[max(poss)] if poss else 0)
+            if body:
+                talk_log.info("AI(中断): %s", body)
             return self.store.add_turn(ts, "ai", body, 0, stop, utterance_id)
         if not body:
             return None
+        talk_log.info("AI: %s", body)
         return self.store.add_turn(ts, "ai", body, 1, None, utterance_id)
 
 
