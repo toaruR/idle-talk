@@ -1,0 +1,1465 @@
+{
+  "plan_version": 1,
+  "summary": "idle-talk を設計書の段階導入(M0〜M5)に沿って 24 タスクに分解。\n【順序の根拠とリスク退役】リスク順位: (1) 本計画が退役するのはモック水準のリスクのみ。実サービスの遅延・VRAM・ASR 幻聴・重なり遅延の実機退役(T003/T004 ほか実機を要するタスク)は運用フェーズのゲート(README 運用フェーズでの確認事項)。T003 と T004 を最初に置くのは、運用フェーズの確認が必要とするクライアントモックと M0 計測/ライブ試験ハーネスを作り、後続タスクが依存するため。T004 は T006 に依存しないため T006 より前に置いた。(2) ブラウザ音声経路(AudioWorklet・16kHz フレーム化・echoCancellation)→T005 の C1〜C4 判定(web/capture_check.js)のスタブ試験で退役(依存は T001 のみ)。スピーカー時の AEC 効果測定は設計 §6.2/§10 が M5 に置き、T023 で行う。(3) 割り込み・epoch 競合(G3/E15)→純ロジック T008・T009、キャンセル順序 T013、注入試験は結線後の T015。(4) DB 破損 E14→T007。(5) WS 接続→T010。(6) 常駐試験ハーネス→T022(8 時間運転は運用フェーズ)。\n【実行順序】T001〜T024 の id 昇順。depends_on は実依存に加え、順序を一意にする直前タスクへの辺を含む(Kahn キュー長 1)。\n【実機と mock】ユーザー判断により T003,T004,T005,T015,T016,T022,T023 の実機検証(-m integration 実行と records/*.db, capture_check.json の評価)は運用フェーズ(README 運用フェーズでの確認事項)へ移管し、本計画の合否には含めない。実機試験・記録評価は運用ツールとして残す。実サービス試験は skip 呼び出しを持たず(test_live_policy.py が検査)、pyproject の addopts(-m 'not integration')で既定実行から除外し、既定実行での除外は exit 5(収集 0 件)で確認する。出所検査(validate_run_meta 等)は負例 fixture で NG を確認する。限界: 出所検査は捏造でないことを証明できない(受容済み残余リスク)。\n【テスト用インターフェース】計測・判定は CLI を増やさず関数として実装(metrics.evaluate_gate, metrics.validate_run_meta, eot.compare_g4, resource_sampler.analyze_soak, echo_chain.evaluate_echo_chain, backchannel.synthesize_clips)。例外は python -m idle_talk.m0_bench(フラグなし)と web/capture_check.html(ブラウザで開き結果 JSON を保存。判定は capture_check.js でスタブ試験)で、該当タスクの intent に設計節への traces を明記。\n【ロールバック】全 intent 末尾に ' | safe_to_stop=true|false | rollback: ...' を付与。safe_to_stop=false は T014 のみ(G3/E15 保証が T015 で緑になるまで未検証)。共有ファイル(config.py 等)を変更する後続タスクは新しい順に revert する。\n【coverage index】§8.1 定数(T_silence, MIN_SEG, T_confirm, DUCK_GAIN, PING_INTERVAL, LLM_RETRY, HTTP_TIMEOUT, E_PARAMS, TEST_N, DB_BACKUP, STOP_WORDS, N_TURNS, STRONG_UTT, ASR_HALLU, OVERLAP_MAX, TTS_GPU_THRESH, TTS_RATIO_MAX, VAR_SUM, G2_SUM, SIL_BACKCHANNEL, BC_COOLDOWN, RATIO_Q, IDLE_TIMEOUT, freq_per_hour)→T001(既定値)+T002(判定)+使用タスク; E1,E2,E3→T009,T015; E4→T003,T011,T015; E5→T010,T015; E6→T011,T015; E7→T013,T015; E8→T013,T015; E9→T016; E10→T023; E11→T006,T004; E12→T009,T022; E13/E14→T007; E15→T008,T013,T015; BC→T018; T-E*,T-BC→同タスク; エラー 4001-4003→T001,T010, 5001-5006→T001,T003,T007,T010,T011,T013; メッセージ型 hello/playback/ui/ping/pong/duck/cancel/resume/state/error→T001(スキーマ),T010(サーバ),T012(ブラウザ),T005(取り込み); テーブル events/turns/topic_cards/memories→T007,T019,T021; 外部契約 llama-server/AivisSpeech/ASR/err/AudioQuery→T003; G1→T002,T016, G2→T002,T015,T016, G3→T012,T015,T016, G4→T002,T017, G5→T002,T022; §9→T006,T004; §6.1→T018,T020; §6.2→T005,T023。\nNOT_IMPLEMENTED: §1 背景・問題・目的・非目標は親見出しで実装対象なし(測定可能目標 §1.2 は T002/T016、制約 §1.4 は T004/T006 で実装); §1.1 問題は記述のみ; §1.3 非目標は範囲外の定義のみ(§1/§1.1/§1.3 は T001 の design_refs で参照のみ。範囲外: 実測結果の実施・スピーカー運用・複数ユーザー・外部公開・配布/CI/監視・ベクトル DB・声クローン・14B 級モデル)。\n【Design basis for test infrastructure】tests/test_live_policy.py の skip 検出器(T002)→§11.2 '実機：M0〜M5 の終了条件'; pyproject の integration marker/addopts(T001)→§11.2 テスト層の単体/結合/実機の分離; tests/mocks.py(T003), tests/mocks_browser.py(T014)→§11.2 '結合：模擬ブラウザと模擬 LLM/TTS'; 実サービス試験 tests/test_clients_live.py(T003)→§12.3 T-E4 と §11.2 実機; m0_bench と tests/test_m0_live.py(T004)→§10 M0 計測; capture_check.html/js と records/capture_check.json(T005)→§6.2 echoCancellation 先行実測と §3.1; metrics.evaluate_gate と tests/test_m1_live.py, records/m1_events.db(T016)→§11.1 G1/履歴整合と §10 M1; eot.compare_g4(T017)→§9 終話判定; backchannel.synthesize_clips(T018)→§6.1 事前合成クリップ; sample_feed.xml(T021)→§10 M4 RSS Worker; resource_sampler.analyze_soak と tests/test_soak_live.py, records/soak_events.db(T022)→§11.1 常駐 G5 と §3.4 events; echo_chain.evaluate_echo_chain と tests/test_echo_chain_live.py, records/m5_events.db(T023)→§12.3 E10 と §10 M5。records/ is a test-artifact directory (not app persistent data) ← §11.2 テスト層。DB 成果物はアプリ自身の SQLite DB(§3.4 events)のコピー。設計根拠のない基盤項目は置かない。追加配線: __init__.py(T002)、asr_worker の __main__(T011)、Director 計測結線(T016)、soak_loop と README 運用チェックリスト(T022)、events 記録結線の配線試験(T024)、live 記録検証 capture_record_live.js(T024)。",
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "Python プロジェクト雛形・設定(Options)・メッセージ/エラー定義",
+      "design_refs": [
+        "1. 背景・問題・目的・非目標",
+        "1.1 問題",
+        "1.3 非目標",
+        "8.1 既定値表（本書で変数を使う箇所の唯一の定義）",
+        "12. 補足仕様",
+        "12.1 メッセージスキーマと型・範囲",
+        "12.2 エラーコード（4xxx は WS close code、5xxx はアプリ内 error メッセージ。二重起動はプロセス終了コード 4）",
+        "11.2 テスト層"
+      ],
+      "depends_on": [],
+      "acceptance": [
+        "`python -m pytest tests/test_config_protocol.py -q` が exit 0(失敗 0 件)",
+        "Config 既定値(時間系): T_silence==400, T_confirm==400, MIN_SEG==200, SIL_BACKCHANNEL==300, BC_COOLDOWN==5, PING_INTERVAL==5, IDLE_TIMEOUT==1800 が §8.1 と一致",
+        "Config 既定値(性能系): TTS_GPU_THRESH==300, OVERLAP_MAX==300, VAR_SUM==750, G2_SUM==130, TTS_RATIO_MAX==0.7, DUCK_GAIN==0.2 が §8.1 と一致",
+        "Config 既定値: LLM_RETRY==(max=3, window_s=600, backoff_s=(1,2,4)), STRONG_UTT==(volume_ratio=2.0, window_s=1.0), ASR_HALLU==(no_speech_prob 0.6, compression_ratio 2.4)",
+        "Config 既定値: HTTP_TIMEOUT==(llm_first=5, llm_total=20, tts_sentence=3, asr=区間長x2+2 秒)",
+        "Config 既定値: E_PARAMS==(silence_input_s=60, device_lost_s=3, tts_cpu_settle_s=2, tts_cpu_delta_pt=5)",
+        "Config 既定値: TEST_N==20, DB_BACKUP==1(世代), N_TURNS==8, RATIO_Q==(1,3), STOP_WORDS==(待って,違う,ちょっと,ストップ)",
+        "自発発話の初期値は既定 off, freq_per_hour==3, quiet_start=='22:00', quiet_end=='07:00'",
+        "Config のフィールド名集合が §8.1 の 23 変数名+自発発話項目と過不足なく一致(テスト内に期待集合を列挙)",
+        "Config 検証 T_confirm: 299 と 501 は ValueError、300 と 500 は受理",
+        "Config 検証 SIL_BACKCHANNEL: 250 と 350 は受理、249 と 351 は ValueError",
+        "Config 検証: SIL_BACKCHANNEL>=T_silence は ValueError",
+        "§12.1 の JSON Schema(draft-07)に対し hello/playback/ui/ping/pong/duck/cancel/resume/state/error の正例 10 件が検証 OK",
+        "負例 5 件(ui.freq_per_hour=13, playback.position_ms=600001, error.code=3999, state.state='foo', hello.sample_rate=44100)が全て検証 NG",
+        "error.code の範囲は 4000 と 5999 が受理、3999 と 6000 が NG",
+        "必須キー(version, sample_rate, client_id, epoch, utterance_id, chunk_id, position_ms, state, mute, on, quiet_start, quiet_end, ts, gain, new_epoch, muted, code, message)の欠落は検証 NG",
+        "状態値 idle,user_speaking,eot_check,preparing,ai_playing,interrupt_check,rest の 7 値が日本語名(待機〜休止)と 1 対 1 に写像される",
+        "下りバイナリ 16byte ヘッダ(epoch,utterance_id,chunk_id,length: u32LE)の pack→unpack が往復一致",
+        "ヘッダ各フィールドは u32 最大 4294967295 を受理し、4294967296 は例外",
+        "上りの先頭 4byte seq(u32 LE)も u32 最大 4294967295 を受理し、4294967296 は例外",
+        "チャンク PCM 1MiB(1048576byte)は受理、1048577 は例外",
+        "errors モジュールが 4001,4002,4003(WS close code)と 5001,5002,5003,5004,5005,5006(app error)を定数定義し、二重起動のプロセス終了コード定数==4",
+        "pyproject.toml の `[tool.pytest.ini_options]` が `markers = [\"integration: ...\"]` を持つ(test_config_protocol.py の pytest_config テストが tomllib で読み取り、exit 0)",
+        "pyproject.toml の同セクションが `addopts = \"-m 'not integration' --strict-markers\"` を持つ(同 pytest_config テスト)",
+        "`python -m pytest --markers -q` が exit 0 で出力に `integration` を含む",
+        "CLI の `-m integration` は addopts の -m を上書きし、@pytest.mark.integration の実サービス試験だけを実行する(T003 の exit 0 と exit 5 の verify で判定)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_config_protocol.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_config_protocol.py -k \"defaults or range or schema_negative or header_roundtrip or error_codes\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest --markers -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_config_protocol.py -k pytest_config -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M0] Python プロジェクト雛形・設定(Options)・メッセージ/エラー定義(config.py/protocol.py/errors.py は後続全タスクの共有基盤) 設計 §1/§1.1/§1.3 は背景・問題・非目標の記述のみで実装対象なし(design_refs は範囲の根拠として参照するだけ)。design basis: pyproject.toml の integration marker と addopts(-m not integration) ← §11.2 テスト層 '単体' '結合' '実機' の層分離(実機層を既定実行から外し -m integration でのみ実行する) | safe_to_stop=true | rollback: git revert T001 のコミット。ただし config.py/protocol.py/errors.py は後続の全タスクが import するため、T001 を戻す場合は後続タスクを新しい順に先に revert する(カスケード)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "pyproject.toml"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/config.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/errors.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/protocol.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_config_protocol.py"
+        }
+      ]
+    },
+    {
+      "id": "T002",
+      "title": "遅延予算・合否ゲート判定関数(§8 検算の境界値)",
+      "design_refs": [
+        "1.2 目的（測定可能）",
+        "8. 遅延予算と性能設計",
+        "11.2 テスト層",
+        "2.2 技術選定"
+      ],
+      "depends_on": [
+        "T001"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_budget.py -q` が exit 0",
+        "G1 p50: g1_p50_pass(1200) True、g1_p50_pass(1201) False",
+        "G1 p50: 余裕 G1 p50 − (T_silence+VAR_SUM) == 1200−1150 == 50",
+        "G1 p95: k 上限 == (2000−T_silence)/VAR_SUM == 2.1333…(許容誤差 1e-3)",
+        "G1 p95: g1_p95_pass(k=1.7) True、k=2.14 False",
+        "G2: g2_pass(250) True、g2_pass(251) False",
+        "G2_SUM 内訳 40+60+30==130",
+        "G2_SUM 130 <= G2 上限 250",
+        "確定 cancel 経路は T_confirm=300/400/500 で 430/530/630 ms",
+        "G3: g3_pass(0) True、g3_pass(1) False",
+        "G4: g4_pass(2) True、g4_pass(3) False",
+        "G5: 8h で +8MiB(傾き 1.0 MiB/h) True、+9MiB(1.125 MiB/h) False",
+        "STRONG_UTT: strong_utt(直近1s平均 0.1, 現在 0.2) True、(0.1, 0.19) False",
+        "N_TURNS: n_turns_fits(8*250+500==2500 <= 4096) True、17 ターン相当(17*250+500==4750)は False",
+        "TTS_RATIO_MAX: tts_ratio_pass(音声3.0s, 合成2.0s) True(0.67)、(3.0s, 2.1s) False(0.70、判定は < )",
+        "TTS_GPU_THRESH: tts_gpu_compare(300) False(CPU 継続)、(301) True",
+        "tests/test_live_policy.py が tests/*live*.py の全ソースを読み、`pytest.skip` `skipif` `importorskip` `skip(` `xfail` の各トークンが 0 件であることを assert する",
+        "検出器自体が、これらのトークンを含む文字列を渡されると違反を返すことを自己検証する",
+        "`python -m pytest tests/test_live_policy.py -q` が exit 0",
+        "src/idle_talk/__init__.py が存在し(空のパッケージ標識)、`python -m pytest tests/test_budget.py -q` が idle_talk.budget を import できる"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_budget.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_budget.py -k \"g1 or g2\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_budget.py -k \"g3 or g4 or g5 or strong_utt or n_turns or tts\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 1,
+      "intent": "[M0] 遅延予算・合否ゲート判定関数(budget.py は純関数) design basis: tests/test_live_policy.py の skip トークン検出器 ← §11.2 テスト層 '実機：M0〜M5 の終了条件'(実機試験が skip で空虚に通過して終了条件を満たしたと誤判定されるのを防ぐ。T-E の合否は実行されて初めて成立する)。src/idle_talk/__init__.py はパッケージ標識(空ファイル。§2.2 技術選定のパッケージ構成、実装なし) | safe_to_stop=true | rollback: git revert T002 のコミット。budget.py は T006/T004/T009/T016 が参照するため、戻す場合はそれらを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/budget.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_budget.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_live_policy.py"
+        },
+        {"kind":"add","path":"src/idle_talk/__init__.py"}
+      ]
+    },
+    {
+      "id": "T003",
+      "title": "外部サービスクライアント(llama-server/AivisSpeech/ASR)・モック・実サービス統合試験",
+      "design_refs": [
+        "2.2 技術選定",
+        "3.3 外部サービス契約",
+        "12.1 メッセージスキーマと型・範囲",
+        "11.2 テスト層",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）"
+      ],
+      "depends_on": [
+        "T001",
+        "T002"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_clients.py -q` が exit 0",
+        "llama-server `/v1/chat/completions` の要求が req スキーマに合致(model=='local', stream==true, max_tokens==120、余計なキー 0 個)し、SSE の `[DONE]` で終端する",
+        "HTTP_TIMEOUT: LLM 最初のトークン 5s 超過(注入クロック)で 5001 の LlmTimeout、全体 20s 超過も 5001",
+        "HTTP_TIMEOUT: TTS 1 文 3s 超過で 5002 の TtsTimeout",
+        "HTTP_TIMEOUT: ASR は区間長x2+2s(例: 区間 3s なら 8s)超過で 5003 の発話破棄",
+        "AivisSpeech: `/audio_query` → `/cancellable_synthesis` の順に呼び(AudioQuery を body に渡す)、モック記録の `/synthesis` 呼び出し数==0",
+        "AivisSpeech: TTS 失敗時は該当文を飛ばして次文へ続行できる",
+        "ASR ワーカー req が pcm_ref/utterance_id/lang スキーマに合致し、不正 req(lang='en')は HTTP 400 + err 形式(error.code, error.message)",
+        "res は utterance_id/text/no_speech_prob/compression_ratio を持つ",
+        "ASR_HALLU: no_speech_prob 0.61 は破棄、0.6 は採用",
+        "ASR_HALLU: compression_ratio 2.41 は破棄、2.4 は採用(いずれも > 判定)",
+        "T-E4/E4(単体): E_PARAMS の 60s 相当の無音入力を、幻聴出力(no_speech_prob=0.9)を返す模擬 ASR に流して出力件数==0",
+        "既定実行の除外: `python -m pytest tests/test_clients_live.py -q` は全件 deselect となり exit 5(NO_TESTS_COLLECTED)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_clients.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_clients.py -k \"timeout or bad_request or hallu or no_synthesis\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_clients_live.py -q",
+          "expect_exit_code": 5
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M0] 外部サービスクライアントとモック(clients.py/asr_worker.py)、実サービス統合試験(live) design basis: tests/test_clients_live.py ← §11.2 テスト層 '実機：M0〜M5 の終了条件' と §12.3 T-E4 '無音 `E_PARAMS` の入力で出力 0 件'; tests/mocks.py ← §11.2 '結合：模擬ブラウザと模擬 LLM/TTS（遅延・失敗注入）' 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項) | safe_to_stop=true | rollback: git revert T003 のコミット。clients.py/asr_worker.py/tests/mocks.py は T006,T004,T011,T013,T014 が依存するため、それらを先に revert する(カスケード)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/clients.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/asr_worker.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/mocks.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_clients.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_clients_live.py"
+        }
+      ]
+    },
+    {
+      "id": "T004",
+      "title": "M0 計測ハーネス(実 llama-server/AivisSpeech/faster-whisper に対する合否判定)",
+      "design_refs": [
+        "9. 実測による既定値更新ルール（M0）",
+        "10. 段階導入と終了条件",
+        "1.4 制約・前提",
+        "11.1 指標と合格基準",
+        "11.2 テスト層"
+      ],
+      "depends_on": [
+        "T001",
+        "T002",
+        "T003"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_m0_bench.py -q` が exit 0",
+        "tests/test_m0_live.py に pytest.skip/skipif/importorskip を含まない(`python -m pytest tests/test_live_policy.py -q` が exit 0 で判定)",
+        "既定実行の除外: `python -m pytest tests/test_m0_live.py -q` は全件 deselect となり exit 5(NO_TESTS_COLLECTED)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_m0_bench.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_m0_bench.py -k \"evaluate or keys or defaults or live_policy\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_m0_live.py -q",
+          "expect_exit_code": 5
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M0] M0 計測ハーネス(実サービス疎通・VRAM/RAM・遅延・幻聴率の実測)を最小足場の直後に置き実機リスクを最優先で解消。test-harness-only interface: python -m idle_talk.m0_bench (CLI フラグなし。evaluate_m0 の違反が 0 件なら終了コード 0、1 件以上なら 1) → traces to §9 (実測による既定値更新ルール: M0 の判定入力)、§10 (M0 計測の終了条件)、§1.4 (資源上限)、§11.1 (TTS 速度の合格基準) design basis: m0_bench と tests/test_m0_live.py ← §10 'M0 計測' の '環境確認、ASR 幻聴率、LLM 4B/9B・TTS・ASR 配置の比較、VRAM/RAM' と §11.2 '実機：M0〜M5 の終了条件' 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項) | safe_to_stop=true | rollback: git revert T004 のコミット(m0_bench.py とテストのみ。M0 判定ルールが測定値キーを参照するため T006 を先に revert)。実測値の反映は人手運用で、失敗時も後続は §8.1 既定値のまま進行可能",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/m0_bench.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_m0_bench.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_m0_live.py"
+        }
+      ]
+    },
+    {
+      "id": "T005",
+      "title": "AudioWorklet 取り込みの実ブラウザ実現性確認(echoCancellation 制約・16kHz フレーム化。C1〜C4 判定はスタブ試験+記録 JSON 評価)",
+      "design_refs": [
+        "2.1 コンポーネント",
+        "6.2 Pipecat への移行条件",
+        "3.2 epoch 契約",
+        "3.1 WebSocket プロトコル（ブラウザ <-> Director）",
+        "10. 段階導入と終了条件",
+        "11.2 テスト層"
+      ],
+      "depends_on": [
+        "T001",
+        "T004"
+      ],
+      "acceptance": [
+        "`node --test web/tests/worklet.test.js` が exit 0",
+        "フレーム化: 入力サンプルを 16kHz mono s16le の 20ms(320 サンプル)フレームに区切り、1 フレームは 4+640 byte",
+        "各フレームの先頭に u32 LE の連番(0 から +1 ずつ)を付ける",
+        "フレーム長は 20〜40ms(320〜640 サンプル)のみ受理し、19ms 相当(304 サンプル)と 41ms 相当(656 サンプル)は例外",
+        "サンプルレート変換: AudioContext の実レートが 16000 でない場合に 16kHz へ変換する(48000Hz の 480 サンプルが 160 サンプルになる)",
+        "C1: capture_check.js の判定関数にスタブの getUserMedia(track.getSettings().echoCancellation==true)を渡すと true、echoCancellation==false のスタブでは false(node --test、ブラウザ API はスタブ)",
+        "C2: スタブの AudioWorklet が 1 フレーム以上を配信すると true、0 フレームだと false(node --test)",
+        "C3: 連番 0,1,2 のスタブフレーム列は true、連番 0,2 の欠落列と 1 フレームのみの列は false(node --test)",
+        "C4: フレーム長 320〜640 サンプル(20〜40ms)は true、304 と 656 サンプルは false(node --test)",
+        "serializeResult(C1..C4, meta) の出力は C1,C2,C3,C4,ts,userAgent,host,started_at,ended_at,app_commit,frame_count の 11 キーを持つ JSON である(web/capture_check.html が保存用にダウンロードさせる)",
+        "validateRecord は 5 キーが揃い期間とフレーム数が整合する fixture record で例外を投げない",
+        "負例: 5 キーのいずれかを欠く fixture record で validateRecord が ProvenanceError を投げる",
+        "負例: ended_at が started_at 以下の fixture record で validateRecord が ProvenanceError を投げる",
+        "負例: frame_count が (ended_at−started_at)/20ms+1 を超える fixture record で validateRecord が ProvenanceError を投げる",
+        "AEC の効果測定は本タスクの対象外(§6.2/§10 の M5、T023)"
+      ],
+      "verify": [
+        {
+          "command": "node --test web/tests/worklet.test.js",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "node --test --test-name-pattern=frame web/tests/worklet.test.js",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "node --test --test-name-pattern=checks web/tests/worklet.test.js",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "node --test --test-name-pattern=negative web/tests/capture_record.test.js",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M0] 最小の AudioWorklet 取り込みとフレーム化(web/worklet.js)、C1〜C4 判定ロジック(web/capture_check.js。ブラウザ API を注入可能にしスタブで試験)、表示と結果 JSON の保存用ページ(web/capture_check.html)で、ブラウザ音声経路のリスクを純ロジック実装の前に検証。test-harness-only interface: web/capture_check.js の validateRecord(record) 関数と web/capture_check.html (フラグなし。ブラウザで開くと C1〜C4 を判定し結果 JSON をダウンロード保存する。実ブラウザ実行と保存した records/capture_check.json の評価(web/tests/capture_record.test.js)は運用ツールとして残し、本タスクの合否は負例 fixture 試験で決まる) → traces to §6.2 (getUserMedia({echoCancellation:true}) の先行実測)、§3.1 (16kHz mono s16le 20〜40ms フレームと先頭 4byte 連番)、§2.1 (ブラウザの AudioWorklet コンポーネント)、§10 (M1 の前提となる音声経路の確認)。implements the §3.1 capture component early (risk retirement); AEC effectiveness measurement remains in T023 per §6.2/§10 M5。design basis: web/capture_check.html, web/capture_check.js, web/tests/capture_record.test.js, records/capture_check.json ← §6.2 '先に自前 WebSocket の `getUserMedia({echoCancellation:true})` を実測し' (C1) と §3.1 の 20〜40ms/連番 (C2〜C4)、実機結果の記録評価は §11.2 テスト層 '実機：M0〜M5 の終了条件' に対応。records/ is a test-artifact directory (not app persistent data) ← §11.2 テスト層 '実機：M0〜M5 の終了条件'。capture_check.json はサーバ・DB が未存在のブラウザ段階の成果物でアプリの SQLite DB(events)が未存在のため、JSON の試験成果物とする 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項)。web/tests/capture_record_live.js は T024 に移管 | safe_to_stop=true | rollback: git revert T005 のコミット(web/ に worklet.js, capture_check.js, capture_check.html とテストを追加のみ)。ブラウザクライアントタスクが worklet.js を利用するため、そのタスクを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "web/worklet.js"
+        },
+        {
+          "kind": "add",
+          "path": "web/capture_check.js"
+        },
+        {
+          "kind": "add",
+          "path": "web/capture_check.html"
+        },
+        {
+          "kind": "add",
+          "path": "web/tests/worklet.test.js"
+        },
+        {
+          "kind": "add",
+          "path": "web/tests/capture_record.test.js"
+        }
+      ]
+    },
+    {
+      "id": "T006",
+      "title": "M0 判定ルール(§9 既定値更新ルール・資源上限・E11)",
+      "design_refs": [
+        "9. 実測による既定値更新ルール（M0）",
+        "10. 段階導入と終了条件",
+        "1.4 制約・前提",
+        "11.1 指標と合格基準"
+      ],
+      "depends_on": [
+        "T002",
+        "T004",
+        "T005"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_m0_rules.py -q` が exit 0",
+        "llm_choose: 9B 採用は、G1 充足とブラインド比較(30〜50 場面)での 9B 勝ちが両方成立した場合のみ",
+        "llm_choose: 場面数 29 または 51 は ValueError",
+        "llm_choose: G1 充足とブラインド比較勝ちのどちらか片方のみ成立、または両方不成立なら 4B",
+        "asr_place(E11/T-E11): 重なり追加遅延 p95 が OVERLAP_MAX(300ms)ちょうどは GPU0、301ms で GPU1 推奨",
+        "tts_place: 最初の 1 文 300ms(TTS_GPU_THRESH ちょうど)は CPU、301ms で GPU1 DirectML 比較",
+        "tts_place: tts_ratio_p95 が TTS_RATIO_MAX 未満(0.69)は True、0.70 は False",
+        "no_think_check: `<think>` を含む文字列は False、含まない文字列は True",
+        "資源上限 §1.4: LLM VRAM 9GiB ちょうど OK/9GiB+1MiB NG、ASR 追加 3GiB ちょうど OK/超過 NG、追加 RAM 8GiB ちょうど OK/超過 NG",
+        "eot_choice: G4 の早切り件数が少ない方を返し、同数なら既定の FixedSilence(§9 既定は固定無音)",
+        "入力の測定値キーは M0 計測ハーネス(llm_first_clause_ms, tts_first_sentence_ms, tts_ratio_p95, vram_mib, asr_vram_mib, ram_mib, overlap_p95)の出力キーと一致(テストでキー集合を比較)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_m0_rules.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_m0_rules.py -k \"llm_choose or asr_place or tts_place or no_think or resource or eot or keys\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M0] M0 判定ルール(m0_rules.py の純関数。実機測定値を入力に §9 の既定値更新を決める) | safe_to_stop=true | rollback: git revert T006 のコミット。m0_rules.py は T017 が参照するため、戻す場合は T017 を先に revert する(M0 計測ハーネスは本タスクに依存しない)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/m0_rules.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_m0_rules.py"
+        }
+      ]
+    },
+    {
+      "id": "T007",
+      "title": "SQLite ストア(スキーマ・WAL・書込スレッド・バックアップ復元・全削除)",
+      "design_refs": [
+        "3.4 SQLite スキーマ（概要）",
+        "7. エッジケースと障害モード",
+        "12.2 エラーコード（4xxx は WS close code、5xxx はアプリ内 error メッセージ。二重起動はプロセス終了コード 4）"
+      ],
+      "depends_on": [
+        "T001",
+        "T006"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_store.py -q` が exit 0",
+        "events/turns/topic_cards/memories の 4 テーブルが §3.4 の列で作成され、PRAGMA table_info の列名集合が設計と完全一致(events 5 列, turns 7 列, topic_cards 9 列, memories 5 列)",
+        "PRAGMA journal_mode=='wal'、PRAGMA user_version==SCHEMA_VERSION 定数",
+        "全書込は専用の書込スレッドのキュー経由で実行される(書込実行スレッドが呼び出しスレッドと異なることを記録で検証、§3.4)",
+        "topic_cards.hook に NULL を入れると IntegrityError、turns.stop_position_ms は NULL 可",
+        "E14/E13/T-E14: DB_BACKUP により起動時に .bak を 1 世代作成する",
+        "E14: DB 先頭 100 バイトを破壊して再起動(integrity_check 失敗)すると .bak から復元され turns 行数が破壊前と一致する",
+        "E14: 復元時に 5004 が log される",
+        "E14: .bak が 2 世代以上にならない",
+        "§7 全削除: delete_all() 後に 4 テーブルの行数が全て 0"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_store.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_store.py -k \"schema or wal or writer_thread or e14 or delete_all\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M1] SQLite ストア(store.py。以降 T009,T014,T016,T019,T021 が使用) | safe_to_stop=true | rollback: git revert T007 のコミット。store.py は T009,T014,T016,T019,T021,T022 が依存するため、それらを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/store.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_store.py"
+        }
+      ]
+    },
+    {
+      "id": "T008",
+      "title": "epoch 管理と Director 状態機械(表駆動・純粋遷移)",
+      "design_refs": [
+        "3.2 epoch 契約",
+        "4. 状態機械（Director）",
+        "4.1 状態",
+        "4.2 遷移表",
+        "4.3 不変条件",
+        "4.4 並行性の規則"
+      ],
+      "depends_on": [
+        "T001",
+        "T007"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_fsm.py -q` が exit 0",
+        "§4.2 遷移表の 13 行すべてに 1 ケースずつ表駆動テストが存在し通る(行数 13 == ケース id 数 13、重複 0)",
+        "epoch は確定 cancel 時のみ +1(発話開始のみの割り込み確認中では +0)、旧 epoch の完了通知は無視される(epoch 競合テスト 1 件以上、E15 の単体側)",
+        "終話確認: 無音 T_silence=400ms ちょうどで成立(>=)、399ms は不成立(E1 の境界)",
+        "MIN_SEG: 区間 199ms は待機へ戻り noise イベント記録、200ms は終話確認中へ",
+        "ミュート時の VAD 発話開始では状態が idle のまま",
+        "返答準備中の VAD 発話開始で epoch が +1 される",
+        "外部コールバックは enqueue のみで、pump() 呼び出し前は state 不変(§4.4)",
+        "状態の wire 名 idle,user_speaking,eot_check,preparing,ai_playing,interrupt_check,rest が §12.1 の state enum と一致(7/7)",
+        "遷移は副作用を持たずアクション列(duck,cancel,resume,start_asr,…)を返す純関数",
+        "cancel を含むアクション列は LLM/ASR の await を要求しない(§4.3-1)",
+        "休止遷移(ミュート/IDLE_TIMEOUT/連続失敗の 3 種)が任意状態から成立"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_fsm.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_fsm.py -k \"table_rows or epoch or boundary or enqueue_only\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] epoch 管理と Director 状態機械(表駆動・純粋遷移) | safe_to_stop=true | rollback: git revert T008 のコミット。fsm.py/epoch.py は T009,T010,T011,T013,T014,T017 が依存するため、それらを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/epoch.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/fsm.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_fsm.py"
+        }
+      ]
+    },
+    {
+      "id": "T009",
+      "title": "割り込み判定と再生済み履歴確定ルール",
+      "design_refs": [
+        "5. 割り込み・再生済み履歴",
+        "5.1 判定",
+        "5.2 履歴確定ルール"
+      ],
+      "depends_on": [
+        "T002",
+        "T007",
+        "T008"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_interrupt_history.py -q` が exit 0",
+        "E3: STOP_WORDS(待って/違う/ちょっと/ストップ)の 4 語は全て即 cancel(duck を経由しない)",
+        "E3: それ以外の語 1 件は duck",
+        "E2: 「うん」「へえ」が T_confirm 内なら相槌 → resume",
+        "E2: 「うん？」「いや」は相槌と分類されない(2/2)",
+        "判断不能入力は cancel(停止したまま)",
+        "STRONG_UTT: 音量比 2.0 以上(0.2 vs 平均 0.1)は成立、0.19 は不成立、発話が窓終端まで継続は成立",
+        "確認窓は半開区間 [t, t+T_confirm): t+399ms の音声は窓内、t+400ms ちょうどは次窓",
+        "確認窓の境界は T_confirm=300/500 でも同様に半開区間である",
+        "履歴確定(不変条件 4): playback state=finished のチャンクのみ turns に completed=1 で確定、送信済みでも state=started/dropped は確定 0 件",
+        "途中停止は completed=0 + stop_position_ms 付きで記録され、単語時刻が無い場合に再生秒数から本文を推定しない(本文は finished チャンクの text のみ)",
+        "E12: history_window() は直近 N_TURNS==8 ターンを返し(1000 ターン投入でも長さ<=8)、切り詰め時に log を 1 件残す"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_interrupt_history.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_interrupt_history.py -k \"stop_words or backchannel or window or history\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M1] 割り込み判定(interrupt.py)と再生済み履歴確定(history.py) | safe_to_stop=true | rollback: git revert T009 のコミット。history.py/interrupt.py は T014,T022 が依存するため、それらを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/interrupt.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/history.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_interrupt_history.py"
+        }
+      ]
+    },
+    {
+      "id": "T010",
+      "title": "WebSocket サーバ(接続制御・Origin・ping・不正値処理・二重起動防止)",
+      "design_refs": [
+        "3.1 WebSocket プロトコル（ブラウザ <-> Director）",
+        "7. エッジケースと障害モード",
+        "12.4 防御機構ごとのトレードオフ",
+        "3. インターフェース契約"
+      ],
+      "depends_on": [
+        "T001",
+        "T008",
+        "T009"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_server.py -q` が exit 0",
+        "待受アドレスが 127.0.0.1 のみ(0.0.0.0 を指定すると ValueError)",
+        "Origin が localhost 以外の接続は 4003 で拒否され log 1 件(reject)",
+        "2 本目の接続で旧接続が close code 4001 で閉じられ新接続が有効(最新優先 + log 1 件)",
+        "hello.version 不一致で close 4002、sample_rate!=16000 で拒否",
+        "E5/T-E5(検知部): ping を PING_INTERVAL=5s ごとに送出し、pong 欠落 2 回で切断扱い",
+        "注入クロックで検知が 10s(PING_INTERVAL x 2)以内、9 秒時点では未切断、再接続時に epoch が +1",
+        "ui の範囲外値(freq_per_hour=13)に error code 5006 を返し既存設定を維持(設定値不変を assert)",
+        "playback.epoch が現在値と異なれば破棄 + log",
+        "上り binary は先頭 4byte seq(u32 LE)を解釈し、1MiB 超(1048577byte)のバイナリは破棄 + log",
+        "二重起動: 2 つ目の Director プロセス起動は終了コード 4",
+        "二重起動: 死んだ PID の残存 PID ファイルは回収して起動成功、生存 PID は reject"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_server.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_server.py -k \"origin or replace or version or ping or range or oversize or portlock\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] WebSocket サーバ(server.py)とポートロック(portlock.py) | safe_to_stop=true | rollback: git revert T010 のコミット。server.py/portlock.py は T014 が依存するため、T014 以降を先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/server.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/portlock.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_server.py"
+        }
+      ]
+    },
+    {
+      "id": "T011",
+      "title": "音声入力経路(VAD アダプタ・区間化・ASR 共有メモリ受け渡し・無音検知)",
+      "design_refs": [
+        "2.1 コンポーネント",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "4.2 遷移表",
+        "12.1 メッセージスキーマと型・範囲",
+        "3.3 外部サービス契約"
+      ],
+      "depends_on": [
+        "T003",
+        "T008",
+        "T010"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_ingress.py -q` が exit 0",
+        "VAD は差し替え可能なインターフェース(CPU 実装)で、模擬検出器の発話開始/終了が fsm 入力イベントに 1 対 1 で変換される",
+        "区間 199ms は noise イベント(破棄 + log)、200ms(MIN_SEG)以上は区間として ASR へ",
+        "ai_playing 状態でも VAD の処理件数が減らない(不変条件 2: 状態別の処理フレーム数が同一)",
+        "区間 PCM が共有メモリ(pcm_ref)で ASR req に渡り、バイト列が往復一致する",
+        "応答後に共有メモリが解放される(残存 0 件、G5 のメモリ増加なしの前提)",
+        "E6/T-E6(単体): 無音フレームが E_PARAMS の 3s 連続で device_lost → rest 遷移要求と error 5005 を、注入クロックで 3s+2s=5s 以内に出す",
+        "E6/T-E6(単体): 2.9s では device_lost を出さない",
+        "E4: 幻聴判定(ASR_HALLU)で破棄された発話は fsm に応答トリガを送らない(0 件)",
+        "`python -m pytest tests/test_asr_worker_main.py -q` が exit 0",
+        "asr_worker.main は localhost のみで待受け(§3.1 の 127.0.0.1 バインド方針)、待受けポートの既定は main.py の --asr-url 既定と同一(具体値は設計になく config/main の既定が唯一の定義)で、モデルを起動時に 1 回だけ読み込み、faster_whisper 未導入時は exit 2 を返す(fake モデル注入で検証、実モデル不要)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_ingress.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_ingress.py -k \"min_seg or shm or device_lost or vad_during_playback\" -q",
+          "expect_exit_code": 0
+        },
+        {"command":"python -m pytest tests/test_asr_worker_main.py -q","expect_exit_code":0}
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] 音声入力経路(vad.py/ingress.py)。ASR ワーカーの起動入口 `python -m idle_talk.asr_worker`(__main__、localhost バインド(§3.1)・ポート既定は main.py の --asr-url 既定と同一、モデルは起動時に 1 回だけ読込、faster-whisper 未導入は exit 2。tests/test_asr_worker_main.py は fake モデルで検証)を ingress の接続先として結線する | safe_to_stop=true | rollback: git revert T011 のコミット。ingress.py/vad.py は T014 が依存するため、T014 以降を先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/vad.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/ingress.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_ingress.py"
+        },
+        {"kind":"modify","path":"src/idle_talk/asr_worker.py"},
+        {"kind":"add","path":"tests/test_asr_worker_main.py"}
+      ]
+    },
+    {
+      "id": "T012",
+      "title": "ブラウザクライアント(AudioWorklet・再生キュー・epoch 破棄・UI)",
+      "design_refs": [
+        "2.1 コンポーネント",
+        "6.2 Pipecat への移行条件",
+        "3.2 epoch 契約",
+        "3.1 WebSocket プロトコル（ブラウザ <-> Director）"
+      ],
+      "depends_on": [
+        "T001",
+        "T005",
+        "T011"
+      ],
+      "acceptance": [
+        "`node --test web/tests/player.test.js` が exit 0",
+        "cancel(new_epoch=5) 受信後、キュー内と再生中の epoch<5 チャンクが破棄され、以後 epoch 4 のチャンクを受理しない",
+        "100 回の注入で旧 epoch の再生件数==0(G3 のブラウザ側)",
+        "duck(epoch, gain=0.2=DUCK_GAIN) で出力ゲインが 0.2、resume で 1.0 に戻り続きから再生(再生位置 position_ms が減少しない)",
+        "16byte ヘッダ(epoch,utterance_id,chunk_id,length)の 4 フィールドを解析した値が注入値と一致する",
+        "先読み(キュー先頭以降の保持)は最大 1 チャンク",
+        "playback メッセージ(started/finished/dropped, position_ms)を §12.1 スキーマ準拠で送出し、各メッセージが epoch,utterance_id,chunk_id,position_ms,state の 5 キーを持つ",
+        "上りフレームは先頭 4byte u32 LE seq + 16kHz mono s16le PCM(20〜40ms/フレーム)、接続直後に hello{version, sample_rate:16000, client_id} を 1 件送る",
+        "ping に pong で応答",
+        "getUserMedia 制約に echoCancellation:true を含み、接続先が ws://127.0.0.1:<port>/ws",
+        "ui メッセージ(mute, on, freq_per_hour, quiet_start, quiet_end)と state 表示を持つ"
+      ],
+      "verify": [
+        {
+          "command": "node --test web/tests/player.test.js",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "node --test --test-name-pattern=cancel web/tests/player.test.js",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] ブラウザクライアント(AudioWorklet・再生キュー・epoch 破棄・UI) | safe_to_stop=true | rollback: git revert T012 のコミット(web/ 配下のみ追加)。T015 と T023 が web/client.js・web/player.js に依存するためそれらを先に revert する。実ブラウザでの AudioWorklet 取り込みの実現性は T005 の capture_check で先行確認済み(worklet.js/frame.js は T005 の成果物を利用)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "web/index.html"
+        },
+        {
+          "kind": "add",
+          "path": "web/player.js"
+        },
+        {
+          "kind": "add",
+          "path": "web/client.js"
+        },
+        {
+          "kind": "add",
+          "path": "web/tests/player.test.js"
+        }
+      ]
+    },
+    {
+      "id": "T013",
+      "title": "応答パイプライン(LLM 節分割・TTS 直列化・定型句・llama-server 再起動)",
+      "design_refs": [
+        "4.3 不変条件",
+        "12.4 防御機構ごとのトレードオフ",
+        "3.3 外部サービス契約"
+      ],
+      "depends_on": [
+        "T003",
+        "T008",
+        "T012"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_pipeline.py tests/test_llm_supervisor.py -q` が exit 0",
+        "clause 分割: 句点・読点等で最初の合成可能な節が確定した時点(1 件目)で TTS に渡す",
+        "clause 分割: 節確定前に TTS 呼び出し 0 件",
+        "E8/T-E8(単体): TTS 呼び出しは直列(同時実行数の最大値==1)",
+        "cancel 時に cancellable_synthesis の中止が 1 回呼ばれ、遅れて返った結果は epoch 不一致で破棄(E15 の単体側、破棄 log 1 件)",
+        "cancel 送出がブロック中の LLM モック完了より先に行われる(順序記録の添字で検証、§4.3-1)",
+        "E7/T-E7(単体): 模擬プロセス kill で HTTP_TIMEOUT(5s)内に定型句、LLM_RETRY の再起動はバックオフ 1s→2s→4s、10 分内 4 回目で rest 要求 + warn",
+        "10 分を超えた後は回数がリセットされる",
+        "llama-server 起動コマンド文字列に思考無効のテンプレート設定を含む(T006 の no_think_check の前提)",
+        "5001/5002: LLM 失敗は 5001 と定型句、TTS 失敗は 5002 で該当文を飛ばしテキストのみ UI へ通知(state/text 通知 1 件)",
+        "通常応答・自発発話・相槌クリップが同一の再生・キャンセル経路関数を通る入口を 1 つだけ持つ(不変条件 3、関数定義数==1)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_pipeline.py tests/test_llm_supervisor.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_llm_supervisor.py -k \"backoff or kill or window_reset\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_pipeline.py -k \"serial or cancel_order or clause or stale_epoch\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] 応答パイプライン(pipeline.py/clause.py/llm_supervisor.py) | safe_to_stop=true | rollback: git revert T013 のコミット。pipeline.py は T014,T018,T020 が依存するため、それらを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/pipeline.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/clause.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/llm_supervisor.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_pipeline.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_llm_supervisor.py"
+        }
+      ]
+    },
+    {
+      "id": "T014",
+      "title": "Director 結線(状態機械 + サーバ + 入出力 + ストア)と起動エントリ",
+      "design_refs": [
+        "2. アーキテクチャ",
+        "4.4 並行性の規則",
+        "4.3 不変条件",
+        "11.2 テスト層"
+      ],
+      "depends_on": [
+        "T007",
+        "T009",
+        "T010",
+        "T011",
+        "T013"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_director_smoke.py -q` が exit 0",
+        "模擬ブラウザ + 模擬 LLM/TTS/ASR で 1 ターン往復(発話 → 応答チャンク受信 → playback finished → turns に completed=1 が 1 行)が成立",
+        "state メッセージが遷移ごとに 1 件送出され、全 wire 名が §12.1 の state enum 内(7 値)",
+        "通常応答と cancel が同一の再生・キャンセル経路を通る(不変条件 3: 経路関数の呼び出し記録が 2 経路で同一関数)",
+        "二重起動時に main() は終了コード 4 で終了する(§12.2、2 つ目の起動を模擬して検証)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_director_smoke.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_director_smoke.py -k \"one_turn or state_names or same_path or duplicate_start\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] Director 結線と起動エントリ design basis: tests/mocks_browser.py ← §11.2 テスト層 '結合：模擬ブラウザと模擬 LLM/TTS（遅延・失敗注入）' | safe_to_stop=false | rollback: git revert T014 のコミット。director.py は T015,T018,T020 が変更を重ねるため、それらを先に revert する。非グリーン扱い(safe_to_stop=false)の理由: 起動可能でテストは緑だが割り込み・epoch 競合の保証(G3/E15)が未検証で、M1 出荷判定に使えない。T015 の統合試験が緑になって初めて安全停止点として復帰",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/director.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/main.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/mocks_browser.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_director_smoke.py"
+        }
+      ]
+    },
+    {
+      "id": "T015",
+      "title": "M1 結合試験(模擬ブラウザ・遅延/失敗注入)と実サービス統合試験",
+      "design_refs": [
+        "11.2 テスト層",
+        "5.1 判定",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "3.1 WebSocket プロトコル（ブラウザ <-> Director）",
+        "3.3 外部サービス契約",
+        "4.2 遷移表"
+      ],
+      "depends_on": [
+        "T012",
+        "T014"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_integration_interrupt.py tests/test_integration_failures.py -q` が exit 0",
+        "T-E1(E1): 「けど、」+ T_silence 未満の無音(399ms) + 続き → 応答 0 件、無音 400ms ちょうどで終話確認成立",
+        "T-E2(E2): 再生中の「うん」を TEST_N==20 回で cancel 0 件",
+        "T-E2(E2): T_confirm 後に再生位置が進行(20/20)",
+        "T-E3(E3): 「待って」20 回(TEST_N)で duck 開始が G2 以内(<=250ms)が 20/20",
+        "T-E3(E3): 「待って」20 回(TEST_N)で確定 cancel が T_confirm+G2_SUM(<=530ms)以内が 20/20",
+        "T-E15(E15): ASR/LLM に各 1500ms 遅延注入、A の 500ms 後に発話 B(epoch+1)を入力する試行 TEST_N==20 回で旧 epoch の再生 0/20",
+        "T-E15(E15): 同試行で破棄 log 件数==20",
+        "G3: cancel 後の旧 epoch チャンク注入 100 回で再生された旧世代音声 0 件",
+        "T-E5(E5): WS 強制切断を PING_INTERVAL x 2(10s)以内に検知、再接続後の旧音声 0 件",
+        "T-E4(模擬): 無音入力 60s の出力 0 件",
+        "T-E6(模擬): デバイス喪失で 5005 + rest",
+        "T-E8(模擬): cancel 後 2s 以内に模擬 TTS 計算が停止",
+        "T-E7(模擬): llama-server kill で定型句 + 初回バックオフ 1s 内に再起動し次ターン応答",
+        "競合: cancel と完了が同時のとき epoch 比較で旧完了通知が無視され履歴に確定されない(turns 増分 0)",
+        "tests/test_integration_live.py に pytest.skip/skipif/importorskip を含まない(`python -m pytest tests/test_live_policy.py -q` が exit 0 で判定)",
+        "既定実行の除外: `python -m pytest tests/test_integration_live.py -q` は exit 5"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_integration_interrupt.py tests/test_integration_failures.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_integration_interrupt.py -k \"e1 or e2 or e3 or e15 or g3\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_integration_failures.py -k \"e4 or e5 or e6 or e7 or e8 or race\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_integration_live.py -q",
+          "expect_exit_code": 5
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M1] M1 結合試験(模擬ブラウザ・遅延/失敗注入)と実サービス統合試験 design basis: tests/test_integration_live.py ← §11.2 テスト層 '実機' と §12.3 T-E7/T-E8 の実測; tests/test_integration_interrupt.py, tests/test_integration_failures.py ← §11.2 '結合：模擬ブラウザと模擬 LLM/TTS（遅延・失敗注入）で割り込みと E5/E7/E8/E15 を検証' 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項) | safe_to_stop=true | rollback: git revert T015 のコミット(テスト追加と director.py の不具合修正のみ)。director.py の修正を戻すと T014 が safe_to_stop=false の状態に戻る(T014 の保留は本タスクで解消済み)。T016 以降は director.py の修正に依存しないため revert の連鎖は不要",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "tests/test_integration_interrupt.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_integration_failures.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_integration_live.py"
+        },
+        {
+          "kind": "modify",
+          "path": "src/idle_talk/director.py"
+        }
+      ]
+    },
+    {
+      "id": "T016",
+      "title": "M1 計測記録・合否レポート(G1/G2/G3/履歴整合/E9)",
+      "design_refs": [
+        "10. 段階導入と終了条件",
+        "11. 検証計画",
+        "11.1 指標と合格基準",
+        "1.2 目的（測定可能）",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "11.2 テスト層",
+        "3.4 SQLite スキーマ（概要）"
+      ],
+      "depends_on": [
+        "T002",
+        "T007",
+        "T014",
+        "T015"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_m1_report.py -q` が exit 0",
+        "metrics が段階別タイムスタンプ(eot_wait, asr_done, llm_first_clause, tts_first, play_start)の 5 種を events に kind 別で記録し、1 ターンあたり 5 行",
+        "evaluate_gate('g1', 50 ターン): (p50,p95)=(1200,2000)ms は合格",
+        "evaluate_gate('g1', 50 ターン): (p50,p95)=(1201,2000)ms と (1200,2001)ms は不合格",
+        "evaluate_gate('g2', 50 回): p95<=250ms は合格、251ms は不合格",
+        "evaluate_gate('g3'): 旧世代再生 0 件は合格、1 件は不合格",
+        "evaluate_gate('history'): turns と playback の照合不整合 0 は合格、1 件は不合格(履歴整合)",
+        "E9/T-E9: events の gpu1_load=true タグの G1 サンプルを別集計し、GPU1 負荷 90% 下で p50<=1200 なら合格、超過は不合格",
+        "事前合成相槌(kind='backchannel')は G1 集計から除外される(除外前後で p50 が変わるテストデータ)",
+        "テストデータの events DB は pytest の一時ディレクトリ内で生成する",
+        "validate_run_meta は kind=run_meta 行の payload_json に host, started_at, ended_at, app_commit, sample_count の 5 キーを要求する",
+        "validate_run_meta は 5 キー・期間・ts 単調・sample_count(run_meta を除く events 行数)が揃う fixture DB で例外を投げない",
+        "負例: run_meta 行のない fixture DB で validate_run_meta が ProvenanceError を送出する",
+        "負例: ended_at−started_at が min_duration_ms=1200000 より 1ms 短い fixture DB で ProvenanceError を送出する",
+        "負例: sample_count が run_meta を除く events 行数と 1 件ずれる fixture DB で ProvenanceError を送出する",
+        "`python -m pytest tests/test_director_metrics.py -q` が exit 0",
+        "Director は metrics 指定時に 1 ターンで段階 5 行を順序通り events に書き、相槌は G1 集計から除外し、close() で run_meta を 1 行書く。metrics 未指定では記録しない"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_m1_report.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_m1_report.py -k \"g1 or g2 or g3 or history or e9 or backchannel\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_m1_report.py -k negative -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_m1_live.py -q",
+          "expect_exit_code": 5
+        },
+        {"command":"python -m pytest tests/test_director_metrics.py -q","expect_exit_code":0}
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M1] M1 計測記録・合否判定(metrics.py)。test-harness-only interface: metrics.evaluate_gate(conn, gate) 関数と metrics.validate_run_meta(conn, min_duration_ms, interval_ms) 関数 (CLI・スクリプトなし) → traces to §11.1 (G1/G2/G3/履歴整合の合格基準)、§1.2 (G1/G2/G3 の目標値)、§10 (M1 終了条件の判定入力)、§12.3 (E9) design basis: metrics.evaluate_gate ← §11.1 '応答遅延 G1' の '段階別タイムスタンプを `events` に記録' と '履歴整合' '旧世代音声 G3'; tests/test_m1_live.py と records/m1_events.db ← §10 M1 '20分会話で音声欠け・旧音声再生・履歴不整合が0' と §11.2 '実機：M0〜M5 の終了条件'。records/ is a test-artifact directory (not app persistent data) ← §11.2 テスト層 '実機：M0〜M5 の終了条件'。m1_events.db はアプリ自身の SQLite DB(§3.4 events/turns)のコピーで新形式を作らず、出所は events の kind=run_meta 行(§3.4 events の kind, payload_json)に持つ 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項)。Director への計測結線(段階 5 行/ターン、相槌除外、close() で run_meta 1 行。MetricsRecorder 未指定時は記録なし)を src/idle_talk/director.py に追加し tests/test_director_metrics.py で検証する | safe_to_stop=true | rollback: git revert T016 のコミット。metrics.py は T022 が依存するため先に T022 を revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/metrics.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_m1_report.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_m1_live.py"
+        },
+        {"kind":"modify","path":"src/idle_talk/director.py"},
+        {"kind":"add","path":"tests/test_director_metrics.py"}
+      ]
+    },
+    {
+      "id": "T017",
+      "title": "終話判定インターフェースと G4 比較(固定無音 vs Smart Turn)",
+      "design_refs": [
+        "9. 実測による既定値更新ルール（M0）",
+        "10. 段階導入と終了条件",
+        "8.1 既定値表（本書で変数を使う箇所の唯一の定義）",
+        "1.2 目的（測定可能）",
+        "11.1 指標と合格基準"
+      ],
+      "depends_on": [
+        "T006",
+        "T008",
+        "T015",
+        "T016"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_eot.py -q` が exit 0",
+        "EndOfTurn インターフェースに FixedSilence(T_silence=400, >= 判定: 399ms 不成立/400ms 成立)が実装される",
+        "EndOfTurn インターフェースに SmartTurn アダプタ(Smart Turn v3.2 相当、単体は偽モデル)が実装される",
+        "g4_pass: 50 試行で早切り 2 件は合格、3 件は不合格(G4)",
+        "compare_g4(fixed_cuts, smart_turn_cuts) は両方式の早切り件数を並べ、採用推奨が件数の少ない方(同数は fixed)になる",
+        "T006 の eot_choice と同一結果"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_eot.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_eot.py -k \"fixed or g4 or compare\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M2] 終話判定インターフェースと G4 比較(eot.py)。test-harness-only interface: eot.compare_g4() 関数 (CLI・スクリプトなし) → traces to §9 (終話判定: G4 の早切り数で Smart Turn v3.2 と比較)、§1.2 (G4: 50 試行で 2 件以下)、§10 (M2 固定無音 vs Smart Turn) design basis: eot.compare_g4 ← §9 '終話判定：既定は固定無音。G4 の試行での早切り数で Smart Turn v3.2 と比較' | safe_to_stop=true | rollback: git revert T017 のコミット。既定は固定無音のままで、director.py は変更しないため他タスクへの影響なし",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/eot.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_eot.py"
+        }
+      ]
+    },
+    {
+      "id": "T018",
+      "title": "AI 相槌(事前合成クリップ・取消規則・クールダウン)",
+      "design_refs": [
+        "6. 拡張設計",
+        "6.1 AI の相槌（M2〜）と自発発話（M3〜）",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "12.4 防御機構ごとのトレードオフ",
+        "10. 段階導入と終了条件"
+      ],
+      "depends_on": [
+        "T013",
+        "T015",
+        "T017"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_backchannel.py -q` が exit 0",
+        "SIL_BACKCHANNEL=300ms 無音で未発火なら発火(299ms は不発)、1 発話につき最大 1 回、BC_COOLDOWN 5s 未満(4.999s)は不発・5s ちょうどは許可",
+        "T-BC/BC: 無音が T_silence=400ms に達した試行で相槌 0 件、未達の試行で 1 件以下(各 TEST_N==20 試行)",
+        "相槌クリップは通常応答と同一の再生・cancel 経路関数を通り、cancel で epoch 破棄される(不変条件 3、旧 epoch の相槌再生 0 件)",
+        "誤発火は全て events に kind='backchannel_misfire' で 1 件ずつ記録される",
+        "クリップ生成は backchannel.synthesize_clips(tts_client) 関数(CLI・スクリプトなし)で、模擬 AivisSpeech に /audio_query → /cancellable_synthesis の順で要求し 1 件以上のクリップを返す",
+        "backchannel.synthesize_clips は内容非依存(発話内容を引数に取らない)",
+        "事前合成相槌は G1 遅延計測の対象外(kind='backchannel' が metrics 集計から除外)",
+        "T015 の統合試験(tests/test_integration_interrupt.py)が director.py 変更後も exit 0(回帰 0 件)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_backchannel.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_integration_interrupt.py -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M2] AI 相槌(backchannel.py) design basis: backchannel.synthesize_clips ← §6.1 '内容非依存の事前合成クリップを再生'(事前合成を行う関数) | safe_to_stop=true | rollback: git revert T018 のコミット(director.py の相槌フック追加を含む)。T020 も director.py を変更するため、T020 を先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/backchannel.py"
+        },
+        {
+          "kind": "modify",
+          "path": "src/idle_talk/director.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_backchannel.py"
+        }
+      ]
+    },
+    {
+      "id": "T019",
+      "title": "話題カード・記憶・質問率制御",
+      "design_refs": [
+        "3.4 SQLite スキーマ（概要）",
+        "10. 段階導入と終了条件",
+        "8.1 既定値表（本書で変数を使う箇所の唯一の定義）"
+      ],
+      "depends_on": [
+        "T007",
+        "T015",
+        "T018"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_memory_topics.py -q` が exit 0",
+        "topic_cards 選択: expires_at 超過と used_at 非 NULL を除外(各 1 件投入で選択 0 件)、使用時に used_at を設定、user_reaction を保存、hook NULL は拒否",
+        "memories: evidence_utterance_id が NULL なら保存拒否、deletable=1 のものだけ削除可能(deletable=0 を削除すると例外)",
+        "RATIO_Q: 3 応答に 1 回以下 — 30 応答のシミュレーションで質問数<=10、任意の連続 3 応答窓の質問数<=1",
+        "§7: 全記憶削除後に memories 行数==0、利用者操作の削除 API が 1 つ存在"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_memory_topics.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_memory_topics.py -k \"expires or evidence or ratio_q or delete\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M3] 話題カード・記憶・質問率制御 | safe_to_stop=true | rollback: git revert T019 のコミット。topics.py/memory.py は T020,T021 が依存するため、それらを先に revert する",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/topics.py"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/memory.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_memory_topics.py"
+        }
+      ]
+    },
+    {
+      "id": "T020",
+      "title": "自発発話・無操作休止",
+      "design_refs": [
+        "4.2 遷移表",
+        "6.1 AI の相槌（M2〜）と自発発話（M3〜）",
+        "8.1 既定値表（本書で変数を使う箇所の唯一の定義）",
+        "4.3 不変条件",
+        "10. 段階導入と終了条件"
+      ],
+      "depends_on": [
+        "T015",
+        "T019"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_spontaneous.py -q` が exit 0",
+        "既定 off、on 時 freq_per_hour==3",
+        "休止時間帯 quiet_start 22:00〜quiet_end 07:00 の 23:30 と 03:00 は発話 0 件、12:00 は発話可",
+        "freq_per_hour=13 は 5006 相当で拒否",
+        "不変条件 5: 無反応(沈黙)3 回連続で発話間隔が単調増加し、同意とみなした連続発話 0 件",
+        "準備中に利用者発話があれば自発発話が取消される(取消 1 件・再生 0 件)",
+        "雑談モード以外では発火 0 件",
+        "IDLE_TIMEOUT: 29 分 59 秒無操作は idle のまま、30 分(1800s)で rest へ遷移",
+        "自発発話も通常応答と同一の再生・cancel 経路関数を通る(不変条件 3)",
+        "T015 の統合試験が回帰 0 件"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_spontaneous.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_spontaneous.py -k \"quiet_hours or idle_timeout or silence_backoff or cancel_prep\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_integration_interrupt.py -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 3,
+      "intent": "[M3] 自発発話・無操作休止(spontaneous.py と director.py 結線) | safe_to_stop=true | rollback: git revert T020 のコミット(既定オフのため既存挙動は不変)。director.py は T018 の変更後に積まれているため revert は T020 を先に行う",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/spontaneous.py"
+        },
+        {
+          "kind": "modify",
+          "path": "src/idle_talk/director.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_spontaneous.py"
+        }
+      ]
+    },
+    {
+      "id": "T021",
+      "title": "RSS Topic Worker(M4 のみネットワーク使用)",
+      "design_refs": [
+        "2.1 コンポーネント",
+        "7. エッジケースと障害モード",
+        "10. 段階導入と終了条件"
+      ],
+      "depends_on": [
+        "T015",
+        "T019",
+        "T020"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_topic_worker.py -q` が exit 0",
+        "fixture フィード 3 件のパースで topic_cards 3 行(hook 非 NULL, source_url, published_at[epoch ms 整数], expires_at > published_at)が生成され、store の書込専用スレッド経由で保存される(§3.4)",
+        "ワーカー停止中(M4 以外)はネットワーク呼び出しが 0 回(socket 監視、§7 ニュース取得以外のネットワークアクセスなし)",
+        "rest 状態ではワーカー停止、idle→user_speaking で背景生成が中断される(中断 1 件)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_topic_worker.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_topic_worker.py -k \"stopped_no_network or parse or interrupt\" -q",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M4] RSS Topic Worker(topic_worker.py) design basis: tests/fixtures/sample_feed.xml ← §10 M4 'RSS Worker' の取得・パースを外部ネットワークなしで検証する入力(§7 ニュース取得以外のネットワークアクセスなし) | safe_to_stop=true | rollback: git revert T021 のコミット(RSS ワーカー追加のみ。他機能に影響なし)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/topic_worker.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_topic_worker.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/fixtures/sample_feed.xml"
+        }
+      ]
+    },
+    {
+      "id": "T022",
+      "title": "常駐試験ハーネス(RSS/VRAM 1 分記録・回帰傾き・E12)",
+      "design_refs": [
+        "1.2 目的（測定可能）",
+        "11.1 指標と合格基準",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "10. 段階導入と終了条件",
+        "3.4 SQLite スキーマ（概要）",
+        "11.2 テスト層",
+        "2. アーキテクチャ"
+      ],
+      "depends_on": [
+        "T009",
+        "T016",
+        "T021"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_soak.py -q` が exit 0",
+        "サンプラは 1 分ごとに RSS と VRAM を記録し、注入クロック 8h で 480 行",
+        "G5: analyze_soak(rows) は RSS 回帰傾き 1.0 MiB/h(8h で +8MiB)で合格、+9MiB(1.125 MiB/h)で不合格",
+        "G5 のテストデータは pytest 内で生成する",
+        "E12/T-E12: 合成 1000 ターンで history_window() の返却長が常に <=8(N_TURNS)",
+        "E12/T-E12: 同 1000 ターンで RSS 回帰傾きが G5 の値 1.0 MiB/h 以内",
+        "サンプラは events に kind='soak_sample' で RSS・VRAM(payload_json の rss_mib, vram_mib)を記録する(注入クロック 1 分刻みの試験)",
+        "validate_run_meta(interval_ms=60000) はts が厳密増加し、行数が 480 以上(= 8h 28800000ms / 60000ms、§11.1 '1 分ごと')で、sample_count が実際の行数と等しい fixture DB で例外を投げない",
+        "負例: run_meta 行のない fixture DB で validate_run_meta が ProvenanceError を送出する",
+        "負例: ended_at−started_at が min_duration_ms=28800000 より 1ms 短い fixture DB で ProvenanceError を送出する",
+        "負例: soak_sample の行数が 480 未満(= 8h 28800000ms / 60000ms の下限割れ)または ts が単調増加でない fixture DB で ProvenanceError を送出する",
+        "main.soak_loop は注入 sleep で interval 毎に sampler.sample を 1 回呼び、sample 失敗後も継続する(T023 の tests/test_wiring_records.py で検証)",
+        "README.md に運用フェーズ確認事項の表(ID/前提/コマンド/合格条件/生成記録)と実機記録の作り方があり、live 項目が自動ループの対象外と明記されている"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_soak.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_soak.py -k \"sampler or slope or e12\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_soak.py -k negative -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_soak_live.py -q",
+          "expect_exit_code": 5
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M4] 常駐試験ハーネス(resource_sampler.py)。test-harness-only interface: resource_sampler.analyze_soak(rows) 関数と metrics.validate_run_meta(T016)の interval_ms=60000 指定での再利用 (CLI・スクリプトなし) → traces to §11.1 (常駐 G5: 8時間運転、RSS・VRAM を 1 分ごとに記録、RSS の回帰傾き)、§1.2 (G5: 傾き 1MiB/h 以下)、§10 (M4 常駐: 8時間運転、メモリ増加なし) design basis: resource_sampler.analyze_soak, tests/test_soak_live.py, records/soak_events.db ← §11.1 '常駐 G5' の '8時間運転、RSS・VRAM を 1 分ごとに記録' と §3.4 events(kind, payload_json) への記録。records/ is a test-artifact directory (not app persistent data) ← §11.2 テスト層 '実機：M0〜M5 の終了条件'。soak_events.db はアプリ自身の SQLite DB(§3.4 events)のコピーで、出所は events の kind=run_meta 行に持つ 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項)。src/idle_talk/main.py に soak_loop(sampler を既定 SAMPLE_INTERVAL_MS=60 秒周期で呼び、計測失敗はログのみで継続。設計 §3.4/§11.1 の「1 分ごと」)を結線し、README.md に events kind 一覧・実機記録の作り方・運用フェーズ確認事項(各 live 試験の前提/コマンド/合格条件)を記す。検証は T023 の tests/test_wiring_records.py で行う | safe_to_stop=true | rollback: git revert T022 のコミット(独立モジュールのみ)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "src/idle_talk/resource_sampler.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_soak.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_soak_live.py"
+        },
+        {"kind":"modify","path":"src/idle_talk/main.py"},
+        {"kind":"modify","path":"README.md"}
+      ]
+    },
+    {
+      "id": "T023",
+      "title": "スピーカー対応の AEC 実測プローブと Pipecat 移行判定",
+      "design_refs": [
+        "6.2 Pipecat への移行条件",
+        "10. 段階導入と終了条件",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "3.4 SQLite スキーマ（概要）",
+        "11.2 テスト層"
+      ],
+      "depends_on": [
+        "T012",
+        "T015",
+        "T022"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_echo_chain.py -q` が exit 0",
+        "`node --test web/tests/aec_probe.test.js` が exit 0",
+        "aec_probe が getUserMedia({echoCancellation:true}) を使用する設定を持つ(テストで制約オブジェクトを assert)",
+        "E10/echo_chain: evaluate_echo_chain(events) は 20 分の記録で自声起因の応答連鎖 0 回なら合格",
+        "E10/echo_chain: 同関数は連鎖 1 回なら不合格",
+        "E10/echo_chain: 不合格の結果に Pipecat 比較を推奨と明記する(§6.2)",
+        "evaluate_echo_chain は連鎖 0 のデータで cancel 件数>=1 のとき割り込み可能と判定する(§10 M5 の割り込み可能)",
+        "evaluate_echo_chain は結果判定の前に validate_run_meta(min_duration_ms=1200000。E10 の 20 分 = 20×60×1000ms) を呼び、不備なら ProvenanceError を送出する",
+        "負例: run_meta 行のない fixture DB で evaluate_echo_chain が ProvenanceError を送出する",
+        "負例: ended_at−started_at が 1200000ms より 1ms 短い fixture DB で evaluate_echo_chain が ProvenanceError を送出する",
+        "負例: events の ts が逆行する fixture DB で evaluate_echo_chain が ProvenanceError を送出する"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_echo_chain.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "node --test web/tests/aec_probe.test.js",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_echo_chain.py -k \"chain or pipecat or cancel\" -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_echo_chain.py -k negative -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_live_policy.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "python -m pytest tests/test_echo_chain_live.py -q",
+          "expect_exit_code": 5
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M5] スピーカー対応の AEC 実測プローブと Pipecat 移行判定。test-harness-only interface: echo_chain.evaluate_echo_chain() 関数と metrics.validate_run_meta(T016)の再利用 (CLI・スクリプトなし) → traces to §6.2 (Pipecat への移行条件: 自分の声に応答が連鎖しないこと)、§10 (M5 スピーカー: 応答連鎖なし、割り込み可能)、§12.3 (E10: 20 分で連鎖 0 回) design basis: echo_chain.evaluate_echo_chain, tests/test_echo_chain_live.py, records/m5_events.db ← §12.3 E10 'M5：再生中の自己認識による応答連鎖 0 回 / 20 分' と §10 M5 '応答連鎖なし、割り込み可能'。records/ is a test-artifact directory (not app persistent data) ← §11.2 テスト層 '実機：M0〜M5 の終了条件'。m5_events.db はアプリ自身の SQLite DB(§3.4 events)のコピーで、出所は events の kind=run_meta 行に持つ 運用フェーズ検証: 実機/記録が要る検証は運用フェーズへ移管(README 運用フェーズでの確認事項)。Director の events 記録結線と main.soak_loop の配線試験は T024 に移管。echo_chain の検出則は設計 §6.2/§12.3 E10 に具体則がないため最小規則(AI 再生中に始まった発話の認識結果が直近 AI 発話本文の部分文字列なら 1 件。句読点・空白除去のみ、閾値・類似度なし)とし、新たな数値は導入しない | safe_to_stop=true | rollback: git revert T023 のコミット(プローブ追加のみ。既存機能に影響なし)",
+      "changes": [
+        {
+          "kind": "add",
+          "path": "web/aec_probe.js"
+        },
+        {
+          "kind": "add",
+          "path": "src/idle_talk/echo_chain.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_echo_chain.py"
+        },
+        {
+          "kind": "add",
+          "path": "web/tests/aec_probe.test.js"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_echo_chain_live.py"
+        }
+      ]
+    },
+    {
+      "id": "T024",
+      "title": "events 記録結線の配線試験(playback/cancel/echo_chain の記録と soak_loop)と live 記録検証スクリプトの配置",
+      "design_refs": [
+        "3.4 SQLite スキーマ（概要）",
+        "12.3 障害モードの対応表（E-ID → 機構 → テスト）",
+        "11.2 テスト層",
+        "10. 段階導入と終了条件"
+      ],
+      "depends_on": [
+        "T005",
+        "T023"
+      ],
+      "acceptance": [
+        "`python -m pytest tests/test_wiring_records.py -q` が exit 0",
+        "playback は再生の開始/終了を kind=playback で、割り込みによる取消は kind=cancel で events に記録し、旧 epoch の playback 記録は G3 で不合格になる",
+        "AI 再生中に始まった発話の認識結果が直近 AI 発話本文を含むときのみ kind=echo_chain を 1 件記録し、割り込み(cancel)や再生外の発話では記録しない",
+        "main.soak_loop が soak_sample 行を events に書き、run_meta の sample_count に含まれる",
+        "`node --check web/tests/capture_record_live.js` が exit 0(実機記録 records/capture_check.json の運用フェーズ検証用スクリプトで、*.test.js ではないため既定の node --test web/tests/*.test.js には含まれない)"
+      ],
+      "verify": [
+        {
+          "command": "python -m pytest tests/test_wiring_records.py -q",
+          "expect_exit_code": 0
+        },
+        {
+          "command": "node --check web/tests/capture_record_live.js",
+          "expect_exit_code": 0
+        }
+      ],
+      "estimate_rounds": 2,
+      "intent": "[M5] T023 から移管した結線: Director の events 記録結線(playback/cancel/echo_chain の各 kind を director.py が書く)と main.soak_loop(T022)の配線試験を tests/test_wiring_records.py に置く。T005 から移管した web/tests/capture_record_live.js(実機記録 records/capture_check.json の運用フェーズ検証。*.test.js ではないため自動ループの verify 対象外)を配置する。echo_chain の検出則は T023 の最小規則(AI 再生中に始まった発話の認識結果が直近 AI 発話本文の部分文字列なら 1 件。句読点・空白除去のみ、閾値・類似度なし)を使い、新たな数値は導入しない。traces to §3.4 (events)、§12.3 (E10)、§10 (M5) | safe_to_stop=true | rollback: git revert T024 のコミット(director.py の記録結線追加と試験・検証スクリプト追加のみ。T023 の判定関数に影響なし)",
+      "changes": [
+        {
+          "kind": "modify",
+          "path": "src/idle_talk/director.py"
+        },
+        {
+          "kind": "add",
+          "path": "tests/test_wiring_records.py"
+        },
+        {
+          "kind": "add",
+          "path": "web/tests/capture_record_live.js"
+        }
+      ]
+    }
+  ]
+}

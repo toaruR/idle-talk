@@ -1,0 +1,23 @@
+[project]
+name = "idle-talk"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "jsonschema"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration: 実サービス(GPU/外部サーバ)を使う実機層の試験。既定では除外し -m integration でのみ実行する",
+]
+addopts = "-m 'not integration' --strict-markers"

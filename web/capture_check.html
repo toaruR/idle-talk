@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>capture check (M0)</title></head>
+<body>
+<h1>AudioWorklet capture check</h1>
+<p>Open on localhost. Click start; result JSON is downloaded as capture_check.json (save into records/).</p>
+<button id="start">start</button>
+<pre id="out"></pre>
+<script src="worklet.js"></script>
+<script src="capture_check.js"></script>
+<script>
+document.getElementById('start').addEventListener('click', async () => {
+  const out = document.getElementById('out');
+  try {
+    const { result, json } = await IdleTalkCapture.runCapture({
+      getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+      AudioContextCtor: window.AudioContext,
+      workletUrl: 'worklet.js',
+      host: location.host,
+      userAgent: navigator.userAgent,
+      appCommit: new URLSearchParams(location.search).get('commit') || 'unknown',
+    });
+    out.textContent = JSON.stringify(result) + '\n' + json;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    a.download = 'capture_check.json';
+    a.click();
+  } catch (e) {
+    out.textContent = 'error: ' + e;
+  }
+});
+</script>
+</body>
+</html>

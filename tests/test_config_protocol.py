@@ -1,0 +1,176 @@
+import copy
+import dataclasses
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from idle_talk import errors, protocol
+from idle_talk.config import Config
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_defaults_time():
+    c = Config()
+    assert (c.T_silence, c.T_confirm, c.MIN_SEG, c.SIL_BACKCHANNEL) == (400, 400, 200, 300)
+    assert (c.BC_COOLDOWN, c.PING_INTERVAL, c.IDLE_TIMEOUT) == (5, 5, 1800)
+
+
+def test_defaults_perf():
+    c = Config()
+    assert (c.TTS_GPU_THRESH, c.OVERLAP_MAX, c.VAR_SUM, c.G2_SUM) == (300, 300, 750, 130)
+    assert (c.TTS_RATIO_MAX, c.DUCK_GAIN) == (0.7, 0.2)
+
+
+def test_defaults_structs():
+    c = Config()
+    assert (c.LLM_RETRY.max, c.LLM_RETRY.window_s, c.LLM_RETRY.backoff_s) == (3, 600, (1, 2, 4))
+    assert (c.STRONG_UTT.volume_ratio, c.STRONG_UTT.window_s) == (2.0, 1.0)
+    assert (c.ASR_HALLU.no_speech_prob, c.ASR_HALLU.compression_ratio) == (0.6, 2.4)
+    h = c.HTTP_TIMEOUT
+    assert (h.llm_first, h.llm_total, h.tts_sentence) == (5, 20, 3)
+    assert h.asr(3.0) == 8.0
+    e = c.E_PARAMS
+    assert (e.silence_input_s, e.device_lost_s, e.tts_cpu_settle_s, e.tts_cpu_delta_pt) == (60, 3, 2, 5)
+    assert (c.TEST_N, c.DB_BACKUP, c.N_TURNS, c.RATIO_Q) == (20, 1, 8, (1, 3))
+    assert c.STOP_WORDS == ("待って", "違う", "ちょっと", "ストップ")
+
+
+def test_defaults_spontaneous():
+    c = Config()
+    assert c.spontaneous_enabled is False
+    assert (c.freq_per_hour, c.quiet_start, c.quiet_end) == (3, "22:00", "07:00")
+
+
+def test_defaults_field_names():
+    expected = {
+        "T_silence", "TTS_GPU_THRESH", "PING_INTERVAL", "LLM_RETRY", "IDLE_TIMEOUT", "STRONG_UTT",
+        "OVERLAP_MAX", "HTTP_TIMEOUT", "DUCK_GAIN", "VAR_SUM", "G2_SUM", "TTS_RATIO_MAX",
+        "TEST_N", "E_PARAMS", "DB_BACKUP", "MIN_SEG", "T_confirm", "STOP_WORDS", "N_TURNS",
+        "SIL_BACKCHANNEL", "BC_COOLDOWN", "RATIO_Q", "ASR_HALLU",
+        "spontaneous_enabled", "freq_per_hour", "quiet_start", "quiet_end",
+    }
+    assert len(expected) == 27
+    assert {f.name for f in dataclasses.fields(Config)} == expected
+
+
+def test_range_t_confirm():
+    for v in (300, 500):
+        assert Config(T_confirm=v).T_confirm == v
+    for v in (299, 501):
+        with pytest.raises(ValueError):
+            Config(T_confirm=v)
+
+
+def test_range_sil_backchannel():
+    for v in (250, 350):
+        assert Config(SIL_BACKCHANNEL=v).SIL_BACKCHANNEL == v
+    for v in (249, 351):
+        with pytest.raises(ValueError):
+            Config(SIL_BACKCHANNEL=v)
+    with pytest.raises(ValueError):
+        Config(T_silence=300, SIL_BACKCHANNEL=300)
+    with pytest.raises(ValueError):
+        Config(T_silence=250, SIL_BACKCHANNEL=300)
+
+
+POSITIVE = [
+    {"t": "hello", "version": 1, "sample_rate": 16000, "client_id": "abc"},
+    {"t": "playback", "epoch": 1, "utterance_id": 2, "chunk_id": 3, "position_ms": 600000, "state": "started"},
+    {"t": "ui", "mute": True, "on": False, "freq_per_hour": 12, "quiet_start": "22:00", "quiet_end": "07:00"},
+    {"t": "ping", "ts": 123},
+    {"t": "pong", "ts": 123},
+    {"t": "duck", "epoch": 1, "gain": 0.2},
+    {"t": "cancel", "new_epoch": 2},
+    {"t": "resume", "epoch": 2},
+    {"t": "state", "state": "idle", "muted": False},
+    {"t": "error", "code": 5001, "message": "x"},
+]
+
+
+def test_schema_positive():
+    assert len(POSITIVE) == 10
+    for m in POSITIVE:
+        assert protocol.validate_message(m), m
+
+
+def test_schema_negative():
+    neg = [
+        {"t": "ui", "freq_per_hour": 13},
+        {"t": "playback", "epoch": 1, "utterance_id": 2, "chunk_id": 3, "position_ms": 600001, "state": "started"},
+        {"t": "error", "code": 3999, "message": "x"},
+        {"t": "state", "state": "foo", "muted": False},
+        {"t": "hello", "version": 1, "sample_rate": 44100, "client_id": "a"},
+    ]
+    for m in neg:
+        assert not protocol.validate_message(m), m
+
+
+def test_schema_error_code_range():
+    for c, ok in ((4000, True), (5999, True), (3999, False), (6000, False)):
+        assert protocol.validate_message({"t": "error", "code": c, "message": "m"}) is ok
+
+
+def test_schema_required_keys():
+    seen = set()
+    for m in POSITIVE:
+        required = set(next(
+            s["required"] for s in protocol.MESSAGE_SCHEMA["oneOf"]
+            if m["t"] in (s["properties"]["t"].get("enum") or [s["properties"]["t"].get("const")])
+        )) - {"t"}
+        for k in required:
+            bad = copy.deepcopy(m)
+            del bad[k]
+            assert not protocol.validate_message(bad), (m["t"], k)
+            seen.add(k)
+    expected = {"version", "sample_rate", "client_id", "epoch", "utterance_id", "chunk_id",
+                "position_ms", "state", "ts", "gain", "new_epoch", "muted", "code", "message"}
+    assert expected <= seen
+    # ui の mute/on/quiet_* は required に無い(スキーマ上 t のみ必須)。欠落は t のみ検証
+    assert not protocol.validate_message({"mute": True})
+
+
+def test_state_names():
+    assert list(protocol.STATE_NAMES_JA) == [
+        "idle", "user_speaking", "eot_check", "preparing", "ai_playing", "interrupt_check", "rest"]
+    assert len(set(protocol.STATE_NAMES_JA.values())) == 7
+    assert protocol.STATE_NAMES_JA["idle"] == "待機" and protocol.STATE_NAMES_JA["rest"] == "休止"
+
+
+def test_header_roundtrip():
+    h = protocol.pack_down_header(1, 2, 3, 4)
+    assert len(h) == 16
+    assert protocol.unpack_down_header(h) == (1, 2, 3, 4)
+    m = protocol.U32_MAX
+    assert protocol.unpack_down_header(protocol.pack_down_header(m, m, m, m)) == (m, m, m, m)
+    for i in range(4):
+        args = [0, 0, 0, 0]
+        args[i] = m + 1
+        with pytest.raises(ValueError):
+            protocol.pack_down_header(*args)
+
+
+def test_up_seq_bounds():
+    assert protocol.unpack_up_frame(protocol.pack_up_frame(4294967295, b"ab")) == (4294967295, b"ab")
+    with pytest.raises(ValueError):
+        protocol.pack_up_frame(4294967296, b"")
+
+
+def test_chunk_size_limit():
+    assert protocol.pack_down_chunk(0, 0, 0, bytes(1048576))
+    with pytest.raises(ValueError):
+        protocol.pack_down_chunk(0, 0, 0, bytes(1048577))
+
+
+def test_error_codes():
+    assert (errors.CLOSE_4001, errors.CLOSE_VERSION_MISMATCH, errors.CLOSE_ORIGIN_DENIED) == (4001, 4002, 4003)
+    assert (errors.ERR_LLM_TIMEOUT, errors.ERR_TTS_FAILED, errors.ERR_ASR_FAILED,
+            errors.ERR_DB, errors.ERR_MIC_LOST, errors.ERR_OUT_OF_RANGE) == (5001, 5002, 5003, 5004, 5005, 5006)
+    assert errors.EXIT_DUPLICATE_LAUNCH == 4
+
+
+def test_pytest_config():
+    cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    assert any(m.startswith("integration:") for m in cfg["markers"])
+    assert cfg["addopts"] == "-m 'not integration' --strict-markers"
