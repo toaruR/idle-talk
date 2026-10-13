@@ -51,6 +51,11 @@ async def until(pred, timeout=5.0):
         await asyncio.sleep(0.005)
 
 
+async def asr_settled(d):
+    """ASR は別スレッドで走る (director._offload_asr)。認識結果がループで処理されるまで待つ。"""
+    await until(lambda: d.ingress.asr_pending == 0)
+
+
 def state(d):
     return d.fsm.ctx.state.value
 
@@ -116,6 +121,7 @@ def test_e2_backchannel_during_playback_does_not_cancel(tmp_path):
                 before = d.history._pos[(ep, utt)][0]
                 d.texts_q.append("うん")
                 b.speak()  # 再生中の相槌: duck -> T_confirm 内に判定 -> resume
+                await asr_settled(d)
                 assert b.of("cancel") == [] and len(b.of("duck")) == 1
                 assert len(b.of("resume")) == 1 and state(d) == "ai_playing"
                 assert d.epoch.current == ep
@@ -137,6 +143,7 @@ def test_e2_backchannel_after_t_confirm_is_cancelled(tmp_path):
             await until(lambda: state(d) == "ai_playing" and d._gen_done)
             d.texts_q.append("うん")
             b.speak()  # ASR が T_confirm 以降に返る -> 判断不能として cancel
+            await asr_settled(d)
             assert len(b.of("cancel")) == 1 and b.of("resume") == []
             await until(lambda: d._task is not None and d._task.done())
         finally:
@@ -169,7 +176,8 @@ def test_e3_stop_word_ducks_within_g2_and_cancels(tmp_path):
                 d.texts_q.append("待って")
                 t0 = time.perf_counter()
                 b.speak()
-                assert "duck" in stamps
+                assert "duck" in stamps  # duck は認識を待たず発話開始で出る
+                await asr_settled(d)
                 within += (stamps["duck"] - t0) * 1000 <= 250  # G2: p95 250ms
                 assert len(b.of("cancel")) == 1 and d.epoch.current == ep + 1
                 assert d.clock_.t * 1000 <= CFG.T_confirm + CFG.G2_SUM  # 確定停止の上限 (模擬時計)
@@ -240,5 +248,89 @@ def test_g3_old_epoch_chunks_after_cancel_are_never_played(tmp_path):
                 assert len(b.chunks) == n0 + 1
             assert played_old == 0 and d.epoch.current == 100
         finally:
+            store.close()
+    asyncio.run(run())
+
+
+# ---------------- ASR を別スレッドで実行 ----------------
+
+def make_gated_asr(tmp_path, results):
+    """ASR が gate で止まる Director。results は順に返す認識結果 (None は通信のタイムアウト)。"""
+    clock = FakeClock()
+    store = Store(tmp_path / "t.db", db_backup=False)
+    gate = threading.Event()
+
+    def send(req, timeout):
+        gate.wait(10)
+        text = results.pop(0)
+        if text is None:
+            raise TimeoutError("timed out")
+        return 200, {"utterance_id": req["utterance_id"], "text": text,
+                     "no_speech_prob": 0.1, "compression_ratio": 1.0}
+
+    d = IdleTalkDirector(store, lambda m: iter(TOKENS), lambda text: b"RIFF....WAVE", lambda: None, EnergyVad(),
+                         AsrClient(send, CFG, clock=clock), cfg=CFG, clock=clock, now_ms=lambda: 1000)
+    b = MockBrowser(auto_playback=False)
+    b.attach(d.core)
+    d.clock_ = clock
+    return d, b, store, gate
+
+
+def test_asr_does_not_block_event_loop_and_failure_keeps_connection(tmp_path):
+    async def run():
+        d, b, store, gate = make_gated_asr(tmp_path, [None, "こんにちは"])
+        try:
+            b.speak()  # 認識は gate で止まるが、speak は戻りループも進む
+            await asyncio.sleep(0.05)
+            assert d.ingress.asr_pending == 1 and state(d) == "eot_check"
+            gate.set()
+            await asr_settled(d)
+            assert d.core.conn is not None  # タイムアウトでも接続は切れない
+            b.speak()
+            await until(lambda: state(d) == "ai_playing")
+        finally:
+            gate.set()
+            store.close()
+    asyncio.run(run())
+
+
+def test_late_transcript_after_t_confirm_gets_response(tmp_path):
+    """割り込みの認識が T_confirm を超えて返った: 取消後の USER_SPEAKING に留まらず、その発話に応答する。"""
+    async def run():
+        d, b, store, gate = make_gated_asr(tmp_path, ["こんにちは", "それより明日の予定は"])
+        try:
+            gate.set()
+            b.speak()
+            await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            gate.clear()
+            b.speak()  # 割り込み: duck して認識待ち
+            assert state(d) == "interrupt_check"
+            d.clock_.advance(CFG.T_confirm / 1000)
+            assert d.check_confirm_timeout() and state(d) == "user_speaking"
+            gate.set()
+            await asr_settled(d)
+            await until(lambda: state(d) in ("preparing", "ai_playing"))
+        finally:
+            gate.set()
+            store.close()
+    asyncio.run(run())
+
+
+def test_late_asr_failure_after_t_confirm_returns_idle(tmp_path):
+    async def run():
+        d, b, store, gate = make_gated_asr(tmp_path, ["こんにちは", None])
+        try:
+            gate.set()
+            b.speak()
+            await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            gate.clear()
+            b.speak()
+            d.clock_.advance(CFG.T_confirm / 1000)
+            assert d.check_confirm_timeout() and state(d) == "user_speaking"
+            gate.set()
+            await asr_settled(d)
+            assert state(d) == "idle"
+        finally:
+            gate.set()
             store.close()
     asyncio.run(run())

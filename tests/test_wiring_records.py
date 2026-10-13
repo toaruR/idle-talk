@@ -3,7 +3,7 @@ import asyncio
 import json
 import sqlite3
 
-from test_integration_interrupt import make, state, until
+from test_integration_interrupt import asr_settled, make, state, until
 
 from idle_talk.echo_chain import CANCEL_KIND, ECHO_CHAIN_KIND
 from idle_talk.main import soak_loop
@@ -63,6 +63,7 @@ def test_interrupt_records_cancel_and_not_echo_chain(tmp_path):
             await until(lambda: state(d) == "ai_playing" and d._gen_done)
             d.texts_q.append("待って")
             b.speak()
+            await asr_settled(d)
             assert len(b.of("cancel")) == 1
             assert len(kinds(store, CANCEL_KIND)) == 1 and kinds(store, ECHO_CHAIN_KIND) == []
             await until(lambda d=d: d._task is not None and d._task.done())
@@ -79,6 +80,7 @@ def test_self_voice_transcript_records_echo_chain(tmp_path):
             await until(lambda: state(d) == "ai_playing" and d._gen_done)
             d.texts_q.append("今日は、いい天気ですね")  # AI 本文の再認識 (句読点差は無視)
             b.speak()
+            await asr_settled(d)
             rows = kinds(store, ECHO_CHAIN_KIND)
             assert len(rows) == 1 and json.loads(rows[0]["payload_json"])["text"] == "今日は、いい天気ですね"
             await until(lambda d=d: d._task is not None and d._task.done())

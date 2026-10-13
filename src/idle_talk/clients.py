@@ -224,7 +224,12 @@ class AsrClient:
             raise ValueError("invalid asr request")
         limit = self.cfg.HTTP_TIMEOUT.asr(segment_s)
         start = self.clock()
-        status, body = self._send(req, limit)
+        try:
+            status, body = self._send(req, limit)
+        except OSError as e:  # 接続断・ソケットのタイムアウト。そのまま投げると WS の受信処理ごと落ちる
+            if _is_timeout(e):
+                raise AsrTimeout(f"asr > {limit}s: {e}") from e
+            raise AsrFailed(f"asr: {e}") from e
         if self.clock() - start > limit:
             raise AsrTimeout(f"asr > {limit}s")
         if status != 200 or not _ASR_RES.is_valid(body):

@@ -305,3 +305,14 @@ def test_radio_no_question_prompt_and_no_idle_timeout(tmp_path):
         assert d.spontaneous_tick() == "spontaneous"
         assert d.fsm.ctx.state.value == "idle"
     asyncio.run(run())
+
+
+def test_radio_does_not_wait_for_memory_extraction(tmp_path):
+    async def run():
+        d, b, _store = make(tmp_path)
+        d.core.on_text(b, json.dumps({"t": "ui", "radio": True}))
+        d._mem_task = asyncio.get_running_loop().create_task(asyncio.sleep(10))  # 記憶抽出中
+        d.clock_.advance(3)
+        assert d.spontaneous_tick() == "spontaneous"
+        d._mem_task.cancel()
+    asyncio.run(run())

@@ -13,6 +13,7 @@ from idle_talk.clients import (
     LLM_REQ_SCHEMA,
     TTS_RATE,
     AsrClient,
+    AsrFailed,
     AsrTimeout,
     LlmClient,
     LlmTimeout,
@@ -143,6 +144,16 @@ def test_timeout_asr_discard():
     with pytest.raises(AsrTimeout) as e:
         bad.transcribe(1, "shm", 3.0)
     assert e.value.code == 5003
+
+
+@pytest.mark.parametrize("exc,want", [(TimeoutError("timed out"), AsrTimeout),
+                                       (ConnectionResetError("reset"), AsrFailed)])
+def test_asr_socket_errors_become_client_errors(exc, want):
+    """urllib のソケット例外を素通しすると WS の受信処理ごと落ちる。発話破棄用の例外に変換する。"""
+    def send(req, timeout):
+        raise exc
+    with pytest.raises(want):
+        AsrClient(send).transcribe(1, "shm", 1.0)
 
 
 def _ok_transcribe(uid, ref):

@@ -14,6 +14,7 @@ import socket
 import threading
 import time
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -132,9 +133,12 @@ class IdleTalkDirector:
         self._bc_speaking = False
         self.pipeline = ResponsePipeline(llm_stream, self._synth_or_clip, cancel_tts, self._on_chunk,
                                          self._emit, self.epoch)
+        # ASR は単一ワーカーで順に実行し、WS の受信処理 (イベントループ) を止めない
+        self._asr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
         self.ingress = Ingress(self.fsm, vad, asr, on_transcript=self._on_transcript,
                                on_error=lambda c, m: self._emit({"t": "error", "code": c, "message": m}),
-                               clock=clock, on_speech_end=lambda: self._m_mark("eot_wait"))
+                               clock=clock, on_speech_end=lambda: self._m_mark("eot_wait"),
+                               offload=self._offload_asr)
         self._text = ""
         self._task: asyncio.Task | None = None
         self._cancels: set[asyncio.Task] = set()
@@ -179,6 +183,7 @@ class IdleTalkDirector:
             meta = {"host": socket.gethostname() or "unknown", "started_at": self._m_started_at,
                     "ended_at": ended, "app_commit": self.app_commit, "sample_count": n}
             self.store.add_event(ended, self.epoch.current, "run_meta", json.dumps(meta))
+        self._asr_pool.shutdown(wait=False, cancel_futures=True)
         self.store.close()
 
     # ---- 相槌 (設計書 6.1): 事前合成クリップも通常応答と同じ play_utterance / cancel 経路を通る ----
@@ -294,6 +299,25 @@ class IdleTalkDirector:
         self.fsm.pump()
 
     # ---- 入力 ----
+    def _offload_asr(self, work: Callable[[], object], done: Callable[[object], None]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # ループ外 (同期テスト等): その場で実行
+            done(work())
+            return
+        fut = self._asr_pool.submit(work)
+        fut.add_done_callback(lambda f: loop.call_soon_threadsafe(self._asr_finished, f, done))
+
+    def _asr_finished(self, fut: Future, done: Callable[[object], None]) -> None:
+        if fut.cancelled():
+            return
+        done(fut.result())
+        if (self.fsm.ctx.state is State.USER_SPEAKING and self.ingress._buf is None
+                and self.ingress.asr_pending == 0):
+            # T_confirm 超過で割り込み扱いになった後、認識が捨てられた (失敗・幻聴): 発話は終わっているので待機へ戻す
+            self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=0))
+        self._pump()
+
     def _on_up_audio(self, seq: int, pcm: bytes) -> None:
         if not self.core.hello_done:
             return
@@ -325,6 +349,9 @@ class IdleTalkDirector:
         if self.fsm.ctx.state is State.INTERRUPT_CHECK and self._judge_interrupt(text) == "backchannel":
             self._m_abandon()
             return  # 相槌は履歴に積まない
+        if self.fsm.ctx.state is State.USER_SPEAKING and self.ingress._buf is None:
+            # T_confirm 超過で割り込み扱いになった後に届いた認識結果: 発話は終わっているので終話確認へ進める
+            self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=self.cfg.MIN_SEG))
         talk_log.info("USER: %s", text)
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
         if len(text) >= MIN_UTTERANCE_CHARS:  # 古い分は捨て、直近 MEM_BATCH 発話だけ抽出に回す
@@ -459,7 +486,8 @@ class IdleTalkDirector:
             self._pump()
             return "rest"
         listening = self.core.conn is not None and self.core.hello_done  # 聞き手がいないと再生完了が来ない
-        if self._mem_task is not None and not self._mem_task.done():  # 記憶抽出と LLM を取り合わない
+        # 記憶抽出と LLM を取り合わない。ラジオは間を空けない (llama-server は複数スロットで並行処理する)
+        if not self.spontaneous.radio and self._mem_task is not None and not self._mem_task.done():
             return None
         if listening and self.spontaneous.should_fire(now, self._idle_since if idle else None):
             self.spontaneous.fire(now)

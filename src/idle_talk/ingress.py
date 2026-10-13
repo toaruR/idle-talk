@@ -11,12 +11,16 @@ from collections import Counter
 from collections.abc import Callable
 from multiprocessing import shared_memory
 
-from .clients import AsrClient, AsrTimeout
+from .clients import AsrClient
 from .errors import ERR_MIC_LOST
 from .fsm import Director, Ev, Event
 from .vad import BYTES_PER_MS, SPEECH_END, SPEECH_START, Vad, rms
 
 log = logging.getLogger(__name__)
+_FAILED = object()  # ASR 失敗 (発話破棄)
+
+# offload(work, done): work (ブロッキングの ASR 呼び出し) を別スレッドで走らせ、結果を done で呼び出し元のループへ返す
+Offload = Callable[[Callable[[], object], Callable[[object], None]], None]
 
 
 class Ingress:
@@ -25,7 +29,8 @@ class Ingress:
                  on_error: Callable[[int, str], None] | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  silent_rms: float = 1.0,
-                 on_speech_end: Callable[[], None] | None = None) -> None:
+                 on_speech_end: Callable[[], None] | None = None,
+                 offload: Offload | None = None) -> None:
         self.director = director
         self.cfg = director.cfg
         self.vad = vad
@@ -33,6 +38,8 @@ class Ingress:
         self.on_transcript = on_transcript
         self.on_error = on_error
         self.on_speech_end = on_speech_end  # MIN_SEG 以上の発話終了通知 (M1 計測 eot_wait)
+        self.offload = offload  # None なら ASR を呼び出し元で同期実行する
+        self.asr_pending = 0  # 認識待ちの区間数
         self.clock = clock
         self.silent_rms = silent_rms
         self.frames_by_state: Counter[str] = Counter()
@@ -97,20 +104,35 @@ class Ingress:
         if self.asr is None:
             return
         self._uid += 1
+        uid = self._uid
         name = self._put_shm(pcm)
-        try:
-            res = self.asr.transcribe(self._uid, name, seg_ms / 1000)
-        except AsrTimeout:
-            log.warning("asr timeout: utterance %d discarded", self._uid)
+        self.asr_pending += 1
+
+        def work() -> object:
+            try:
+                return self.asr.transcribe(uid, name, seg_ms / 1000)
+            except Exception as e:  # noqa: BLE001  認識の失敗で会話を止めない (該当発話だけ捨てる)
+                log.warning("asr failed: utterance %d discarded: %s", uid, e)
+                return _FAILED
+            finally:
+                self.release(name)
+
+        if self.offload is None:
+            self._asr_done(uid, work())
+        else:
+            self.offload(work, lambda res: self._asr_done(uid, res))
+
+    def _asr_done(self, uid: int, res: object) -> None:
+        self.asr_pending -= 1
+        if res is _FAILED:
             return
-        finally:
-            self.release(name)
         if res is None:  # 幻聴 (E4): 応答トリガを送らない
-            log.info("asr hallucination discarded: utterance %d", self._uid)
+            log.info("asr hallucination discarded: utterance %d", uid)
             return
         if self.on_transcript:
-            self.on_transcript(self._uid, res["text"])
-        self.director.enqueue(Event(Ev.SILENCE, silence_ms=self.cfg.T_silence, eot=True))
+            self.on_transcript(uid, res["text"])
+        if uid == self._uid:  # 後続区間の認識待ちがあれば、終話はそちらの結果で確定させる
+            self.director.enqueue(Event(Ev.SILENCE, silence_ms=self.cfg.T_silence, eot=True))
 
     # ---- E6: 無音フレーム連続 ----
     def _check_silence(self, frame: bytes) -> None:

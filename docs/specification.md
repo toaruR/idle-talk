@@ -28,7 +28,7 @@
 | AivisSpeech | 手動 | 10101 | 話者 ID 既定 888753760 (`idle_talk.toml` の `[tts].speaker` / `--speaker`) |
 
 - 二重起動は pid ロックで検出し exit 4。`asr_worker` も `--pid-file` 指定時は同じ検査をする。
-- `python -m idle_talk.ctl start|stop|restart|status` (Windows は `idle-talk.cmd`) が ASR ワーカーと Director を端末から切り離して起動する。PID ファイル (`data/idle_talk.pid` / `data/asr_worker.pid`) の生存確認で二重起動を拒否し (exit 4)、出力は `data/idle_talk.log` / `data/asr_worker.log` に追記する。
+- `python -m idle_talk.ctl start|stop|restart|status` (Windows は `idle-talk.cmd`) が ASR ワーカーと Director を端末から切り離して起動する。PID ファイル (`data/idle_talk.pid` / `data/asr_worker.pid`) の生存確認で二重起動を拒否し (exit 4)、出力は `data/idle_talk.log` / `data/asr_worker.log` に追記する。Director のログは INFO 以上を `日時 レベル ロガー名: 本文` で出す。
 - 発話文言は `data/talk.log` (UTF-8) に `日時 USER: …` / `日時 AI: …` で追記する (ロガー `idle_talk.talk`、他のログには流さない)。利用者は ASR 確定時、AI は DB の turns と同じく再生を終えたチャンクだけを確定時に書き、途中で止まった発話は `AI(中断):` とする。
 - 停止: `ctl stop` が `data/idle_talk.stop` を置き、Director は `main.stop_watch` (0.5 秒周期) で検知して Ctrl+C と同じ終了処理をする。`ctl.STOP_TIMEOUT_S`=20 秒以内に終わらなければ強制終了する (このとき llama-server が残ることがある)。ASR ワーカーは即時に強制終了する。Director は起動時に残っていた停止ファイルを消す。
 - `main` は CLI 引数と `idle_talk.toml` のみを使い、環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER` は M0 計測と実機試験だけが読む。
@@ -144,7 +144,9 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 - タイムアウト `HTTP_TIMEOUT`:
   - LLM: 最初のトークン 5s、全体 20s → 5001。
   - TTS: 1 文 3s → 5002。その文は飛ばして次の文へ続ける。
-  - ASR: 区間長 ×2 + 2s → 5003。その発話は破棄する。
+  - ASR: 区間長 ×2 + 2s → 5003。その発話は破棄する。ソケットのタイムアウト・接続断も `AsrTimeout` / `AsrFailed` に変換し、Ingress がどの失敗も握って発話だけ捨てる (WS の接続は保つ)。
+- ASR は Director の単一ワーカースレッド (`director._offload_asr`) で区間順に実行し、結果はイベントループに戻して処理する。認識中も再生通知・音声送出・LLM/TTS は止まらない。後続区間の認識待ちがあるときは、終話 (SILENCE) は最後の区間の結果で確定する。
+- 割り込みの認識が `T_confirm` を超えて返ると、先に判断不能として取り消され `user_speaking` に入る。その後に届いた認識結果は終話確認へ進めて応答し、認識が捨てられた (失敗・幻聴) ときは `idle` へ戻す。
 - LLM が停止したときは定型句に縮退する。llama-server は `LLM_RETRY` に従い、1s → 2s → 4s のバックオフで 600s 窓内に最大 3 回まで再起動する。4 回目は再起動せず、Director を休止 (`rest`) に移して警告ログを出す。
 - 再起動が働くのは Director が llama-server を起動した場合だけ。`idle_talk.toml` の `[llm]` (`server` 実行ファイル、`model` gguf パス、`ngl`、`ctx`) で `model` を指定すると、`main` が起動時に llama-server を起動し、`/health` が 200 になるまで最大 `LLM_READY_TIMEOUT_S` (120s) 待ってから続ける。出力は `<data-dir>/llama-server.log` に追記する。
 - 監督は `llm_supervisor.watch` が `WATCH_INTERVAL_S` (0.5s) ごとにプロセス終了を調べ、終了していれば `LlmSupervisor.on_crash` (バックオフ + 再起動) を呼ぶ。Director 終了時は監督中の llama-server も止める。
@@ -172,6 +174,7 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 - ラジオモード (`radio`、既定オフ。画面の「ラジオ」チェック): 返事を期待しない独り語り。
   - `on` がオフでも動く。1 本話し終えてから `spontaneous.RADIO_GAP_S`=3 秒の沈黙で次を話す (`interval_s` と無反応による倍増は使わない)。
   - 指示は `director.RADIO_PROMPT` (ラジオのパーソナリティとして 3〜5 文、直前の続きか `SPONT_TOPICS` の話題、質問・呼びかけをしない)。
+  - 記憶抽出中でも待たずに発火する (llama-server は 4 スロットで並行処理する)。
   - 聞き流し前提なので無操作休止 (`IDLE_TIMEOUT`) に入らない。休止時間帯は守る。利用者が話せば通常どおり取り消して応答し、応答後に再開する。
 - 質問率 `RATIO_Q`: 3 応答に 1 回以下。
 

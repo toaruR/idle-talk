@@ -251,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--asr-url", default=None)
     p.add_argument("--speaker", type=int, default=None)
     args = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     ports = load_ports(args.config)  # CLI 指定が設定ファイルより優先
     args.port = ports.ws if args.port is None else args.port
     args.web_port = ports.web if args.web_port is None else args.web_port
