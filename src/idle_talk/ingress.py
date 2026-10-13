@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from multiprocessing import shared_memory
 
@@ -25,7 +25,7 @@ Offload = Callable[[Callable[[], object], Callable[[object], None]], None]
 
 class Ingress:
     def __init__(self, director: Director, vad: Vad, asr: AsrClient | None = None,
-                 on_transcript: Callable[[int, str], None] | None = None,
+                 on_transcript: Callable[[int, str], bool] | None = None,
                  on_error: Callable[[int, str], None] | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  silent_rms: float = 1.0,
@@ -35,7 +35,7 @@ class Ingress:
         self.cfg = director.cfg
         self.vad = vad
         self.asr = asr
-        self.on_transcript = on_transcript
+        self.on_transcript = on_transcript  # False を返すと認識結果を捨てる (雑音・自声)
         self.on_error = on_error
         self.on_speech_end = on_speech_end  # MIN_SEG 以上の発話終了通知 (M1 計測 eot_wait)
         self.offload = offload  # None なら ASR を呼び出し元で同期実行する
@@ -46,6 +46,8 @@ class Ingress:
         self.noise_log: list[int] = []
         self.device_lost = False
         self._buf: bytearray | None = None
+        # VAD が発話開始を判定するまでの onset_frames - 1 フレーム (発話の頭) を区間に含めるための直前フレーム
+        self._pre: deque[bytes] = deque(maxlen=getattr(vad, "onset_frames", 1) - 1)
         self._uid = 0
         self._silent_since: float | None = None
         self._shm: dict[str, shared_memory.SharedMemory] = {}
@@ -81,12 +83,15 @@ class Ingress:
             self._buf += frame
         ev = self.vad.process(frame)
         if ev == SPEECH_START:
-            self._buf = bytearray(frame)
+            self._buf = bytearray(b"".join(self._pre) + frame)
+            self._pre.clear()
             self.director.enqueue(Event(Ev.VAD_START))
         elif ev == SPEECH_END:
             pcm = bytes(self._buf[: len(self._buf) - len(frame)]) if self._buf is not None else b""
             self._buf = None
             self._end_segment(pcm)
+        elif self._buf is None:
+            self._pre.append(frame)
         self.director.pump()
 
     def _end_segment(self, pcm: bytes) -> None:
@@ -124,14 +129,14 @@ class Ingress:
 
     def _asr_done(self, uid: int, res: object) -> None:
         self.asr_pending -= 1
-        if res is _FAILED:
-            return
+        latest = uid == self._uid  # 後続区間の認識待ちがあれば、終話・破棄はそちらの結果で確定させる
         if res is None:  # 幻聴 (E4): 応答トリガを送らない
             log.info("asr hallucination discarded: utterance %d", uid)
+        if res is _FAILED or res is None or (self.on_transcript and self.on_transcript(uid, res["text"]) is False):
+            if latest and self._buf is None:  # 発話は終わっている: 待機 (AI 再生中なら再生再開) へ戻す
+                self.director.enqueue(Event(Ev.DISCARDED))
             return
-        if self.on_transcript:
-            self.on_transcript(uid, res["text"])
-        if uid == self._uid:  # 後続区間の認識待ちがあれば、終話はそちらの結果で確定させる
+        if latest:
             self.director.enqueue(Event(Ev.SILENCE, silence_ms=self.cfg.T_silence, eot=True))
 
     # ---- E6: 無音フレーム連続 ----

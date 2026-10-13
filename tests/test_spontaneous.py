@@ -8,6 +8,7 @@ from mocks import FakeClock
 from mocks_browser import MockBrowser
 
 from idle_talk import topics
+from idle_talk.clients import AsrClient
 from idle_talk.config import Config
 from idle_talk.director import IdleTalkDirector
 from idle_talk.fsm import Ev, Event
@@ -102,7 +103,8 @@ def test_not_chat_mode_never_fires():
     assert s.fired == 0
 
 
-def make(tmp_path, gate=None):
+def make(tmp_path, gate=None, texts=None, auto_playback=True):
+    """texts を渡すと ASR を模擬し、順に認識結果として返す。"""
     clock = FakeClock()
     store = Store(tmp_path / "t.db", db_backup=False)
 
@@ -111,10 +113,14 @@ def make(tmp_path, gate=None):
             gate.wait(10)
         yield from ("やあ、元気ですか。",)
 
+    def send(req, timeout):
+        return 200, {"utterance_id": req["utterance_id"], "text": texts.pop(0),
+                     "no_speech_prob": 0.1, "compression_ratio": 1.0}
+
     d = IdleTalkDirector(store, llm, lambda text: b"RIFF....WAVE", lambda: None, EnergyVad(),
-                         None, clock=clock, now_ms=lambda: 1000)
+                         None if texts is None else AsrClient(send, clock=clock), clock=clock, now_ms=lambda: 1000)
     d.spontaneous._minutes = lambda: 12 * 60
-    b = MockBrowser()
+    b = MockBrowser(auto_playback=auto_playback)
     b.attach(d.core)
     d.clock_ = clock
     return d, b, store
@@ -192,20 +198,39 @@ def test_spontaneous_respects_lookahead_and_fires_again(tmp_path):
 def test_cancel_prep(tmp_path):
     async def run():
         gate = threading.Event()
-        d, b, _store = make(tmp_path, gate)
+        d, b, _store = make(tmp_path, gate, texts=["ねえ、ちょっといい"])
         d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
         d.spontaneous_tick()
         d.clock_.advance(1200)
         assert d.spontaneous_tick() == "spontaneous"
         await asyncio.sleep(0.05)
         assert d.spontaneous.pending
-        b.speak()  # 準備中に利用者発話
+        ep = d.epoch.current
+        b.speak()  # 準備中に利用者発話: 認識で語が出たら取消す
+        await until(lambda: d.spontaneous.cancelled == 1)
         gate.set()
         await asyncio.sleep(0.2)
-        assert d.spontaneous.cancelled == 1
-        assert len(b.chunks) == 0
+        assert not any(c[0] == ep for c in b.chunks)  # 自発発話は 1 チャンクも流れない
         assert ("spontaneous", "cancel") in d.path_calls
         assert not d.spontaneous.pending
+    asyncio.run(run())
+
+
+def test_noise_during_spontaneous_playback_resumes(tmp_path):
+    """自発発話の再生中に拾った音が語にならなければ (雑音)、取消さず duck を戻して最後まで再生する。"""
+    async def run():
+        d, b, _store = make(tmp_path, texts=["…"], auto_playback=False)
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: d._gen_done and b.chunks)
+        b.speak()  # 物音
+        assert len(b.of("duck")) == 1 and d.spontaneous.pending
+        await until(lambda: d.ingress.asr_pending == 0 and b.of("resume"))
+        assert d.fsm.ctx.state.value == "idle" and d.spontaneous.cancelled == 0
+        for ep, utt, cid, _pcm in list(b.chunks):
+            b.playback(ep, utt, cid, "finished")
+        assert not d.spontaneous.pending and d.spontaneous.cancelled == 0
     asyncio.run(run())
 
 

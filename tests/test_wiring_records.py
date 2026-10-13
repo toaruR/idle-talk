@@ -5,6 +5,7 @@ import sqlite3
 
 from test_integration_interrupt import asr_settled, make, state, until
 
+from idle_talk.director import ECHO_SUPPRESSED_KIND
 from idle_talk.echo_chain import CANCEL_KIND, ECHO_CHAIN_KIND
 from idle_talk.main import soak_loop
 from idle_talk.metrics import MetricsRecorder, evaluate_gate, validate_run_meta
@@ -72,18 +73,21 @@ def test_interrupt_records_cancel_and_not_echo_chain(tmp_path):
     asyncio.run(run())
 
 
-def test_self_voice_transcript_records_echo_chain(tmp_path):
+def test_self_voice_transcript_is_suppressed(tmp_path):
     async def run():
         d, b, store = make_m(tmp_path, auto_playback=False)
         try:
             b.speak()
             await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            ep = d.epoch.current
             d.texts_q.append("今日は、いい天気ですね")  # AI 本文の再認識 (句読点差は無視)
             b.speak()
             await asr_settled(d)
-            rows = kinds(store, ECHO_CHAIN_KIND)
+            rows = kinds(store, ECHO_SUPPRESSED_KIND)
             assert len(rows) == 1 and json.loads(rows[0]["payload_json"])["text"] == "今日は、いい天気ですね"
-            await until(lambda d=d: d._task is not None and d._task.done())
+            assert kinds(store, ECHO_CHAIN_KIND) == [] and b.of("cancel") == []  # 自声には応答も取消もしない
+            assert len(b.of("resume")) == 1 and state(d) == "ai_playing" and d.epoch.current == ep
+            assert store.query("SELECT * FROM turns WHERE role='user'") and d.calls["n"] == 1
         finally:
             store.close()
     asyncio.run(run())

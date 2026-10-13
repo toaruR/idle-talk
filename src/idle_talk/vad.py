@@ -10,6 +10,7 @@ SPEECH_END = "speech_end"
 
 SAMPLE_RATE = 16000
 BYTES_PER_MS = SAMPLE_RATE * 2 // 1000  # 16kHz mono s16le = 32 bytes/ms
+FRAME_MS = 20  # 上り音声の 1 フレーム (director.FRAME_BYTES)
 
 
 class Vad(Protocol):
@@ -28,20 +29,27 @@ def rms(frame: bytes) -> float:
 
 
 class EnergyVad:
-    """CPU 実装: RMS が threshold 以上のフレームを発話とみなし、hangover 連続無音フレームで終了。"""
+    """CPU 実装: RMS が threshold 以上のフレームが onset_frames 連続したら発話開始、hangover 連続無音フレームで終了。
 
-    def __init__(self, threshold: float = 500.0, hangover_frames: int = 10) -> None:
+    onset_frames > 1 なら一瞬の物音 (クリック・衝突音) では発話開始にしない。開始までの onset_frames - 1 フレームは
+    Ingress が直前の音として区間の頭に足す。"""
+
+    def __init__(self, threshold: float = 500.0, hangover_frames: int = 10, onset_frames: int = 1) -> None:
         self.threshold = threshold
         self.hangover = hangover_frames
+        self.onset_frames = max(1, onset_frames)
         self._speaking = False
         self._quiet = 0
+        self._loud = 0
 
     def process(self, frame: bytes) -> str | None:
         loud = rms(frame) >= self.threshold
         if not self._speaking:
-            if loud:
+            self._loud = self._loud + 1 if loud else 0
+            if self._loud >= self.onset_frames:
                 self._speaking = True
                 self._quiet = 0
+                self._loud = 0
                 return SPEECH_START
             return None
         if loud:

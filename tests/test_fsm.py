@@ -32,6 +32,8 @@ ROWS = [
     ("r11_check_interrupt", S.INTERRUPT_CHECK, {}, E(Ev.JUDGED, verdict="interrupt", elapsed_ms=100), S.USER_SPEAKING, 1, {"cancel", "discard_old", "stop_tts"}),
     ("r12_any_to_rest", S.USER_SPEAKING, {}, E(Ev.MUTE), S.REST, 0, {"stop_background"}),
     ("r13_rest_wake", S.REST, {}, E(Ev.WAKE, power_save_released=True), S.IDLE, 0, {"warmup"}),
+    ("r14_discarded", S.INTERRUPT_CHECK, {}, E(Ev.DISCARDED), S.AI_PLAYING, 0, {"resume"}),
+    ("r15_check_short_noise", S.INTERRUPT_CHECK, {}, E(Ev.VAD_END, seg_ms=199), S.AI_PLAYING, 0, {"resume"}),
 ]
 
 
@@ -47,8 +49,8 @@ def _doc_row_count():
 
 def test_table_rows_count_matches_design():
     ids = [r[0] for r in ROWS]
-    assert len(ids) == 13 == len(set(ids))
-    assert _doc_row_count() == 13
+    assert len(ids) == 15 == len(set(ids))
+    assert _doc_row_count() == 15
 
 
 @pytest.mark.parametrize("row", ROWS, ids=[r[0] for r in ROWS])
@@ -120,6 +122,22 @@ def test_boundary_t_confirm():
     assert n.state is S.AI_PLAYING
     n, _ = transition(c, E(Ev.JUDGED, verdict="backchannel", elapsed_ms=CFG.T_confirm + 1), CFG)
     assert n.state is S.USER_SPEAKING and n.epoch == 1
+
+
+def test_discarded_segment_returns_without_cancel():
+    for s in (S.USER_SPEAKING, S.EOT_CHECK):
+        n, a = transition(Ctx(state=s), E(Ev.DISCARDED), CFG)
+        assert n.state is S.IDLE and {x.name for x in a} == {"discard_segment"}
+    n, a = transition(Ctx(state=S.INTERRUPT_CHECK, epoch=3), E(Ev.DISCARDED), CFG)
+    assert n.state is S.AI_PLAYING and n.epoch == 3 and {x.name for x in a} == {"resume"}
+
+
+def test_short_noise_during_interrupt_check_resumes():
+    c = Ctx(state=S.INTERRUPT_CHECK)
+    n, a = transition(c, E(Ev.VAD_END, seg_ms=CFG.MIN_SEG - 1), CFG)
+    assert n.state is S.AI_PLAYING and {x.name for x in a} == {"resume"}
+    n, a = transition(c, E(Ev.VAD_END, seg_ms=CFG.MIN_SEG), CFG)
+    assert n.state is S.INTERRUPT_CHECK and a == ()  # 認識結果を待つ
 
 
 def test_muted_vad_start_stays_idle():

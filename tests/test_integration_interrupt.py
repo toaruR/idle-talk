@@ -295,7 +295,7 @@ def test_asr_does_not_block_event_loop_and_failure_keeps_connection(tmp_path):
 
 
 def test_late_transcript_after_t_confirm_gets_response(tmp_path):
-    """割り込みの認識が T_confirm を超えて返った: 取消後の USER_SPEAKING に留まらず、その発話に応答する。"""
+    """割り込みの認識が T_confirm を超えて返った: それまで duck のまま待ち、語が出たら取消してその発話に応答する。"""
     async def run():
         d, b, store, gate = make_gated_asr(tmp_path, ["こんにちは", "それより明日の予定は"])
         try:
@@ -306,9 +306,11 @@ def test_late_transcript_after_t_confirm_gets_response(tmp_path):
             b.speak()  # 割り込み: duck して認識待ち
             assert state(d) == "interrupt_check"
             d.clock_.advance(CFG.T_confirm / 1000)
-            assert d.check_confirm_timeout() and state(d) == "user_speaking"
+            await asyncio.sleep(0.05)
+            assert state(d) == "interrupt_check" and b.of("cancel") == []  # 時間切れでは止めない
             gate.set()
             await asr_settled(d)
+            assert len(b.of("cancel")) == 1
             await until(lambda: state(d) in ("preparing", "ai_playing"))
         finally:
             gate.set()
@@ -316,20 +318,43 @@ def test_late_transcript_after_t_confirm_gets_response(tmp_path):
     asyncio.run(run())
 
 
-def test_late_asr_failure_after_t_confirm_returns_idle(tmp_path):
+def test_asr_failure_during_interrupt_check_resumes_playback(tmp_path):
     async def run():
         d, b, store, gate = make_gated_asr(tmp_path, ["こんにちは", None])
         try:
             gate.set()
             b.speak()
             await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            ep = d.epoch.current
             gate.clear()
             b.speak()
             d.clock_.advance(CFG.T_confirm / 1000)
-            assert d.check_confirm_timeout() and state(d) == "user_speaking"
             gate.set()
             await asr_settled(d)
-            assert state(d) == "idle"
+            assert state(d) == "ai_playing" and b.of("cancel") == [] and len(b.of("resume")) == 1
+            assert d.epoch.current == ep
+        finally:
+            gate.set()
+            store.close()
+    asyncio.run(run())
+
+
+def test_playback_finished_during_interrupt_check_completes_after_resume(tmp_path):
+    """判定中に再生し終えた (PLAYBACK_DONE は捨てられる): 雑音と分かって再生に戻ったら完了として待機へ戻る。"""
+    async def run():
+        d, b, store, gate = make_gated_asr(tmp_path, ["こんにちは", "、"])
+        try:
+            gate.set()
+            b.speak()
+            await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            gate.clear()
+            b.speak()
+            assert state(d) == "interrupt_check"
+            for ep, utt, cid, _pcm in list(b.chunks):
+                b.playback(ep, utt, cid, "finished")
+            gate.set()
+            await asr_settled(d)
+            assert state(d) == "idle" and b.of("cancel") == [] and len(ai_rows(store, 1)) == 1
         finally:
             gate.set()
             store.close()

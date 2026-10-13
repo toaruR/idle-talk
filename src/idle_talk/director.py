@@ -21,7 +21,7 @@ from dataclasses import replace
 
 from .backchannel import Backchannel, event_payload
 from .config import Config
-from .echo_chain import CANCEL_KIND, ECHO_CHAIN_KIND
+from .echo_chain import CANCEL_KIND
 from .epoch import Epoch
 from .errors import ERR_OUT_OF_RANGE
 from .fsm import Action, Ctx, Ev, Event, State, transition
@@ -64,6 +64,11 @@ FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 # ブラウザ (web/player.js MAX_LOOKAHEAD) が再生中チャンクの後ろに保持する数。超えて送ると dropped で捨てられる
 DOWN_LOOKAHEAD = 1
 MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
+ECHO_SUPPRESSED_KIND = "echo_suppressed"  # AI 再生中に拾った自声の認識結果を捨てた 1 回 = 1 行
+
+
+def _alnum(text: str) -> str:
+    return "".join(ch for ch in text if ch.isalnum())
 
 
 def wav_to_pcm(wav: bytes) -> bytes:
@@ -137,8 +142,9 @@ class IdleTalkDirector:
         self._bc_utts: set[int] = set()
         self._down_q: deque[tuple[int, int, int, bytes]] = deque()  # 送出待ちの下りチャンク (ep, utt, chunk, pcm)
         self._down_sent: set[tuple[int, int, int]] = set()  # 送出済みで finished/dropped 未報告
-        self._ai_text = ""  # 直近の AI 発話 (相槌除く) の送出済み本文。自声起因の応答連鎖の判定に使う
-        self._speech_in_ai = False  # 現在の利用者発話が AI 再生中に始まったか
+        self._ai_text = ""  # 直近の AI 発話 (相槌除く) の送出済み本文。自声の認識結果を捨てる判定に使う
+        self._speech_in_ai = False  # 現在の利用者発話が AI 再生中 (自発発話を含む) に始まったか
+        self._spont_hold = False  # 自発発話の再生中に音を拾い、取消を認識結果まで保留している (duck 中)
         self.backchannel: Backchannel | None = None
         self._bc_silence_ms = 0
         self._bc_speaking = False
@@ -279,22 +285,8 @@ class IdleTalkDirector:
         if self.topic_worker is not None:
             self.topic_worker.on_state(ctx.state.value)
         if ctx.state is State.INTERRUPT_CHECK:
+            # 認識結果が出るまで duck のまま待つ。語が無ければ再生を続け (行14 / 15)、語があれば判定する (行10 / 11)
             self._ic_start_ms = int(self.clock() * 1000)
-            try:  # T_confirm 内に語が得られなければ判断不能として cancel (行11)
-                asyncio.get_running_loop().call_later(self.cfg.T_confirm / 1000, self.check_confirm_timeout)
-            except RuntimeError:
-                pass
-
-    def check_confirm_timeout(self) -> bool:
-        """INTERRUPT_CHECK が T_confirm を超えて未判定なら JUDGED(unknown) を送る。送ったら True。"""
-        if self.fsm.ctx.state is not State.INTERRUPT_CHECK:
-            return False
-        elapsed = int(self.clock() * 1000) - self._ic_start_ms
-        if elapsed < self.cfg.T_confirm:
-            return False
-        self.fsm.enqueue(Event(Ev.JUDGED, verdict="unknown", elapsed_ms=elapsed))
-        self._pump()
-        return True
 
     def request_rest(self) -> None:
         """LLM_RETRY 超過など復旧不能な障害で休止へ移る (設計書 12.4「超過で休止 + warn」)。"""
@@ -327,10 +319,6 @@ class IdleTalkDirector:
         if fut.cancelled():
             return
         done(fut.result())
-        if (self.fsm.ctx.state is State.USER_SPEAKING and self.ingress._buf is None
-                and self.ingress.asr_pending == 0):
-            # T_confirm 超過で割り込み扱いになった後、認識が捨てられた (失敗・幻聴): 発話は終わっているので待機へ戻す
-            self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=0))
         self._pump()
 
     def _on_up_audio(self, seq: int, pcm: bytes) -> None:
@@ -340,7 +328,8 @@ class IdleTalkDirector:
             before, was_speaking = self.fsm.ctx.state, self.ingress._buf is not None
             self.ingress.feed(pcm[i:i + FRAME_BYTES])
             if not was_speaking and self.ingress._buf is not None:
-                self._speech_in_ai = before is State.AI_PLAYING
+                spont_playing = self.spontaneous.pending and self._cur is not None
+                self._speech_in_ai = before in (State.AI_PLAYING, State.INTERRUPT_CHECK) or spont_playing
             if self.backchannel is not None:
                 self._bc_track(1)
 
@@ -362,13 +351,20 @@ class IdleTalkDirector:
             self.fsm.enqueue(Event(Ev.WAKE))  # 無操作・連続失敗による休止もミュートなしの操作で解除する
         self._pump()
 
-    def _on_transcript(self, uid: int, text: str) -> None:
+    def _on_transcript(self, uid: int, text: str) -> bool:
+        """認識結果を受ける。語が無い・自声なら False (Ingress が捨てて DISCARDED を送る)。"""
+        in_ai, self._speech_in_ai = self._speech_in_ai, False
+        if not _alnum(text):
+            log.info("transcript without words discarded: utterance %d %r", uid, text)
+            return False
+        if in_ai and self._is_echo(uid, text):
+            return False
         self._text = text
-        self._record_echo_chain(uid, text)
         self._m_mark("asr_done")
+        self._release_spont_hold(speech=True)
         if self.fsm.ctx.state is State.INTERRUPT_CHECK and self._judge_interrupt(text) == "backchannel":
             self._m_abandon()
-            return  # 相槌は履歴に積まない
+            return True  # 相槌は履歴に積まない
         if self.fsm.ctx.state is State.USER_SPEAKING and self.ingress._buf is None:
             # T_confirm 超過で割り込み扱いになった後に届いた認識結果: 発話は終わっているので終話確認へ進める
             self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=self.cfg.MIN_SEG))
@@ -376,19 +372,19 @@ class IdleTalkDirector:
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
         if len(text) >= MIN_UTTERANCE_CHARS:  # 古い分は捨て、直近 MEM_BATCH 発話だけ抽出に回す
             self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text)]
+        return True
 
-    def _record_echo_chain(self, uid: int, text: str) -> None:
-        """AI 再生中に始まった発話の認識結果が直近 AI 発話の本文に含まれる = 自声の認識 (§6.2 / §12.3 E10)。
+    def _is_echo(self, uid: int, text: str) -> bool:
+        """AI 再生中に始まった発話の認識結果が直近 AI 発話の本文に含まれる = スピーカーから回り込んだ自声 (§6.2)。
 
-        設計書に検出則の定数は無いため、句読点・空白を除いた部分文字列一致のみ (閾値なし)。1 件 = 1 連鎖。
-        """
-        in_ai, self._speech_in_ai = self._speech_in_ai, False
-        if self.metrics is None:
-            return
-        norm = "".join(ch for ch in text if ch.isalnum())
-        if in_ai and norm and norm in "".join(ch for ch in self._ai_text if ch.isalnum()):
-            self.store.add_event(self.now_ms(), self.epoch.current, ECHO_CHAIN_KIND,
+        句読点・空白を除いた部分文字列一致のみ (閾値なし)。言い換えや部分的な誤認識は検出できない。"""
+        if _alnum(text) not in _alnum(self._ai_text):
+            return False
+        log.info("echo discarded: utterance %d %r", uid, text)
+        if self.metrics is not None:
+            self.store.add_event(self.now_ms(), self.epoch.current, ECHO_SUPPRESSED_KIND,
                                  json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
+        return True
 
     def _on_playback(self, msg: dict) -> None:
         self.history.on_playback(msg)
@@ -429,15 +425,20 @@ class IdleTalkDirector:
             self.fsm.enqueue(Event(Ev.FIRST_CLAUSE, epoch=ep))
             self._pump()
 
+    def _played_out(self, c: dict | None) -> bool:
+        return bool(c and self._gen_done and c["chunks"] and c["finished"] >= c["chunks"])
+
     def _check_done(self) -> None:
         c = self._cur
         if self.spontaneous.pending and self._gen_done and self.fsm.ctx.state is State.IDLE:
-            if c is None or (c["chunks"] and c["finished"] >= c["chunks"]):  # 自発発話の再生完了
+            if self._spont_hold:  # 利用者の発話か雑音かの判定待ち: 完了は保留解除で確定する
+                return
+            if c is None or self._played_out(c):  # 自発発話の再生完了
                 self._finalize_utterance("spontaneous", interrupted=False)
                 self.spontaneous.done()
                 self._idle_since = self.clock()  # 自発発話は IDLE のまま再生するので、沈黙の計測をここで始め直す
             return
-        if c and self._gen_done and c["chunks"] and c["finished"] >= c["chunks"]:
+        if self._played_out(c):
             self.fsm.enqueue(Event(Ev.PLAYBACK_DONE, epoch=c["epoch"]))
             self._pump()
 
@@ -467,12 +468,30 @@ class IdleTalkDirector:
                              json.dumps({"epoch": self.epoch.current}))  # 確定した割り込み取消 1 回 = 1 行 (M5)
 
     def _act_abort_background(self, a: Action) -> None:
-        """利用者発話開始: 準備中/再生中の自発発話を取消す。反応があったので待ち時間は基本に戻る。"""
+        """利用者発話開始: 準備中/再生中の自発発話は duck して認識結果まで取消を保留する (雑音・自声で止めない)。"""
         self._last_op = self.clock()
         if self.spontaneous.pending:
-            self._cancel_spontaneous()
-        self.spontaneous.on_user_speech()
+            if not self._spont_hold:
+                self._spont_hold = True
+                self._act_duck(a)
+        else:
+            self.spontaneous.on_user_speech()
         self._cancel_memory()
+
+    def _act_discard_segment(self, a: Action) -> None:
+        self._release_spont_hold(speech=False)
+
+    def _release_spont_hold(self, speech: bool) -> None:
+        """保留中の自発発話を、語が認識されたら取消し (反応ありとして待ち時間を戻す)、雑音なら再生を戻す。"""
+        if not self._spont_hold:
+            return
+        self._spont_hold = False
+        if speech:
+            self._cancel_spontaneous()
+            self.spontaneous.on_user_speech()
+        else:
+            self._emit({"t": "resume", "epoch": self.epoch.current})
+            self._check_done()  # 保留中に再生し終えていれば完了扱いにする
 
     def _act_stop_background(self, a: Action) -> None:
         if self.spontaneous.pending:
@@ -480,6 +499,7 @@ class IdleTalkDirector:
         self._cancel_memory()
 
     def _cancel_spontaneous(self) -> None:
+        self._spont_hold = False
         if self._spont_task and not self._spont_task.done():
             self._spont_task.cancel()
         self.spontaneous.cancel()
@@ -495,6 +515,8 @@ class IdleTalkDirector:
 
     def _act_resume(self, a: Action) -> None:
         self._emit({"t": "resume", "epoch": self.epoch.current})
+        if self._played_out(self._cur):  # 判定中 (INTERRUPT_CHECK) に再生し終えた: その PLAYBACK_DONE は捨てられている
+            self.fsm.enqueue(Event(Ev.PLAYBACK_DONE, epoch=self._cur["epoch"]))
 
     # ---- 自発発話 / 無操作休止 (設計書 4.2 / 6.1) ----
     def spontaneous_tick(self, now: float | None = None) -> str | None:

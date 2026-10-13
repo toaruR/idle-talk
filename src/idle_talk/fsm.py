@@ -29,6 +29,7 @@ class Ev(str, Enum):
     FIRST_CLAUSE = "first_clause"  # epoch
     PLAYBACK_DONE = "playback_done"  # epoch
     JUDGED = "judged"  # verdict: backchannel|interrupt|unknown, elapsed_ms
+    DISCARDED = "discarded"  # 発話区間の認識結果が捨てられた (ASR 失敗・幻聴・語なし・自声)
     MUTE = "mute"
     IDLE_TIMEOUT = "idle_timeout"
     FAILURES = "failures"
@@ -104,6 +105,13 @@ def transition(ctx: Ctx, ev: Event, cfg: Config) -> tuple[Ctx, tuple[Action, ...
             return replace(ctx, state=State.USER_SPEAKING), (_A("start_asr"), _A("abort_background"))
         return ctx, ()
 
+    if k is Ev.DISCARDED:  # 行14: 雑音・自声だった発話は無かったことにする
+        if s in (State.USER_SPEAKING, State.EOT_CHECK):
+            return replace(ctx, state=State.IDLE), (_A("discard_segment"),)
+        if s is State.INTERRUPT_CHECK:
+            return replace(ctx, state=State.AI_PLAYING), (_A("resume", ctx.epoch),)
+        return ctx, ()
+
     if s is State.USER_SPEAKING:
         if k is Ev.VAD_END:
             if ev.seg_ms >= cfg.MIN_SEG:  # 行2
@@ -137,10 +145,12 @@ def transition(ctx: Ctx, ev: Event, cfg: Config) -> tuple[Ctx, tuple[Action, ...
         return ctx, ()
 
     if s is State.INTERRUPT_CHECK:
+        if k is Ev.VAD_END and ev.seg_ms < cfg.MIN_SEG:  # 行15: 短い物音は認識に回らない。再生を続ける
+            return replace(ctx, state=State.AI_PLAYING), (_A("resume", ctx.epoch),)
         if k is Ev.JUDGED:
             if ev.verdict == "backchannel" and ev.elapsed_ms <= cfg.T_confirm:  # 行10
                 return replace(ctx, state=State.AI_PLAYING), (_A("resume", ctx.epoch),)
-            n = _bump(ctx.epoch)  # 行11: 割り込み / 判断不能 / T_confirm 超過
+            n = _bump(ctx.epoch)  # 行11: 割り込み / 判断不能 / T_confirm 超過の相槌 (語が認識された場合のみ)
             return replace(ctx, state=State.USER_SPEAKING, epoch=n), (_A("cancel", n), _A("discard_old"), _A("stop_tts"))
         return ctx, ()
 

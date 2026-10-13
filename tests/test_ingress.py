@@ -140,4 +140,27 @@ def test_hallucination_sends_no_trigger():
     ing.on_transcript = lambda u, t: got.append(t)
     run(ing, 301)
     assert trig == [] and got == []
-    assert d.ctx.state is State.EOT_CHECK
+    assert d.ctx.state is State.IDLE  # 捨てた発話は無かったことにして待機へ戻す (DISCARDED)
+
+
+def test_transcript_rejected_by_callback_is_discarded():
+    d, ing = make({0: SPEECH_START, 300: SPEECH_END}, asr=asr_ok())
+    trig = []
+    d._on_actions = lambda a: trig.extend(x.name for x in a)
+    ing.on_transcript = lambda u, t: False  # 雑音・自声として捨てる
+    run(ing, 301)
+    assert "call_llm" not in trig and "discard_segment" in trig
+    assert d.ctx.state is State.IDLE
+
+
+def test_onset_frames_ignore_short_click_and_keep_speech_head():
+    v = EnergyVad(threshold=500, hangover_frames=3, onset_frames=3)
+    quiet = b"\x00\x00" * 320
+    loud = struct.pack("<h", 1000) * 320
+    assert [v.process(f) for f in (loud, loud, quiet)] == [None, None, None]  # 2 フレームの物音は発話にしない
+    assert [v.process(loud) for _ in range(3)] == [None, None, SPEECH_START]
+    d = Director(Config())
+    ing = Ingress(d, EnergyVad(threshold=500, hangover_frames=3, onset_frames=3))
+    for f in (quiet, loud, loud, loud):
+        ing.feed(f)
+    assert d.ctx.state is State.USER_SPEAKING and bytes(ing._buf) == loud * 3  # 開始判定前の 2 フレームも区間に含む

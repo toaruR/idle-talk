@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_topics, load_voice)
+                     load_topics, load_vad, load_voice)
 from .director import IdleTalkDirector
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
@@ -27,7 +27,7 @@ from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
 from .server import serve
 from .store import Store
 from .topic_worker import TopicWorker
-from .vad import EnergyVad
+from .vad import FRAME_MS, EnergyVad
 
 log = logging.getLogger("idle_talk.main")
 
@@ -122,7 +122,9 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     asr = AsrClient(_asr_send(args.asr_url), cfg)
     reloader = TtsSettingsReloader(tts, args.config, fixed_speaker=args.speaker_from_cli,
                                    speaker_ids=frozenset(s["id"] for s in args.speakers))
-    director = IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None, EnergyVad(), asr, cfg,
+    vad = load_vad(args.config)
+    director = IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None,
+                                EnergyVad(vad.threshold, onset_frames=vad.onset_ms // FRAME_MS), asr, cfg,
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
     feeds = load_topics(args.config).feeds
