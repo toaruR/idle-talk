@@ -11,7 +11,9 @@ import json
 import logging
 import random
 import socket
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -25,6 +27,7 @@ from .fsm import Director as FsmDirector
 from .history import PlaybackHistory, history_window, talk_log
 from .ingress import Ingress
 from .interrupt import judge
+from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, parse_extracted, remember
 from .metrics import MetricsRecorder
 from .pipeline import ResponsePipeline
 from .protocol import pack_down_chunk
@@ -42,7 +45,13 @@ SYSTEM_PROMPT = ("あなたは気さくな日本語の雑談相手です。話�
 SPONT_TOPICS = ("最近の天気や季節", "食べ物や料理", "休日の過ごし方", "最近気になっていること", "子どもの頃の思い出",
                 "好きな音楽や映画", "旅行してみたい場所", "ちょっとした豆知識", "動物や生き物", "今日あったこと",
                 "趣味や習い事", "仕事や勉強の息抜き", "もしもの話", "身近な道具や家電")
+RADIO_PROMPT = ("(利用者は聞いているだけで返事はしません。ラジオのパーソナリティとして独り語りを続けてください。"
+                "直前の話の続きでも、例えば「{topic}」のような新しい話題でも構いません。"
+                "自分の感想やちょっとした体験談を交えて 3〜5 文で話し、質問や呼びかけで返事を求めないでください)")
 FRAME_BYTES = 640  # 20ms @ 16kHz s16le
+# ブラウザ (web/player.js MAX_LOOKAHEAD) が再生中チャンクの後ろに保持する数。超えて送ると dropped で捨てられる
+DOWN_LOOKAHEAD = 1
+MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
 
 
 def wav_to_pcm(wav: bytes) -> bytes:
@@ -109,10 +118,13 @@ class IdleTalkDirector:
                            on_playback=self._on_playback, on_ui=self._on_ui, on_hello=self._on_hello)
         self.fsm = StateDirector(self.cfg, self.epoch, on_actions=self._run_actions, on_state=self._send_state)
         self.history = PlaybackHistory(store, self.cfg)
+        self._llm = llm_stream
         self._synthesize = synthesize
         self._bc_wavs: dict[str, bytes] = {}
         self._bc_active: str | None = None
         self._bc_utts: set[int] = set()
+        self._down_q: deque[tuple[int, int, int, bytes]] = deque()  # 送出待ちの下りチャンク (ep, utt, chunk, pcm)
+        self._down_sent: set[tuple[int, int, int]] = set()  # 送出済みで finished/dropped 未報告
         self._ai_text = ""  # 直近の AI 発話 (相槌除く) の送出済み本文。自声起因の応答連鎖の判定に使う
         self._speech_in_ai = False  # 現在の利用者発話が AI 再生中に始まったか
         self.backchannel: Backchannel | None = None
@@ -132,6 +144,9 @@ class IdleTalkDirector:
         self._spont_task: asyncio.Task | None = None
         self._last_op = clock()  # 最後の利用者操作時刻 (IDLE_TIMEOUT 判定)
         self._idle_since: float | None = clock()  # IDLE になった時刻 (自発発話の沈黙計測)。IDLE 以外は None
+        self._mem_pending: list[tuple[int, str]] = []  # 記憶抽出待ちの利用者発話 (utterance_id, text)
+        self._mem_task: asyncio.Task | None = None
+        self._mem_stop = threading.Event()  # 取消時に抽出スレッドの LLM 受信を打ち切る (llama-server を応答に譲る)
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -211,8 +226,25 @@ class IdleTalkDirector:
         if self.core.conn is not None:
             self.core.conn.send_text(json.dumps(msg, ensure_ascii=False))
 
+    def _send_down(self, ep: int, utt: int, chunk: int, pcm: bytes) -> None:
+        self._down_q.append((ep, utt, chunk, pcm))
+        self._flush_down()
+
+    def _flush_down(self) -> None:
+        """再生中 1 + 先読み DOWN_LOOKAHEAD を超えないよう、再生終了の報告を待って次を送る。旧世代は捨てる。"""
+        cur = self.epoch.current
+        self._down_sent = {k for k in self._down_sent if k[0] == cur}  # 旧世代の報告はサーバで捨てられ届かない
+        while self._down_q and len(self._down_sent) <= DOWN_LOOKAHEAD:
+            ep, utt, chunk, pcm = self._down_q.popleft()
+            if ep != cur or self.core.conn is None:
+                continue
+            self._down_sent.add((ep, utt, chunk))  # 送出前に登録 (送出中に再生終了の報告が来ても取りこぼさない)
+            self.core.conn.send_bytes(pack_down_chunk(ep, utt, chunk, pcm))
+
     def _on_hello(self) -> None:
         ctx = self.fsm.ctx
+        self._down_q.clear()  # 新しい接続: 前の接続向けの送出待ち・未報告は無効
+        self._down_sent.clear()
         if self.spontaneous.pending:  # 前の接続で再生されずに残った自発発話は完了通知が来ないので取消す
             self._cancel_spontaneous()
         self.spontaneous.on_user_speech()  # 新しい聞き手: 無反応による待ち時間の延長を戻す
@@ -295,6 +327,8 @@ class IdleTalkDirector:
             return  # 相槌は履歴に積まない
         talk_log.info("USER: %s", text)
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
+        if len(text) >= MIN_UTTERANCE_CHARS:  # 古い分は捨て、直近 MEM_BATCH 発話だけ抽出に回す
+            self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text)]
 
     def _record_echo_chain(self, uid: int, text: str) -> None:
         """AI 再生中に始まった発話の認識結果が直近 AI 発話の本文に含まれる = 自声の認識 (§6.2 / §12.3 E10)。
@@ -314,10 +348,14 @@ class IdleTalkDirector:
         if self.metrics is not None and msg["utterance_id"] not in self._bc_utts:  # 相槌クリップは turns に載らないので G3/履歴照合から除外
             self.store.add_event(self.now_ms(), self.epoch.current, "playback", json.dumps(
                 {k: msg[k] for k in ("epoch", "utterance_id", "chunk_id", "state", "position_ms")}))
+        if msg["state"] != "started":
+            self._down_sent.discard((msg["epoch"], msg["utterance_id"], msg["chunk_id"]))
+            self._flush_down()
         c = self._cur
         if c and msg["state"] == "started" and msg["epoch"] == c["epoch"] and msg["utterance_id"] == c["utt"]                 and msg["chunk_id"] == 0:
             self._m_mark("play_start")
-        if c and msg["epoch"] == c["epoch"] and msg["utterance_id"] == c["utt"] and msg["state"] == "finished":
+        if c and msg["epoch"] == c["epoch"] and msg["utterance_id"] == c["utt"] and msg["state"] != "started":
+            # dropped も終了扱い: 待ち続けると再生完了が来ず、応答・自発発話が終わらない
             c["finished"].add(msg["chunk_id"])
             self._check_done()
 
@@ -329,8 +367,7 @@ class IdleTalkDirector:
         if self._bc_active is not None and text == self._bc_active:  # 相槌: 音声のみ送出、FSM・履歴には触れない
             self._bc_active = None
             self._bc_utts.add(utt)
-            if self.core.conn is not None:
-                self.core.conn.send_bytes(pack_down_chunk(ep, utt, chunk, wav_to_pcm(wav)))
+            self._send_down(ep, utt, chunk, wav_to_pcm(wav))
             return
         if self._cur is None or self._cur["utt"] != utt:
             self._cur = {"epoch": ep, "utt": utt, "chunks": set(), "finished": set()}
@@ -340,8 +377,7 @@ class IdleTalkDirector:
             self._m_mark("tts_first")
         self.history.register_chunk(ep, utt, chunk, text)
         self._emit({"t": "text", "epoch": ep, "utterance_id": utt, "text": text})
-        if self.core.conn is not None:
-            self.core.conn.send_bytes(pack_down_chunk(ep, utt, chunk, wav_to_pcm(wav)))
+        self._send_down(ep, utt, chunk, wav_to_pcm(wav))
         if chunk == 0:
             self.fsm.enqueue(Event(Ev.FIRST_CLAUSE, epoch=ep))
             self._pump()
@@ -389,10 +425,12 @@ class IdleTalkDirector:
         if self.spontaneous.pending:
             self._cancel_spontaneous()
         self.spontaneous.on_user_speech()
+        self._cancel_memory()
 
     def _act_stop_background(self, a: Action) -> None:
         if self.spontaneous.pending:
             self._cancel_spontaneous()
+        self._cancel_memory()
 
     def _cancel_spontaneous(self) -> None:
         if self._spont_task and not self._spont_task.done():
@@ -403,6 +441,7 @@ class IdleTalkDirector:
     def _act_commit_history(self, a: Action) -> None:
         self._last_op = self.clock()
         self._finalize_utterance("response", interrupted=False)
+        self._start_memory()
 
     def _act_duck(self, a: Action) -> None:
         self._emit({"t": "duck", "epoch": self.epoch.current, "gain": self.cfg.DUCK_GAIN})
@@ -415,11 +454,13 @@ class IdleTalkDirector:
         """定期呼び出し。'rest' (IDLE_TIMEOUT 遷移) / 'spontaneous' (発火) / None を返す。"""
         now = self.clock() if now is None else now
         idle = self.fsm.ctx.state is State.IDLE
-        if idle and now - self._last_op >= self.cfg.IDLE_TIMEOUT:
+        if idle and not self.spontaneous.radio and now - self._last_op >= self.cfg.IDLE_TIMEOUT:  # ラジオは聞き流し前提
             self.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
             self._pump()
             return "rest"
         listening = self.core.conn is not None and self.core.hello_done  # 聞き手がいないと再生完了が来ない
+        if self._mem_task is not None and not self._mem_task.done():  # 記憶抽出と LLM を取り合わない
+            return None
         if listening and self.spontaneous.should_fire(now, self._idle_since if idle else None):
             self.spontaneous.fire(now)
             self._gen_done = False
@@ -428,12 +469,11 @@ class IdleTalkDirector:
         return None
 
     async def _spontaneous_respond(self) -> None:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
-            {"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
-            for t in history_window(self.store, self.cfg) if t["text"]]
-        messages.append({"role": "user", "content": (
+        messages = self._chat_messages()
+        topic = random.choice(SPONT_TOPICS)
+        messages.append({"role": "user", "content": RADIO_PROMPT.format(topic=topic) if self.spontaneous.radio else (
             "(利用者は黙っています。これまでの会話と違う話題を自分から振ってください。"
-            f"例えば「{random.choice(SPONT_TOPICS)}」について、自分の話を一言添えて 2〜3 文で話しかけ、最後に軽く質問してください)")})
+            f"例えば「{topic}」について、自分の話を一言添えて 2〜3 文で話しかけ、最後に軽く質問してください)")})
         self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
         me = asyncio.current_task()
         await self.pipeline.respond(messages)
@@ -442,11 +482,51 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
-    # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
-    async def _respond(self) -> None:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+    # ---- 記憶 (設計書 3.4): 応答の再生完了後に、溜まった利用者発話から抜き出して保存する ----
+    def _chat_messages(self) -> list[dict]:
+        return [{"role": "system", "content": SYSTEM_PROMPT + memory_prompt(self.store)}] + [
             {"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
             for t in history_window(self.store, self.cfg) if t["text"]]
+
+    def _start_memory(self) -> None:
+        """応答と LLM を取り合わないよう、再生完了 (IDLE) 後にだけ走らせる。利用者発話で取消し、次回まとめて再試行する。"""
+        if not self._mem_pending or (self._mem_task is not None and not self._mem_task.done()):
+            return
+        self._mem_stop = threading.Event()
+        self._mem_task = asyncio.get_running_loop().create_task(
+            self._extract_memory(list(self._mem_pending), self._mem_stop))
+
+    def _cancel_memory(self) -> None:
+        self._mem_stop.set()
+        if self._mem_task is not None and not self._mem_task.done():
+            self._mem_task.cancel()
+
+    def _collect(self, messages: list[dict], stop: threading.Event) -> str | None:
+        out: list[str] = []
+        for tok in self._llm(messages):
+            if stop.is_set():
+                return None
+            out.append(tok)
+        return "".join(out)
+
+    async def _extract_memory(self, batch: list[tuple[int, str]], stop: threading.Event) -> None:
+        try:
+            text = await asyncio.to_thread(self._collect, extract_messages([t for _, t in batch]), stop)
+        except Exception as e:  # noqa: BLE001  LLM の失敗で会話を止めない (未処理分は次回に回す)
+            log.warning("memory extraction failed: %s", e)
+            return
+        if text is None or asyncio.current_task() is not self._mem_task:
+            return
+        done = {uid for uid, _ in batch}
+        self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
+        items = parse_extracted(text)
+        if items:
+            remember(self.store, items, batch[-1][0], self.now_ms())
+            log.info("memory saved: %s", " / ".join(items))
+
+    # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
+    async def _respond(self) -> None:
+        messages = self._chat_messages()
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current

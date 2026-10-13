@@ -16,6 +16,7 @@ idle-talk start     # 二重起動なら exit 4。出力は data/idle_talk.log, 
 idle-talk stop      # main は正常終了 (run_meta 記録・llama-server 停止) を待ち、20 秒で強制終了
 idle-talk restart
 idle-talk status    # 停止中は exit 3
+idle-talk memories  # 保存された記憶の一覧。--delete ID で個別削除、--clear で全削除 (起動中でも可)
 ```
 `idle-talk.cmd` は Windows 用 (`python -m idle_talk.ctl ...` と同じ。`--data-dir` / `--config` 可)。停止は `data/idle_talk.stop` を置いて main に知らせる。
 発話の文言は `data/talk.log` に追記される (`日時 USER: …` / `日時 AI: …`)。

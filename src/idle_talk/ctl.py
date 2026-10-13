@@ -1,15 +1,17 @@
-"""起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status。
+"""起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status|memories。
 
 asr_worker と main をバックグラウンドで起動し、出力は data_dir の asr_worker.log / idle_talk.log に追記する。
 二重起動は各プロセスが書く PID ファイル (idle_talk.pid / asr_worker.pid) の生存確認で拒否する。
 停止は main に停止ファイルを置いて正常終了 (run_meta 記録・llama-server 停止) を待ち、
 STOP_TIMEOUT_S 内に終わらなければ強制終了する。asr_worker は保存する状態が無いので即終了する。
+memories は保存された記憶の一覧表示と削除 (--delete ID / --clear)。起動中でも使える (WAL)。
 """
 from __future__ import annotations
 
 import argparse
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -18,7 +20,7 @@ from pathlib import Path
 
 from .config import SETTINGS_FILE, load_ports
 from .errors import EXIT_DUPLICATE_LAUNCH
-from .main import PID_FILE, STOP_FILE
+from .main import DB_FILE, PID_FILE, STOP_FILE
 from .portlock import pid_alive
 
 ASR_PID_FILE = "asr_worker.pid"
@@ -130,18 +132,47 @@ def cmd_status(args: argparse.Namespace, data_dir: Path) -> int:
     return 0 if pid else 3
 
 
+def cmd_memories(args: argparse.Namespace, data_dir: Path) -> int:
+    """記憶の確認・削除 (設計書 3.4: 利用者が確認・削除できる)。削除できるのは deletable=1 の行だけ。"""
+    db = data_dir / DB_FILE
+    if not db.exists():
+        print(f"no database: {db}")
+        return 1
+    con = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        if args.clear:
+            n = con.execute("DELETE FROM memories WHERE deletable=1").rowcount
+            print(f"deleted {n} memories")
+        elif args.delete is not None:
+            n = con.execute("DELETE FROM memories WHERE id=? AND deletable=1", (args.delete,)).rowcount
+            print(f"deleted memory {args.delete}" if n else f"memory {args.delete}: not found or not deletable")
+            return 0 if n else 1
+        else:
+            rows = con.execute("SELECT id, content, deletable FROM memories ORDER BY id").fetchall()
+            for mid, content, deletable in rows:
+                print(f"{mid:4d}{'' if deletable else ' (固定)'}  {content}")
+            if not rows:
+                print("no memories")
+    finally:
+        con.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="idle-talk-ctl")
-    p.add_argument("command", choices=("start", "stop", "restart", "status"))
+    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories"))
     p.add_argument("--config", default=SETTINGS_FILE)
     p.add_argument("--data-dir", default="data")
+    p.add_argument("--delete", type=int, metavar="ID", help="memories: 指定 id の記憶を削除")
+    p.add_argument("--clear", action="store_true", help="memories: 削除可能な記憶をすべて削除")
     args = p.parse_args(argv)
     args.config = Path(args.config).resolve()
     data_dir = Path(args.data_dir).resolve()
     if args.command == "restart":
         cmd_stop(args, data_dir)
         return cmd_start(args, data_dir)
-    return {"start": cmd_start, "stop": cmd_stop, "status": cmd_status}[args.command](args, data_dir)
+    return {"start": cmd_start, "stop": cmd_stop, "status": cmd_status,
+            "memories": cmd_memories}[args.command](args, data_dir)
 
 
 if __name__ == "__main__":

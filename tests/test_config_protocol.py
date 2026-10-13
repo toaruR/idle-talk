@@ -56,9 +56,9 @@ def test_defaults_field_names():
         "OVERLAP_MAX", "HTTP_TIMEOUT", "DUCK_GAIN", "VAR_SUM", "G2_SUM", "TTS_RATIO_MAX",
         "TEST_N", "E_PARAMS", "DB_BACKUP", "MIN_SEG", "T_confirm", "STOP_WORDS", "N_TURNS",
         "SIL_BACKCHANNEL", "BC_COOLDOWN", "RATIO_Q", "ASR_HALLU",
-        "spontaneous_enabled", "spont_interval_s", "quiet_start", "quiet_end",
+        "spontaneous_enabled", "spont_interval_s", "quiet_start", "quiet_end", "radio",
     }
-    assert len(expected) == 27
+    assert len(expected) == 28
     assert {f.name for f in dataclasses.fields(Config)} == expected
 
 
@@ -85,7 +85,7 @@ def test_range_sil_backchannel():
 POSITIVE = [
     {"t": "hello", "version": 1, "sample_rate": 16000, "client_id": "abc"},
     {"t": "playback", "epoch": 1, "utterance_id": 2, "chunk_id": 3, "position_ms": 600000, "state": "started"},
-    {"t": "ui", "mute": True, "on": False, "interval_s": 3600, "quiet_start": "22:00", "quiet_end": "07:00"},
+    {"t": "ui", "mute": True, "on": False, "radio": True, "interval_s": 3600, "quiet_start": "22:00", "quiet_end": "07:00"},
     {"t": "ping", "ts": 123},
     {"t": "pong", "ts": 123},
     {"t": "duck", "epoch": 1, "gain": 0.2},
@@ -260,15 +260,16 @@ def test_load_spontaneous(tmp_path):
     from idle_talk.config import load_spontaneous
     f = tmp_path / "s.toml"
     assert load_spontaneous(f) == {}
-    f.write_text('[spontaneous]\non = true\ninterval_s = 30\nquiet_start = "23:00"\n', encoding="utf-8")
+    f.write_text('[spontaneous]\non = true\ninterval_s = 30\nquiet_start = "23:00"\nradio = true\n', encoding="utf-8")
     kw = load_spontaneous(f)
-    assert kw == {"spontaneous_enabled": True, "spont_interval_s": 30, "quiet_start": "23:00"}
+    assert kw == {"spontaneous_enabled": True, "spont_interval_s": 30, "quiet_start": "23:00", "radio": True}
     c = Config(**kw)
     assert (c.spontaneous_enabled, c.spont_interval_s, c.quiet_end) == (True, 30, "07:00")
 
 
 @pytest.mark.parametrize("body", ["[spontaneous]\non = 1\n", "[spontaneous]\ninterval_s = 30.0\n",
-                                  "[spontaneous]\nfreq_per_hour = 3\n", "[spontaneous]\nquiet_start = 2300\n"])
+                                  "[spontaneous]\nfreq_per_hour = 3\n", "[spontaneous]\nquiet_start = 2300\n",
+                                  "[spontaneous]\nradio = 1\n"])
 def test_load_spontaneous_rejects_invalid(tmp_path, body):
     from idle_talk.config import load_spontaneous
     f = tmp_path / "s.toml"

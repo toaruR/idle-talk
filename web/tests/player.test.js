@@ -154,9 +154,9 @@ test('client: downlink binary and cancel routed to player; state/ui', () => {
   assert.strictEqual(m.player.minEpoch, 2);
   ws.onmessage({ data: JSON.stringify({ t: 'state', state: 'idle', muted: false }) });
   assert.strictEqual(states[0].state, 'idle');
-  client.sendUi({ mute: true, on: false, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
+  client.sendUi({ mute: true, on: false, radio: true, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
   assert.deepStrictEqual(JSON.parse(ws.sent[ws.sent.length - 1]), {
-    t: 'ui', mute: true, on: false, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
+    t: 'ui', mute: true, on: false, radio: true, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
 });
 
 test('client direct: malformed/non-object JSON ignored, error routed to onError, no player ok', () => {

@@ -35,6 +35,7 @@ SPONT_TICK_S = 1.0  # 自発発話の判定周期 (沈黙秒数の分解能)
 STOP_POLL_S = 0.5  # 停止ファイル (ctl stop) の確認周期
 PID_FILE = "idle_talk.pid"  # data_dir 直下。二重起動検査と ctl の停止対象
 STOP_FILE = "idle_talk.stop"  # data_dir 直下。置かれたら正常終了する (ctl stop)
+DB_FILE = "idle_talk.db"  # data_dir 直下。ctl memories も読む
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"  # src レイアウト前提 (リポジトリ直下の web/)
 
 
@@ -98,7 +99,7 @@ class TtsSettingsReloader:
 
 
 def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> IdleTalkDirector:
-    store = Store(data_dir / "idle_talk.db", bool(cfg.DB_BACKUP))
+    store = Store(data_dir / DB_FILE, bool(cfg.DB_BACKUP))
     llm = LlmClient(args.llm_url, cfg)
     tts = TtsClient(args.tts_url, args.speaker, cfg, voice=load_voice(args.config))
     if not tts.warmup():
@@ -111,7 +112,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
 
 def ui_defaults(cfg: Config) -> dict:
     """画面の設定欄の初期値 (ui メッセージと同じキー)。idle_talk.toml の [spontaneous] を反映した cfg から作る。"""
-    return {"on": cfg.spontaneous_enabled, "interval_s": cfg.spont_interval_s,
+    return {"on": cfg.spontaneous_enabled, "radio": cfg.radio, "interval_s": cfg.spont_interval_s,
             "quiet_start": cfg.quiet_start, "quiet_end": cfg.quiet_end}
 
 

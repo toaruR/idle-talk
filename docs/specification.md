@@ -68,7 +68,7 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 |---|---|---|
 | `hello` | B→S | `version`(=1), `sample_rate`(=16000), `client_id`(1〜64 文字) |
 | `playback` | B→S | `epoch`, `utterance_id`, `chunk_id`, `position_ms`(0〜600000), `state`(started/finished/dropped) |
-| `ui` | B→S | `mute`, `on`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM) |
+| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM) |
 | `ping` / `pong` | 双方向 | `ts` |
 | `duck` | S→B | `epoch`, `gain`(0〜1) |
 | `cancel` | S→B | `new_epoch` |
@@ -129,6 +129,15 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 - 割り込まれた発話は `completed=0` とし、停止位置 `stop_position_ms` を記録する。
 - LLM に渡す履歴は直近 `N_TURNS`(8) ターンで、切り詰めたときはログを 1 件残す。
 
+## 記憶 (設計書 §3.4)
+
+- 応答の再生が完了して IDLE に戻ったとき、未処理の利用者発話 (直近 `MEM_BATCH`=4 件、`MIN_UTTERANCE_CHARS`=6 文字未満は対象外) を LLM に渡し、本人が明言した好み・習慣・予定・続いている出来事を「利用者は〜」の 1 文で抜き出させる。
+- 「利用者」で始まる行だけを採用し、1 回 `MAX_PER_UTTERANCE`=3 件、1 件 `MAX_CHARS`=60 文字まで。句読点・空白を除いて同じ内容は更新時刻だけ進める。根拠は最後の発話の utterance_id。
+- 保存は `MAX_MEMORIES`=30 件まで。超えたら更新時刻が古い `deletable=1` の行から消す。
+- 抽出中に利用者が話し始めた・休止に入ったときは取り消して LLM の受信を打ち切り、未処理分は次の応答完了後に再試行する。抽出中は自発発話を発火しない (LLM を取り合わない)。抽出の失敗はログだけ残して会話を続ける。
+- 通常応答と自発発話のシステムプロンプトに、更新が新しい順の記憶を箇条で添える (関係するときだけ触れ、無いことを覚えているふりはしない、と指示する)。
+- `idle-talk memories` で一覧、`--delete ID` / `--clear` で削除 (`deletable=1` のみ)。
+
 ## 応答パイプライン (設計書 §3.3 / §4.3)
 
 - LLM はストリーミングで受け、句点・読点などで最初の合成可能な節が確定した時点で TTS に渡す。TTS は文単位で直列に合成する。
@@ -154,12 +163,16 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
   - 無音が `T_silence` に達した時点で未完了なら取り消し、`backchannel_misfire` として記録する。
   - 相槌は G1 の遅延集計から除外する。
 - 自発発話:
-  - 既定はオフで、雑談モードのときだけ動く。`idle_talk.toml` の `[spontaneous]` (`on` / `interval_s` / `quiet_start` / `quiet_end`、`config.load_spontaneous`) で起動時の値を指定する。画面の設定欄の初期値は `/config.json` の `ui` で同じ値が渡り、接続時にページが `ui` メッセージで送り返す。
+  - 既定はオフで、雑談モードのときだけ動く。`idle_talk.toml` の `[spontaneous]` (`on` / `interval_s` / `quiet_start` / `quiet_end` / `radio`、`config.load_spontaneous`) で起動時の値を指定する。画面の設定欄の初期値は `/config.json` の `ui` で同じ値が渡り、接続時にページが `ui` メッセージで送り返す。
   - IDLE の沈黙が `interval_s` 秒 (既定 1200、10〜3600) 続いたら話しかける。沈黙は IDLE になった時刻 (応答の再生終了、自発発話の再生終了) から測る。`main.spontaneous_loop` が `SPONT_TICK_S`=1 秒ごとに `director.spontaneous_tick` を呼ぶ (無操作休止 `IDLE_TIMEOUT` の判定も同じ呼び出し)。自発発話の指示には `director.SPONT_TOPICS` から話題の種を 1 つ無作為に添え、前の会話と違う話題を振らせる。応答の生成上限は `clients.LLM_MAX_TOKENS`=300 (2〜4 文程度)。
   - 休止時間帯 (既定 22:00〜07:00) は発話しない。
   - 無反応が続くたびに待ち時間を 2 倍に延ばす (30 秒なら 30, 60, 120…)。利用者が話すと基本値に戻る。沈黙を同意とはみなさない。
   - 利用者の操作 (発話・応答・設定変更) が `IDLE_TIMEOUT`=1800 秒無いと休止 (`rest`) に入り、自発発話も止まる。ミュートなしの `ui` (画面の「開始」による接続、設定変更) で待機に戻る (無操作・連続失敗の休止も同じ)。
   - 準備中に利用者が話し始めたら取り消す。
+- ラジオモード (`radio`、既定オフ。画面の「ラジオ」チェック): 返事を期待しない独り語り。
+  - `on` がオフでも動く。1 本話し終えてから `spontaneous.RADIO_GAP_S`=3 秒の沈黙で次を話す (`interval_s` と無反応による倍増は使わない)。
+  - 指示は `director.RADIO_PROMPT` (ラジオのパーソナリティとして 3〜5 文、直前の続きか `SPONT_TOPICS` の話題、質問・呼びかけをしない)。
+  - 聞き流し前提なので無操作休止 (`IDLE_TIMEOUT`) に入らない。休止時間帯は守る。利用者が話せば通常どおり取り消して応答し、応答後に再開する。
 - 質問率 `RATIO_Q`: 3 応答に 1 回以下。
 
 ## データモデル (SQLite, 設計書 §3.4)

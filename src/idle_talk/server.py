@@ -31,7 +31,7 @@ PROTOCOL_VERSION = 1
 ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 BIND_HOST = "127.0.0.1"
 MISSED_PINGS_LIMIT = 2
-UI_FIELDS = ("mute", "on", "interval_s", "quiet_start", "quiet_end")
+UI_FIELDS = ("mute", "on", "radio", "interval_s", "quiet_start", "quiet_end")
 
 
 class Conn(Protocol):
@@ -70,7 +70,7 @@ class WsCore:
         self.on_playback = on_playback
         self.on_ui = on_ui
         self.on_hello = on_hello
-        self.settings: dict = {"mute": False, "on": self.cfg.spontaneous_enabled,
+        self.settings: dict = {"mute": False, "on": self.cfg.spontaneous_enabled, "radio": self.cfg.radio,
                                "interval_s": self.cfg.spont_interval_s,
                                "quiet_start": self.cfg.quiet_start,
                                "quiet_end": self.cfg.quiet_end}

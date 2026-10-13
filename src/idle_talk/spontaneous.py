@@ -3,6 +3,7 @@
 発火可否の判定と待ち時間の管理だけを持つ純ロジック。再生は Director が通常応答と同じ経路で行う。
 待ち時間は「IDLE になってから (直前の発話が終わってから) の沈黙秒数」で、基本値は interval_s。
 沈黙は同意ではない: 無反応が続くたびに待ち時間を 2 倍に延ばし、決して短縮・連続発火しない。
+ラジオモードは返答を期待しない独り語り: 待ち時間は RADIO_GAP_S 固定で、無反応でも延ばさない (on がオフでも発火する)。
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from collections.abc import Callable
 from .config import Config
 
 CHAT_MODE = "chat"
+RADIO_GAP_S = 3.0  # ラジオモードで 1 本話し終えてから次を話し始めるまでの沈黙秒数
 
 
 def _minutes(hhmm: str) -> int:
@@ -41,6 +43,7 @@ class Spontaneous:
         self.interval_s = self.cfg.spont_interval_s
         self.quiet_start = self.cfg.quiet_start
         self.quiet_end = self.cfg.quiet_end
+        self.radio = self.cfg.radio
         self.mode = mode
         self._minutes = minutes
         self._record = record or (lambda kind, payload: None)
@@ -62,10 +65,14 @@ class Spontaneous:
         self.quiet_end = s.get("quiet_end", self.quiet_end)
         if "on" in s:
             self.enabled = bool(s["on"])
+        if "radio" in s:
+            self.radio = bool(s["radio"])
 
     @property
     def wait_s(self) -> float:
-        """次の発火までに必要な沈黙秒数。直前の自発発話が無反応なら 2 倍ずつ延びる。"""
+        """次の発火までに必要な沈黙秒数。直前の自発発話が無反応なら 2 倍ずつ延びる (ラジオは固定)。"""
+        if self.radio:
+            return RADIO_GAP_S
         return float(self.interval_s * 2 ** (self.silent_count + int(self.awaiting_reaction)))
 
     def is_quiet(self) -> bool:
@@ -74,21 +81,22 @@ class Spontaneous:
     # ---- 発火判定 ----
     def should_fire(self, now: float, idle_since: float | None) -> bool:
         """idle_since: IDLE になった時刻 (IDLE でなければ None)。"""
-        if not self.enabled or self.mode != CHAT_MODE or idle_since is None or self.pending:
+        if not (self.enabled or self.radio) or self.mode != CHAT_MODE or idle_since is None or self.pending:
             return False
         if self.is_quiet():
             return False
         return now - idle_since >= self.wait_s
 
     def fire(self, now: float) -> None:
-        """発火確定。直前の自発発話に反応が無ければ無反応回数を数える (待ち時間が倍になる)。"""
+        """発火確定。直前の自発発話に反応が無ければ無反応回数を数える (待ち時間が倍になる)。ラジオは反応を待たない。"""
         wait = self.wait_s
-        if self.awaiting_reaction:
+        if self.awaiting_reaction and not self.radio:
             self.silent_count += 1
-        self.pending, self.awaiting_reaction = True, True
+        self.pending, self.awaiting_reaction = True, not self.radio
         self.fired += 1
         self.intervals.append(wait)
-        self._record("spontaneous_fire", {"silent_count": self.silent_count, "interval_s": wait})
+        self._record("spontaneous_fire", {"silent_count": self.silent_count, "interval_s": wait,
+                                          "radio": self.radio})
 
     def done(self) -> None:
         self.pending = False

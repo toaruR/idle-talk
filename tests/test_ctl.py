@@ -69,3 +69,24 @@ def test_asr_worker_pid_file_rejects_duplicate(tmp_path):
     with pytest.raises(SystemExit) as e:
         asr_worker.main(["--pid-file", str(pid_file)], load_model=lambda: pytest.fail("must not load"))
     assert e.value.code == EXIT_DUPLICATE_LAUNCH
+
+
+def test_memories_list_delete_clear(tmp_path, capsys):
+    from idle_talk import memory
+    from idle_talk.main import DB_FILE
+    from idle_talk.store import Store
+    s = Store(tmp_path / DB_FILE, db_backup=False)
+    a = memory.add_memory(s, "利用者は猫を飼っている。", 1, 1)
+    memory.add_memory(s, "利用者は固定。", 1, 1, deletable=0)
+    memory.add_memory(s, "利用者は朝型。", 1, 1)
+    s.close()
+    assert run_ctl(tmp_path, "memories") == 0
+    out = capsys.readouterr().out
+    assert "猫を飼っている" in out and "(固定)" in out
+    assert run_ctl(tmp_path, "memories", "--delete", str(a)) == 0
+    assert run_ctl(tmp_path, "memories", "--delete", str(a)) == 1
+    assert run_ctl(tmp_path, "memories", "--clear") == 0
+    capsys.readouterr()
+    run_ctl(tmp_path, "memories")
+    out = capsys.readouterr().out
+    assert "固定" in out and "朝型" not in out and "猫" not in out

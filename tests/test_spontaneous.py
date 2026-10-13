@@ -157,6 +157,35 @@ def test_spontaneous_plays_via_common_path(tmp_path):
     asyncio.run(run())
 
 
+def test_spontaneous_respects_lookahead_and_fires_again(tmp_path):
+    """TTS が再生より速くても先読み 1 チャンクまでしか送らず (超過は dropped で捨てられる)、
+    dropped が来ても完了扱いにして次の自発発話が止まらない。"""
+    async def run():
+        clock = FakeClock()
+        store = Store(tmp_path / "t.db", db_backup=False)
+        d = IdleTalkDirector(store, lambda m: iter(["一。", "二。", "三。", "四。"]), lambda text: b"RIFF....WAVE",
+                             lambda: None, EnergyVad(), None, clock=clock, now_ms=lambda: 1000)
+        d.spontaneous._minutes = lambda: 12 * 60
+        b = MockBrowser(auto_playback=False)
+        b.attach(d.core)
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True, "interval_s": 30}))
+        clock.advance(30)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: d._gen_done)
+        assert [c[2] for c in b.chunks] == [0, 1]  # 再生中 1 + 先読み 1
+        ep, utt = b.chunks[0][:2]
+        b.playback(ep, utt, 0, "finished")
+        assert [c[2] for c in b.chunks] == [0, 1, 2]
+        b.playback(ep, utt, 1, "dropped")
+        b.playback(ep, utt, 2, "finished")
+        b.playback(ep, utt, 3, "finished")
+        assert not d.spontaneous.pending
+        clock.advance(60)  # 無反応なので待ち時間は 2 倍
+        assert d.spontaneous_tick() == "spontaneous"
+        store.close()
+    asyncio.run(run())
+
+
 def test_cancel_prep(tmp_path):
     async def run():
         gate = threading.Event()
@@ -246,4 +275,33 @@ def test_no_fire_without_client_and_reconnect_clears_stuck(tmp_path):
         assert not d.spontaneous.pending and d.spontaneous.wait_s == 30.0
         d.clock_.advance(30)
         assert d.spontaneous_tick() == "spontaneous"
+    asyncio.run(run())
+
+
+def test_radio_fixed_gap_without_backoff_even_if_off():
+    from idle_talk.spontaneous import RADIO_GAP_S
+    s = Spontaneous(minutes=lambda: 12 * 60)
+    s.apply_settings({"radio": True})  # on はオフのまま
+    assert s.should_fire(100.0 + RADIO_GAP_S, 100.0)
+    for _ in range(3):
+        s.fire(0.0)
+        s.done()
+    assert s.silent_count == 0 and s.wait_s == RADIO_GAP_S
+    s.apply_settings({"radio": False})
+    assert not s.should_fire(10000.0, 0.0)
+
+
+def test_radio_no_question_prompt_and_no_idle_timeout(tmp_path):
+    async def run():
+        d, b, _store = make(tmp_path)
+        seen = []
+        d.pipeline._llm = lambda m: seen.append(m) or iter(["今日はいい天気です。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "radio": True}))
+        d.clock_.advance(3)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        assert "返事を求めない" in seen[0][-1]["content"]
+        d.clock_.advance(1800)  # 無操作でも休止せず話し続ける
+        assert d.spontaneous_tick() == "spontaneous"
+        assert d.fsm.ctx.state.value == "idle"
     asyncio.run(run())

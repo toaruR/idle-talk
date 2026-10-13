@@ -10,6 +10,7 @@
   <legend>設定</legend>
   <label><input type="checkbox" id="mute"> ミュート</label>
   <label><input type="checkbox" id="on" checked> 自発発話 ON</label>
+  <label><input type="checkbox" id="radio"> ラジオ (返事を待たず話し続ける)</label>
   <label>沈黙(秒) <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
   <label>静音開始 <input type="time" id="quiet_start" value="23:00"></label>
   <label>静音終了 <input type="time" id="quiet_end" value="07:00"></label>
@@ -29,6 +30,7 @@
     return {
       mute: $('mute').checked,
       on: $('on').checked,
+      radio: $('radio').checked,
       interval_s: parseInt($('interval_s').value, 10),
       quiet_start: $('quiet_start').value,
       quiet_end: $('quiet_end').value,
@@ -50,7 +52,7 @@
   const serverConfig = loadServerConfig().then((c) => { applyUiDefaults(c.ui); return c; });
   serverConfig.catch((e) => { $('error').textContent = String(e); });
   function pushUi() { if (client) client.sendUi(readUi()); }
-  for (const id of ['mute', 'on', 'interval_s', 'quiet_start', 'quiet_end']) {
+  for (const id of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end']) {
     $(id).addEventListener('change', pushUi);
   }
 

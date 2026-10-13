@@ -82,6 +82,7 @@ class Config:
     spont_interval_s: int = 1200  # 沈黙がこの秒数続いたら話しかける (旧 freq_per_hour=3 相当)
     quiet_start: str = "22:00"
     quiet_end: str = "07:00"
+    radio: bool = False  # ラジオモード: 返答を待たず RADIO_GAP_S の間隔で話し続ける
 
     def __post_init__(self) -> None:
         if not 300 <= self.T_confirm <= 500:
@@ -171,11 +172,11 @@ def load_voice(path: str | Path = SETTINGS_FILE) -> dict[str, float]:
 
 
 def load_spontaneous(path: str | Path = SETTINGS_FILE) -> dict:
-    """[spontaneous] (on / interval_s / quiet_start / quiet_end) を Config の引数名で返す (指定キーのみ)。
+    """[spontaneous] (on / interval_s / quiet_start / quiet_end / radio) を Config の引数名で返す (指定キーのみ)。
 
     型違い・未知キーは ValueError。範囲と HH:MM は Config 生成時に検証される。"""
-    raw = _read_section(path, "spontaneous", ("on", "interval_s", "quiet_start", "quiet_end"))
-    types = {"on": bool, "interval_s": int, "quiet_start": str, "quiet_end": str}
+    raw = _read_section(path, "spontaneous", ("on", "interval_s", "quiet_start", "quiet_end", "radio"))
+    types = {"on": bool, "interval_s": int, "quiet_start": str, "quiet_end": str, "radio": bool}
     for k, v in raw.items():
         if type(v) is not types[k]:
             raise ValueError(f"[spontaneous].{k} must be {types[k].__name__}: {v!r}")
