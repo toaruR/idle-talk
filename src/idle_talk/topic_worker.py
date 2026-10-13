@@ -7,16 +7,19 @@ from __future__ import annotations
 
 import email.utils
 import logging
+import re
 import threading
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from html.parser import HTMLParser
 
 from .store import Store
-from .topics import add_card
+from .topics import add_card, has_card
 
 TOPIC_TTL_MS = 24 * 60 * 60 * 1000  # カード有効期間 (published_at から)
 FETCH_TIMEOUT_S = 10.0
+SUMMARY_MIN_CHARS = 30  # フィードの概要 (タグ除去後) がこれより短ければ記事ページの説明文で補う
 log = logging.getLogger("idle_talk.topic_worker")
 _ATOM = "{http://www.w3.org/2005/Atom}"
 
@@ -60,6 +63,37 @@ def parse_feed(xml_bytes: bytes | str) -> list[dict]:
     return [i for i in out if i["title"]]
 
 
+class _MetaDescription(HTMLParser):
+    """記事ページの og:description (無ければ description) を拾う。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "meta":
+            return
+        a = dict(attrs)
+        key = (a.get("property") or a.get("name") or "").lower()
+        if key in ("og:description", "description") and a.get("content"):
+            self.found.setdefault(key, a["content"].strip())
+
+
+def _decode_html(html_bytes: bytes) -> str:
+    """<meta charset> / http-equiv の charset で復号する (ITmedia の記事ページは Shift_JIS)。無指定・未知なら UTF-8。"""
+    m = re.search(rb"charset=[\"']?([A-Za-z0-9_-]+)", html_bytes[:4096])
+    try:
+        return html_bytes.decode(m.group(1).decode() if m else "utf-8", "replace")
+    except LookupError:
+        return html_bytes.decode("utf-8", "replace")
+
+
+def page_description(html_bytes: bytes) -> str | None:
+    p = _MetaDescription()
+    p.feed(_decode_html(html_bytes))
+    return p.found.get("og:description") or p.found.get("description") or None
+
+
 def http_fetch(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_S) as r:
         return r.read()
@@ -96,14 +130,14 @@ class TopicWorker:
         self._cancel.set()
 
     def on_state(self, state: str) -> None:
-        """Director の状態変化を受ける。rest→停止、(idle→)user_speaking→背景生成中断。"""
+        """Director の状態変化を受ける。rest→停止、rest から復帰→再開、(idle→)user_speaking→背景生成中断。"""
         prev, self._state = self._state, state
         if state == "rest":
             self.stop()
+        elif prev == "rest":
+            self.start()
         elif state == "user_speaking" and prev != "user_speaking":
             self._cancel.set()
-        elif state == "idle" and not self.running and prev != "rest":
-            pass
 
     # ---- 取得 ----
     def poll_once(self) -> int:
@@ -123,13 +157,23 @@ class TopicWorker:
             for item in items:
                 if not self.running or self._cancel.is_set():
                     break
-                n +=self._store_item(item)
+                n += self._store_item(item)
         return n
 
     def _store_item(self, item: dict) -> int:
         key = item.get("url") or item["title"]
         with self._lock:
             if key in self._seen:
+                return 0
+        if has_card(self.store, item.get("url"), item["title"]):  # 前回起動までに保存済み (ページは読まない)
+            with self._lock:
+                self._seen.add(key)
+            return 0
+        summary = item.get("summary") or ""
+        if item.get("url") and len(re.sub(r"<[^>]+>", "", summary).strip()) < SUMMARY_MIN_CHARS:
+            summary = self._describe(item["url"]) or summary
+            if self._cancel.is_set():
+                self.interrupted += 1
                 return 0
         hook = self._generate(item, self._cancel)
         if self._cancel.is_set():
@@ -138,9 +182,17 @@ class TopicWorker:
         if not hook:
             return 0
         published = item["published_at"] if item["published_at"] is not None else self._now()
-        add_card(self.store, hook, facts=item.get("summary") or None, source_url=item.get("url"),
+        add_card(self.store, hook, facts=summary or None, source_url=item.get("url"),
                  published_at=published, expires_at=published + self.ttl_ms)
         with self._lock:
             self._seen.add(key)
             self.saved += 1
         return 1
+
+    def _describe(self, url: str) -> str | None:
+        """記事ページの説明文。取得・解析に失敗したら None (フィードの概要のまま保存する)。"""
+        try:
+            return page_description(self._fetch(url))
+        except (OSError, ValueError) as e:
+            log.debug("page fetch failed: %s", e)
+            return None

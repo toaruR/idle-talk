@@ -203,3 +203,17 @@ def test_hallu_client_discards():
 
     assert AsrClient(mock_asr_send(clk, body=body(0.61)), clock=clk).transcribe(1, "s", 1) is None
     assert AsrClient(mock_asr_send(clk, body=body(0.6)), clock=clk).transcribe(1, "s", 1) is not None
+
+
+def test_tts_speakers_lists_talk_styles():
+    data = [{"name": "まお", "styles": [{"name": "ノーマル", "id": 1, "type": "talk"},
+                                      {"name": "歌", "id": 2, "type": "sing"}]},
+            {"name": "らせつん", "styles": [{"name": "標準", "id": 3}]}]
+    urls = []
+    t = TtsClient("http://tts", get=lambda url, timeout: urls.append(url) or json.dumps(data).encode())
+    assert t.speakers() == [{"id": 1, "name": "まお ノーマル"}, {"id": 3, "name": "らせつん 標準"}]
+    assert urls == ["http://tts/speakers"]
+
+    def down(url, timeout):
+        raise OSError("refused")
+    assert TtsClient(get=down).speakers() == []

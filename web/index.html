@@ -14,6 +14,7 @@
   <label>沈黙(秒) <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
   <label>静音開始 <input type="time" id="quiet_start" value="23:00"></label>
   <label>静音終了 <input type="time" id="quiet_end" value="07:00"></label>
+  <label id="speaker_label" hidden>声 <select id="speaker"></select></label>
 </fieldset>
 <script src="worklet.js"></script>
 <script src="player.js"></script>
@@ -27,7 +28,7 @@
   let client = null;
 
   function readUi() {
-    return {
+    const ui = {
       mute: $('mute').checked,
       on: $('on').checked,
       radio: $('radio').checked,
@@ -35,6 +36,13 @@
       quiet_start: $('quiet_start').value,
       quiet_end: $('quiet_end').value,
     };
+    if ($('speaker').options.length) ui.speaker = parseInt($('speaker').value, 10);
+    return ui;
+  }
+  // 声の選択肢は AivisSpeech の /speakers (配信元が起動時に取得)。取れなければ選択欄を出さない
+  function fillSpeakers(speakers) {
+    for (const s of speakers || []) $('speaker').add(new Option(s.name, String(s.id)));
+    $('speaker_label').hidden = !$('speaker').options.length;
   }
   // WS ポートと設定欄の初期値は配信元 (idle_talk.main) が idle_talk.toml から返す。
   async function loadServerConfig() {
@@ -49,10 +57,10 @@
       if (el.type === 'checkbox') el.checked = Boolean(v); else el.value = String(v);
     }
   }
-  const serverConfig = loadServerConfig().then((c) => { applyUiDefaults(c.ui); return c; });
+  const serverConfig = loadServerConfig().then((c) => { fillSpeakers(c.speakers); applyUiDefaults(c.ui); return c; });
   serverConfig.catch((e) => { $('error').textContent = String(e); });
   function pushUi() { if (client) client.sendUi(readUi()); }
-  for (const id of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end']) {
+  for (const id of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker']) {
     $(id).addEventListener('change', pushUi);
   }
 

@@ -125,8 +125,9 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
-    monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None, stop_file=None: seen.update(run_port=port) or asyncio.sleep(0))
-    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui: seen.update(web=(port, ws_port), ui=ui))
+    monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None, stop_file=None, topic_interval_s=0: seen.update(run_port=port) or asyncio.sleep(0))
+    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui, speakers: seen.update(web=(port, ws_port), ui=ui))
+    monkeypatch.setattr(main_mod.TtsClient, "speakers", lambda self: [])
     f = tmp_path / "s.toml"
     f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\nweb = 9004\n"
                  "[spontaneous]\non = true\ninterval_s = 30\n[tts]\nspeaker = 42\n", encoding="utf-8")
@@ -137,7 +138,8 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
         "http://127.0.0.1:9001", "http://127.0.0.1:9002", "http://127.0.0.1:9003")
     assert seen["speaker"] == 42
     assert seen["web"] == (9004, 9000)
-    assert seen["ui"] == {"on": True, "radio": False, "interval_s": 30, "quiet_start": "22:00", "quiet_end": "07:00"}
+    assert seen["ui"] == {"on": True, "radio": False, "interval_s": 30, "quiet_start": "22:00", "quiet_end": "07:00",
+                          "speaker": 42}
     assert main_mod.main(base + ["--port", "7000", "--llm-url", "http://h:1", "--speaker", "7"]) == 0
     assert seen["run_port"] == 7000 and seen["llm_url"] == "http://h:1" and seen["speaker"] == 7
     assert main_mod.main(base + ["--web-port", "7001"]) == 0
@@ -148,12 +150,13 @@ def test_start_web_serves_dir_and_ws_port(tmp_path):
     import http.client
     from idle_talk.main import start_web
     (tmp_path / "index.html").write_text("hi", encoding="utf-8")
-    httpd = start_web(0, 9123, {"on": True}, root=tmp_path)
+    httpd = start_web(0, 9123, {"on": True}, [{"id": 1, "name": "a b"}], root=tmp_path)
     try:
         c = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
         c.request("GET", "/config.json")
         r = c.getresponse()
-        assert (r.status, json.loads(r.read())) == (200, {"ws_port": 9123, "ui": {"on": True}})
+        assert (r.status, json.loads(r.read())) == (200, {"ws_port": 9123, "ui": {"on": True},
+                                                          "speakers": [{"id": 1, "name": "a b"}]})
         c.request("GET", "/")
         r = c.getresponse()
         assert (r.status, r.read(), r.getheader("Cache-Control")) == (200, b"hi", "no-cache")
@@ -216,3 +219,42 @@ def test_tts_settings_reloaded_on_file_change(tmp_path, caplog):
     f.write_text("[tts]\nspeaker = 4\n", encoding="utf-8")
     os.utime(f, (3, 3))
     assert fixed.reload_if_changed() is True and fixed.tts.speaker == 7
+
+
+def test_ui_speaker_kept_until_file_speaker_changes(tmp_path):
+    from idle_talk.clients import TtsClient
+    from idle_talk.main import TtsSettingsReloader
+    f = tmp_path / "s.toml"
+    f.write_text("[tts]\nspeaker = 1\n", encoding="utf-8")
+    tts = TtsClient(speaker=1)
+    r = TtsSettingsReloader(tts, f, speaker_ids=frozenset({1, 2, 3}))
+    r.set_speaker(2)
+    assert tts.speaker == 2
+    with pytest.raises(ValueError):
+        r.set_speaker(99)
+    assert tts.speaker == 2
+    f.write_text("[tts]\nspeaker = 1\nspeed = 1.2\n", encoding="utf-8")  # 声パラメータだけの編集
+    os.utime(f, (1, 1))
+    assert r.reload_if_changed() is True and (tts.speaker, tts.voice) == (2, {"speedScale": 1.2})
+    f.write_text("[tts]\nspeaker = 3\n", encoding="utf-8")
+    os.utime(f, (2, 2))
+    assert r.reload_if_changed() is True and tts.speaker == 3
+
+
+def test_ui_speaker_message_reaches_tts(tmp_path):
+    d = IdleTalkDirector(Store(tmp_path / "t.db", db_backup=False), lambda m: iter(()), lambda t: b"",
+                         lambda: None, EnergyVad(), None)
+    seen = []
+
+    def set_speaker(s):
+        if s == 99:
+            raise ValueError("unknown speaker: 99")
+        seen.append(s)
+
+    d.set_speaker = set_speaker
+    b = MockBrowser()
+    b.attach(d.core)
+    d.core.on_text(b, json.dumps({"t": "ui", "speaker": 5}))
+    d.core.on_text(b, json.dumps({"t": "ui", "speaker": 99}))
+    assert seen == [5] and [m["code"] for m in b.of("error")] == [5006]
+    d.close()

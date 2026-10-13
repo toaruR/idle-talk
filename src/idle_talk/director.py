@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import socket
 import threading
 import time
@@ -35,6 +36,7 @@ from .protocol import pack_down_chunk
 from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
+from .topics import mark_used, select_cards
 from .vad import Vad
 
 log = logging.getLogger("idle_talk.director")
@@ -47,8 +49,17 @@ SPONT_TOPICS = ("最近の天気や季節", "食べ物や料理", "休日の過�
                 "好きな音楽や映画", "旅行してみたい場所", "ちょっとした豆知識", "動物や生き物", "今日あったこと",
                 "趣味や習い事", "仕事や勉強の息抜き", "もしもの話", "身近な道具や家電")
 RADIO_PROMPT = ("(利用者は聞いているだけで返事はしません。ラジオのパーソナリティとして独り語りを続けてください。"
-                "直前の話の続きでも、例えば「{topic}」のような新しい話題でも構いません。"
+                "直前の話の続きでも、例えば{topic}のような新しい話題でも構いません。"
                 "自分の感想やちょっとした体験談を交えて 3〜5 文で話し、質問や呼びかけで返事を求めないでください)")
+# 話題カード (RSS) があれば SPONT_TOPICS より優先して 1 枚使う。概要は長すぎるとプロンプトを圧迫するので切り詰める
+CARD_FACTS_MAX = 200
+# カードで話すときに渡す直近の履歴ターン数。長いと独り語りの情景や言い回し (「雨の音」等) を引きずって繰り返す
+CARD_TURNS = 2
+CARD_RULES = "前の話の情景や言い回し (天気や音など) は繰り返さず、ニュースの内容を中心に話し、概要に無い事実は付け足さないでください。"
+RADIO_CARD_PROMPT = ("(利用者は聞いているだけで返事はしません。ラジオのパーソナリティとして{topic}を紹介してください。"
+                     + CARD_RULES + "自分の感想を交えて 3〜5 文で話し、質問や呼びかけで返事を求めないでください)")
+CARD_PROMPT = ("(利用者は黙っています。{topic}を話題に話しかけてください。"
+               + CARD_RULES + "自分の感想を一言添えて 2〜3 文で話し、最後に軽く質問してください)")
 FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 # ブラウザ (web/player.js MAX_LOOKAHEAD) が再生中チャンクの後ろに保持する数。超えて送ると dropped で捨てられる
 DOWN_LOOKAHEAD = 1
@@ -151,6 +162,8 @@ class IdleTalkDirector:
         self._mem_pending: list[tuple[int, str]] = []  # 記憶抽出待ちの利用者発話 (utterance_id, text)
         self._mem_task: asyncio.Task | None = None
         self._mem_stop = threading.Event()  # 取消時に抽出スレッドの LLM 受信を打ち切る (llama-server を応答に譲る)
+        self.set_speaker: Callable[[int], None] | None = None  # 画面で選んだ話者 ID を TTS へ (main が結線)
+        self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -263,6 +276,8 @@ class IdleTalkDirector:
         elif self._idle_since is None:
             self._idle_since = self.clock()
         self._emit({"t": "state", "state": ctx.state.value, "muted": ctx.muted})
+        if self.topic_worker is not None:
+            self.topic_worker.on_state(ctx.state.value)
         if ctx.state is State.INTERRUPT_CHECK:
             self._ic_start_ms = int(self.clock() * 1000)
             try:  # T_confirm 内に語が得られなければ判断不能として cancel (行11)
@@ -334,6 +349,11 @@ class IdleTalkDirector:
             self.spontaneous.apply_settings(settings)
         except ValueError as e:
             self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
+        if "speaker" in settings and self.set_speaker is not None:
+            try:
+                self.set_speaker(settings["speaker"])
+            except ValueError as e:
+                self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
         self._last_op = self.clock()
         muted = bool(settings.get("mute"))
         if muted and not self.fsm.ctx.muted:
@@ -497,11 +517,16 @@ class IdleTalkDirector:
         return None
 
     async def _spontaneous_respond(self) -> None:
-        messages = self._chat_messages()
-        topic = random.choice(SPONT_TOPICS)
-        messages.append({"role": "user", "content": RADIO_PROMPT.format(topic=topic) if self.spontaneous.radio else (
-            "(利用者は黙っています。これまでの会話と違う話題を自分から振ってください。"
-            f"例えば「{topic}」について、自分の話を一言添えて 2〜3 文で話しかけ、最後に軽く質問してください)")})
+        topic, card = self._pick_topic()
+        messages = self._chat_messages(CARD_TURNS if card else None)
+        if card:
+            prompt = (RADIO_CARD_PROMPT if self.spontaneous.radio else CARD_PROMPT).format(topic=topic)
+        elif self.spontaneous.radio:
+            prompt = RADIO_PROMPT.format(topic=topic)
+        else:
+            prompt = ("(利用者は黙っています。これまでの会話と違う話題を自分から振ってください。"
+                      f"例えば{topic}について、自分の話を一言添えて 2〜3 文で話しかけ、最後に軽く質問してください)")
+        messages.append({"role": "user", "content": prompt})
         self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
         me = asyncio.current_task()
         await self.pipeline.respond(messages)
@@ -510,11 +535,23 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
+    def _pick_topic(self) -> tuple[str, bool]:
+        """(話題, カードか)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
+        cards = select_cards(self.store, self.now_ms())
+        if not cards:
+            return f"「{random.choice(SPONT_TOPICS)}」", False
+        card = cards[0]
+        mark_used(self.store, card["id"], self.now_ms())
+        facts = re.sub(r"<[^>]+>", "", card["facts"] or "").strip()[:CARD_FACTS_MAX]
+        return f"最近見かけたニュース「{card['hook']}」" + (f"(概要: {facts})" if facts else ""), True
+
     # ---- 記憶 (設計書 3.4): 応答の再生完了後に、溜まった利用者発話から抜き出して保存する ----
-    def _chat_messages(self) -> list[dict]:
-        return [{"role": "system", "content": SYSTEM_PROMPT + memory_prompt(self.store)}] + [
-            {"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
-            for t in history_window(self.store, self.cfg) if t["text"]]
+    def _chat_messages(self, turns: int | None = None) -> list[dict]:
+        """system + 履歴。turns を指定すると直近 turns 件だけ渡す。"""
+        history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
+                   for t in history_window(self.store, self.cfg) if t["text"]]
+        return [{"role": "system", "content": SYSTEM_PROMPT + memory_prompt(self.store)}] + (
+            history[-turns:] if turns else history)
 
     def _start_memory(self) -> None:
         """応答と LLM を取り合わないよう、再生完了 (IDLE) 後にだけ走らせる。利用者発話で取消し、次回まとめて再試行する。"""

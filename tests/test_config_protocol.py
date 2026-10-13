@@ -215,6 +215,8 @@ def test_repo_settings_file_is_valid():
     load_voice(ROOT / SETTINGS_FILE)
     from idle_talk.config import load_spontaneous
     Config(**load_spontaneous(ROOT / SETTINGS_FILE))
+    from idle_talk.config import load_topics
+    load_topics(ROOT / SETTINGS_FILE)
 
 
 def test_load_speaker(tmp_path):
@@ -294,3 +296,21 @@ def test_load_llm_launch_rejects_invalid(tmp_path, body):
     f.write_text(body, encoding="utf-8")
     with pytest.raises(ValueError):
         load_llm_launch(f)
+
+
+def test_load_topics(tmp_path):
+    from idle_talk.config import Topics, load_topics
+    f = tmp_path / "s.toml"
+    assert load_topics(f) == Topics((), 30)
+    f.write_text('[topics]\nfeeds = ["https://example.test/rss"]\ninterval_min = 60\n', encoding="utf-8")
+    assert load_topics(f) == Topics(("https://example.test/rss",), 60)
+
+
+@pytest.mark.parametrize("body", ['[topics]\nfeeds = "https://example.test/rss"\n', '[topics]\nfeeds = ["file:///x"]\n',
+                                  "[topics]\ninterval_min = 0\n", "[topics]\ninterval = 30\n"])
+def test_load_topics_rejects_invalid(tmp_path, body):
+    from idle_talk.config import load_topics
+    f = tmp_path / "s.toml"
+    f.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_topics(f)

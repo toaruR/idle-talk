@@ -22,6 +22,13 @@ def add_card(store: Store, hook: str | None, facts: Any = None, source_url: str 
     )
 
 
+def has_card(store: Store, source_url: str | None, hook: str) -> bool:
+    """同じ記事のカードが保存済みか (URL があれば URL、無ければ hook で照合)。再起動をまたいだ重複保存を防ぐ。"""
+    if source_url:
+        return bool(store.query("SELECT 1 FROM topic_cards WHERE source_url=? LIMIT 1", (source_url,)))
+    return bool(store.query("SELECT 1 FROM topic_cards WHERE hook=? LIMIT 1", (hook,)))
+
+
 def select_cards(store: Store, now_ms: int, limit: int = 1) -> list:
     """未使用かつ未期限切れのカード (expires_at NULL は無期限)。"""
     return store.query(

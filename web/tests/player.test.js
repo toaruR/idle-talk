@@ -200,6 +200,7 @@ test('client direct: ping->pong echoes ts, duck routed to player, sendJson/sendF
 test('client direct: pure helpers makeUi/stateLabel/makeHello/micConstraints/wsUrl', () => {
   assert.deepStrictEqual(C.makeUi({ mute: false, bogus: 1 }), { t: 'ui', mute: false });
   assert.deepStrictEqual(C.makeUi(null), { t: 'ui' });
+  assert.deepStrictEqual(C.makeUi({ speaker: 893625024 }), { t: 'ui', speaker: 893625024 });
   assert.strictEqual(C.stateLabel({ state: 'idle', muted: false }, { idle: '待機' }), '待機');
   assert.strictEqual(C.stateLabel({ state: 'idle', muted: true }, { idle: '待機' }), '待機 (ミュート)');
   assert.strictEqual(C.stateLabel({ state: 'x', muted: false }), 'x');

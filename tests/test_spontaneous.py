@@ -7,10 +7,13 @@ import pytest
 from mocks import FakeClock
 from mocks_browser import MockBrowser
 
+from idle_talk import topics
 from idle_talk.config import Config
 from idle_talk.director import IdleTalkDirector
+from idle_talk.fsm import Ev, Event
 from idle_talk.spontaneous import Spontaneous, in_quiet_hours
 from idle_talk.store import Store
+from idle_talk.topic_worker import TopicWorker
 from idle_talk.vad import EnergyVad
 
 
@@ -316,3 +319,53 @@ def test_radio_does_not_wait_for_memory_extraction(tmp_path):
         assert d.spontaneous_tick() == "spontaneous"
         d._mem_task.cancel()
     asyncio.run(run())
+
+
+def test_spontaneous_uses_topic_card_once(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        cid = topics.add_card(store, "新しい駅が開業", facts="<p>来春に開業予定。</p>", expires_at=10_000)
+        seen = []
+        d.pipeline._llm = lambda m: seen.append(m) or iter(["そういえば駅の話です。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        prompt = seen[0][-1]["content"]
+        assert "「新しい駅が開業」" in prompt and "来春に開業予定。" in prompt and "<p>" not in prompt
+        assert store.query("SELECT used_at FROM topic_cards WHERE id=?", (cid,))[0][0] == 1000
+        assert topics.select_cards(store, 1000) == []  # 使ったカードは次回選ばれない (SPONT_TOPICS に戻る)
+    asyncio.run(run())
+
+
+def test_topic_card_trims_history_and_forbids_repeating_scenery(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        for i in range(6):
+            store.add_turn(i, "ai", f"雨の音が静かに聞こえる夜です {i}", 1, None, i)
+        topics.add_card(store, "新しい駅が開業", expires_at=10_000)
+        seen = []
+        d.pipeline._llm = lambda m: seen.append(m) or iter(["駅の話です。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "radio": True}))
+        d.clock_.advance(3)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        msgs = seen[0]
+        assert [m["content"][-1] for m in msgs[1:-1]] == ["4", "5"]  # 直近 CARD_TURNS 件だけ
+        assert "繰り返さず" in msgs[-1]["content"] and "返事を求めない" in msgs[-1]["content"]
+        assert "直前の話の続き" not in msgs[-1]["content"]
+        seen.clear()
+        d.clock_.advance(3)
+        assert d.spontaneous_tick() == "spontaneous"  # カードが無ければ従来どおり全履歴
+        await until(lambda: not d.spontaneous.pending)
+        assert len(seen[0]) - 2 > 2
+    asyncio.run(run())
+
+
+def test_topic_worker_follows_state(tmp_path):
+    d, _b, store = make(tmp_path)
+    d.topic_worker = TopicWorker(store, ["http://feed.test/rss"], fetch=lambda u: b"")
+    d.topic_worker.start()
+    d.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
+    d.fsm.pump()
+    assert d.fsm.ctx.state.value == "rest" and d.topic_worker.running is False

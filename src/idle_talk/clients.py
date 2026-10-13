@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.parse
@@ -18,6 +19,7 @@ LLM_MAX_TOKENS = 300  # 応答 1 回の生成上限 (日本語で 2〜5 文程�
 LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":True},"max_tokens":{"const":LLM_MAX_TOKENS}}}
 LLM_CHUNK_SCHEMA = {"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}
 
+log = logging.getLogger("idle_talk.clients")
 _LLM_REQ = Draft7Validator(LLM_REQ_SCHEMA)
 _LLM_CHUNK = Draft7Validator(LLM_CHUNK_SCHEMA)
 _ASR_REQ = Draft7Validator(ASR_REQ_SCHEMA)
@@ -26,6 +28,7 @@ _ASR_RES = Draft7Validator(ASR_RES_SCHEMA)
 DONE = "[DONE]"
 WARMUP_TEXT = "あ"
 WARMUP_TIMEOUT_S = 60  # 初回合成は DirectML 初期化で十数秒かかる
+SPEAKERS_TIMEOUT_S = 5  # 起動時の話者一覧取得 (画面の声の選択肢)
 TTS_RATE = 24000  # 下り PCM のサンプリング周波数。web/player.js の DEFAULT_PCM_RATE と一致させる
 
 
@@ -99,6 +102,11 @@ def _http_post(url: str, body: bytes | None, timeout: float) -> bytes:
         return resp.read()
 
 
+def _http_get(url: str, timeout: float) -> bytes:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return resp.read()
+
+
 class LlmClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8080", config: Config | None = None,
                  clock: Callable[[], float] = time.monotonic,
@@ -144,13 +152,15 @@ class TtsClient:
     def __init__(self, base_url: str = "http://127.0.0.1:10101", speaker: int = DEFAULT_SPEAKER,
                  config: Config | None = None, clock: Callable[[], float] = time.monotonic,
                  post: Callable[[str, bytes | None, float], bytes] = _http_post,
-                 voice: dict[str, float] | None = None):
+                 voice: dict[str, float] | None = None,
+                 get: Callable[[str, float], bytes] = _http_get):
         self.base_url = base_url.rstrip("/")
         self.speaker = speaker
         self.voice = dict(voice or {})  # AudioQuery の上書き (config.load_voice)
         self.cfg = config or Config()
         self.clock = clock
         self._post = post
+        self._get = get
 
     def synthesize(self, text: str) -> bytes:
         """/audio_query -> /synthesis。1 文 tts_sentence 秒超過で TtsTimeout(5002)。
@@ -194,6 +204,16 @@ class TtsClient:
             return True
         except OSError:
             return False
+
+    def speakers(self, timeout: float = SPEAKERS_TIMEOUT_S) -> list[dict]:
+        """AivisSpeech の GET /speakers から話し声のスタイルを [{id, name: "話者 スタイル"}] で返す。失敗は []。"""
+        try:
+            data = json.loads(self._get(f"{self.base_url}/speakers", timeout))
+            return [{"id": st["id"], "name": f"{sp['name']} {st['name']}"}
+                    for sp in data for st in sp.get("styles", []) if st.get("type", "talk") == "talk"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("tts speakers unavailable: %s", e)
+            return []
 
     def synthesize_sentences(self, sentences: Iterable[str]) -> list[tuple[str, bytes | None]]:
         """失敗した文は (text, None) とし、次文へ続行する (テキストのみ UI 表示用)。"""

@@ -87,3 +87,72 @@ def test_interrupt_on_user_speaking(store):
     assert not t.is_alive()
     assert w.interrupted == 1
     assert store.count("topic_cards") == 0
+
+
+def test_resumes_after_rest(store):
+    w = TopicWorker(store, ["u"], fetch=lambda u: FEED)
+    w.start()
+    w.on_state("rest")
+    assert w.poll_once() == 0
+    w.on_state("idle")
+    assert w.running is True
+    assert w.poll_once() == 3
+
+
+def test_short_summary_filled_from_page(store):
+    page = '<html><head><meta property="og:description" content="記事ページの説明文です。&amp; 詳細はこちら。三十文字を超えるよう長めに書いておきます。"></head></html>'
+    feed = ('<rss><channel><item><title>T</title><link>https://example.test/a</link><description>短い</description>'
+            '</item><item><title>U</title><link>https://example.test/b</link><description>'
+            + "十分に長い概要の文章です。" * 3 + '</description></item></channel></rss>').encode()
+    fetched = []
+
+    def fetch(u):
+        fetched.append(u)
+        return feed if u == "feed" else page.encode()
+
+    w = TopicWorker(store, ["feed"], fetch=fetch)
+    w.start()
+    assert w.poll_once() == 2
+    facts = {r["hook"]: r["facts"] for r in store.query("SELECT hook, facts FROM topic_cards")}
+    assert facts["T"].startswith("記事ページの説明文です。& 詳細")
+    assert facts["U"].startswith("十分に長い概要")
+    assert fetched == ["feed", "https://example.test/a"]  # 概要が十分ならページは読まない
+
+
+def test_page_fetch_failure_keeps_feed_summary(store):
+    def fetch(u):
+        if u != "feed":
+            raise OSError("down")
+        return FEED
+
+    w = TopicWorker(store, ["feed"], fetch=fetch)
+    w.start()
+    assert w.poll_once() == 3
+    assert min(r[0] for r in store.query("SELECT facts FROM topic_cards")) == "First summary text."
+
+
+def test_page_description_shift_jis():
+    from idle_talk.topic_worker import page_description
+    html = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS">' \
+           '<meta name="description" content="便利になるからこそ、人の力が問われますね。"></head></html>'
+    assert page_description(html.encode("shift_jis")) == "便利になるからこそ、人の力が問われますね。"
+    assert page_description(b"<html></html>") is None
+
+
+def test_no_duplicate_cards_across_restart(store):
+    pages = []
+
+    def fetch(u):
+        if u != "feed":
+            pages.append(u)
+        return FEED
+
+    first =TopicWorker(store, ["feed"], fetch=fetch)
+    first.start()
+    assert first.poll_once() == 3
+    pages.clear()
+    again = TopicWorker(store, ["feed"], fetch=fetch)  # 再起動相当 (起動中の既読集合は空)
+    again.start()
+    assert again.poll_once() == 0
+    assert store.count("topic_cards") == 3
+    assert pages == []  # 保存済みの記事はページも読まない

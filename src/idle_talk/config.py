@@ -200,3 +200,21 @@ def load_llm_launch(path: str | Path = SETTINGS_FILE) -> LlmLaunch:
         if type(v) is not want or (want is int and v < 0):
             raise ValueError(f"[llm].{k} must be a {'string' if want is str else 'non-negative int'}: {v!r}")
     return LlmLaunch(**raw)
+
+
+class Topics(NamedTuple):
+    """[topics]: 話題カードを作る RSS / Atom フィード。feeds が空ならネットワークに出ない。"""
+    feeds: tuple[str, ...] = ()
+    interval_min: int = 30  # 取得間隔 (分)
+
+
+def load_topics(path: str | Path = SETTINGS_FILE) -> Topics:
+    """[topics] を読む。無ければ既定値 (取得しない)。型違い・未知キーは ValueError。"""
+    raw = _read_section(path, "topics", Topics._fields)
+    feeds = raw.get("feeds", [])
+    if type(feeds) is not list or not all(type(u) is str and u.startswith(("http://", "https://")) for u in feeds):
+        raise ValueError(f"[topics].feeds must be a list of http(s) URLs: {feeds!r}")
+    interval = raw.get("interval_min", Topics._field_defaults["interval_min"])
+    if type(interval) is not int or interval < 1:
+        raise ValueError(f"[topics].interval_min must be a positive int: {interval!r}")
+    return Topics(tuple(feeds), interval)

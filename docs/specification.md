@@ -48,7 +48,8 @@
 - 話者 ID の優先順位は `--speaker`、設定ファイル、既定値の順。M0 計測では環境変数 `AIVIS_SPEAKER` が設定ファイルより優先する。負数・非整数・`[tts]` の未知キーは `ValueError`。
 - 声パラメータは `[tts]` の `speed` / `intonation` / `tempo_dynamics` / `pitch` / `volume` / `pause` / `pre_silence` / `post_silence` で指定する (`config.VOICE_PARAMS`、`config.load_voice`)。それぞれ AudioQuery の `speedScale` / `intonationScale` / `tempoDynamicsScale` / `pitchScale` / `volumeScale` / `pauseLengthScale` / `prePhonemeLength` / `postPhonemeLength` に対応する。
 - `TtsClient` は `/audio_query` の結果を指定キーだけ上書きして `/synthesis` に渡す。未指定のキーは AivisSpeech の既定値のまま。出力は `clients.TTS_RATE`=24000Hz モノラルに固定する (`web/player.js` の再生レートと一致させる)。
-- `[tts]` は起動後も反映される。`main.TtsSettingsReloader` が合成のたびに設定ファイルの更新時刻を見て、変わっていれば話者と声パラメータを読み直す (次の発話から効く)。不正な値は警告して前の値を保つ。`--speaker` 指定時は話者を上書きしない。起動時に合成済みの相槌クリップは再起動まで前の声のまま。他のセクション (`[ports]` / `[spontaneous]` / `[llm]`) は起動時のみ読む。
+- `[tts]` は起動後も反映される。`main.TtsSettingsReloader` が合成のたびに設定ファイルの更新時刻を見て、変わっていれば話者と声パラメータを読み直す (次の発話から効く)。話者はファイルの `speaker` の値が前回と変わったときだけ反映する (声パラメータだけの編集で画面の選択を戻さない)。不正な値は警告して前の値を保つ。`--speaker` 指定時は話者を上書きしない。
+- 画面の「声」選択欄で話者を切り替えられる。`main` が起動時に AivisSpeech の `GET /speakers` (`TtsClient.speakers`、talk スタイルのみ、「話者 スタイル」表記) を取得し、`/config.json` の `speakers` と、初期値 `ui.speaker` (起動時の話者) で渡す。取得できなければ選択欄を出さない。選択は `ui` メッセージの `speaker` で送られ、`TtsSettingsReloader.set_speaker` が次の文の合成から使う。一覧に無い ID は 5006。画面での選択は保存されず、再起動で設定ファイルの値に戻る。`--speaker` 指定時も画面からは変えられる。起動時に合成済みの相槌クリップは再起動まで前の声のまま。他のセクション (`[ports]` / `[spontaneous]` / `[llm]` / `[topics]`) は起動時のみ読む。
 - 範囲は AivisSpeech Engine 1.2.0 の openapi の記載に従う (speed 0.5〜2.0、intonation / tempo_dynamics / volume 0〜2、pitch -0.15〜0.15、pause と無音長は 0 以上)。範囲外・非数値は `ValueError`。
 - 使える ID は AivisSpeech の `GET /speakers` で確認する。インストールされていない ID を指定すると、合成のたびに AivisSpeech がエラーを返す (起動時には検査しない)。
 
@@ -68,7 +69,7 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 |---|---|---|
 | `hello` | B→S | `version`(=1), `sample_rate`(=16000), `client_id`(1〜64 文字) |
 | `playback` | B→S | `epoch`, `utterance_id`, `chunk_id`, `position_ms`(0〜600000), `state`(started/finished/dropped) |
-| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM) |
+| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM), `speaker`(話者 ID) |
 | `ping` / `pong` | 双方向 | `ts` |
 | `duck` | S→B | `epoch`, `gain`(0〜1) |
 | `cancel` | S→B | `new_epoch` |
@@ -166,14 +167,14 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
   - 相槌は G1 の遅延集計から除外する。
 - 自発発話:
   - 既定はオフで、雑談モードのときだけ動く。`idle_talk.toml` の `[spontaneous]` (`on` / `interval_s` / `quiet_start` / `quiet_end` / `radio`、`config.load_spontaneous`) で起動時の値を指定する。画面の設定欄の初期値は `/config.json` の `ui` で同じ値が渡り、接続時にページが `ui` メッセージで送り返す。
-  - IDLE の沈黙が `interval_s` 秒 (既定 1200、10〜3600) 続いたら話しかける。沈黙は IDLE になった時刻 (応答の再生終了、自発発話の再生終了) から測る。`main.spontaneous_loop` が `SPONT_TICK_S`=1 秒ごとに `director.spontaneous_tick` を呼ぶ (無操作休止 `IDLE_TIMEOUT` の判定も同じ呼び出し)。自発発話の指示には `director.SPONT_TOPICS` から話題の種を 1 つ無作為に添え、前の会話と違う話題を振らせる。応答の生成上限は `clients.LLM_MAX_TOKENS`=300 (2〜4 文程度)。
+  - IDLE の沈黙が `interval_s` 秒 (既定 1200、10〜3600) 続いたら話しかける。沈黙は IDLE になった時刻 (応答の再生終了、自発発話の再生終了) から測る。`main.spontaneous_loop` が `SPONT_TICK_S`=1 秒ごとに `director.spontaneous_tick` を呼ぶ (無操作休止 `IDLE_TIMEOUT` の判定も同じ呼び出し)。自発発話の指示には話題の種を 1 つ添え、前の会話と違う話題を振らせる (`director._pick_topic`)。未使用・未期限切れの話題カードがあれば公開日時が新しいものを 1 枚使い (見出しと、タグを除いて `CARD_FACTS_MAX`=200 字に切った概要)、その場で `used_at` を記録して再利用しない。カードが無ければ `director.SPONT_TOPICS` から無作為に選ぶ。カードで話すときは履歴を直近 `CARD_TURNS`=2 件に絞り、`CARD_PROMPT` / `RADIO_CARD_PROMPT` で「前の話の情景や言い回し (天気・音など) を繰り返さない、概要に無い事実を付け足さない」と指示する (独り語りが続くと自分の言い回しを真似て同じ情景を繰り返すため)。応答の生成上限は `clients.LLM_MAX_TOKENS`=300 (2〜4 文程度)。
   - 休止時間帯 (既定 22:00〜07:00) は発話しない。
   - 無反応が続くたびに待ち時間を 2 倍に延ばす (30 秒なら 30, 60, 120…)。利用者が話すと基本値に戻る。沈黙を同意とはみなさない。
   - 利用者の操作 (発話・応答・設定変更) が `IDLE_TIMEOUT`=1800 秒無いと休止 (`rest`) に入り、自発発話も止まる。ミュートなしの `ui` (画面の「開始」による接続、設定変更) で待機に戻る (無操作・連続失敗の休止も同じ)。
   - 準備中に利用者が話し始めたら取り消す。
 - ラジオモード (`radio`、既定オフ。画面の「ラジオ」チェック): 返事を期待しない独り語り。
   - `on` がオフでも動く。1 本話し終えてから `spontaneous.RADIO_GAP_S`=3 秒の沈黙で次を話す (`interval_s` と無反応による倍増は使わない)。
-  - 指示は `director.RADIO_PROMPT` (ラジオのパーソナリティとして 3〜5 文、直前の続きか `SPONT_TOPICS` の話題、質問・呼びかけをしない)。
+  - 指示は `director.RADIO_PROMPT` (ラジオのパーソナリティとして 3〜5 文、直前の続きか話題カード / `SPONT_TOPICS` の話題、質問・呼びかけをしない)。
   - 記憶抽出中でも待たずに発火する (llama-server は 4 スロットで並行処理する)。
   - 聞き流し前提なので無操作休止 (`IDLE_TIMEOUT`) に入らない。休止時間帯は守る。利用者が話せば通常どおり取り消して応答し、応答後に再開する。
 - 質問率 `RATIO_Q`: 3 応答に 1 回以下。
@@ -192,6 +193,9 @@ DB は `<data-dir>/idle_talk.db`。WAL / synchronous=NORMAL で、書き込み�
 - 起動時に `integrity_check` を行う。正常なら `.bak` に 1 世代だけバックアップする。破損時は `.bak` から復元し、`.bak` が無ければ破損ファイルを `.corrupt` に退避して新規作成する (5004 を記録)。
 - 記憶は、根拠となる発話が無いと保存を拒否する。個別に削除できるのは `deletable=1` の行だけ。
 - 話題カードは RSS Topic Worker だけが取得する。停止中は一切ネットワークに接続しない。
+- `idle_talk.toml` の `[topics]` (`feeds`: http(s) URL の配列、`interval_min`: 取得間隔の分、既定 30。`config.load_topics`) で設定する。`feeds` が空 (既定) なら Worker を作らない。
+- `main.topic_loop` が起動直後と `interval_min` ごとに `TopicWorker.poll_once` を別スレッドで呼ぶ。見出しを `hook`、概要を `facts` に保存する。概要がタグ除去後 `SUMMARY_MIN_CHARS`=30 字未満ならリンク先ページを読み、`og:description` (無ければ `description`) で置き換える (`topic_worker.page_description`。charset は `<meta>` の指定で復号し、無ければ UTF-8)。取得・解析に失敗したら概要のまま保存する。Google ニュースのリンクは記事へ HTTP リダイレクトせず定型の説明文しか取れないため使わない。`expires_at` は公開から 24 時間 (`TOPIC_TTL_MS`)。同じ記事は 1 回だけ保存する (URL、無ければ見出しで DB を照合する `topics.has_card`。再起動をまたいでも重複しない)。
+- Director は状態変化を `TopicWorker.on_state` に伝える。`rest` で取得を止め、`rest` から戻ると再開する。`user_speaking` に入ると処理中の取得を打ち切る。
 
 ### events の kind
 | kind | payload | 用途 |

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_voice)
+                     load_topics, load_voice)
 from .director import IdleTalkDirector
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
@@ -26,6 +26,7 @@ from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
 from .server import serve
 from .store import Store
+from .topic_worker import TopicWorker
 from .vad import EnergyVad
 
 log = logging.getLogger("idle_talk.main")
@@ -64,13 +65,17 @@ class TtsSettingsReloader:
     """設定ファイルの更新時刻が変わったら [tts] (話者・声パラメータ) を読み直して tts に反映する。
 
     合成のたびに呼ぶので、ファイルを保存すれば再起動なしで次の発話から効く。
-    不正な値は警告して前の値を使い続ける。--speaker 指定時は話者を上書きしない。"""
+    不正な値は警告して前の値を使い続ける。--speaker 指定時は話者を上書きしない。
+    話者はファイルの speaker が変わったときだけ反映する (声パラメータの編集で画面の選択を戻さない)。"""
 
-    def __init__(self, tts: TtsClient, path: str | Path, fixed_speaker: bool = False) -> None:
+    def __init__(self, tts: TtsClient, path: str | Path, fixed_speaker: bool = False,
+                 speaker_ids: frozenset[int] = frozenset()) -> None:
         self.tts = tts
         self.path = Path(path)
         self.fixed_speaker = fixed_speaker
+        self.speaker_ids = speaker_ids  # AivisSpeech の話者一覧。空なら検査しない (一覧取得失敗時)
         self._mtime = self._stat()
+        self._file_speaker = tts.speaker
 
     def _stat(self) -> float | None:
         try:
@@ -84,14 +89,24 @@ class TtsSettingsReloader:
             return False
         self._mtime = mtime
         try:
-            speaker = self.tts.speaker if self.fixed_speaker else load_speaker(self.path)
+            speaker = self._file_speaker if self.fixed_speaker else load_speaker(self.path)
             voice = load_voice(self.path)
         except (ValueError, OSError, tomllib.TOMLDecodeError) as e:
             log.warning("tts settings not reloaded (keeping previous): %s", e)
             return False
-        self.tts.speaker, self.tts.voice = speaker, voice
-        log.info("tts settings reloaded: speaker=%d voice=%s", speaker, voice)
+        if speaker != self._file_speaker:
+            self._file_speaker = self.tts.speaker = speaker
+        self.tts.voice = voice
+        log.info("tts settings reloaded: speaker=%d voice=%s", self.tts.speaker, voice)
         return True
+
+    def set_speaker(self, speaker: int) -> None:
+        """画面で選んだ話者に切り替える。一覧に無い ID は ValueError (5006)。次の文の合成から効く。"""
+        if self.speaker_ids and speaker not in self.speaker_ids:
+            raise ValueError(f"unknown speaker: {speaker}")
+        if speaker != self.tts.speaker:
+            self.tts.speaker = speaker
+            log.info("tts speaker set from ui: %d", speaker)
 
     def synthesize(self, text: str) -> bytes:
         self.reload_if_changed()
@@ -105,9 +120,16 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     if not tts.warmup():
         log.warning("tts warmup failed: %s", args.tts_url)
     asr = AsrClient(_asr_send(args.asr_url), cfg)
-    reloader = TtsSettingsReloader(tts, args.config, fixed_speaker=args.speaker_from_cli)
-    return IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None, EnergyVad(), asr, cfg,
-                            metrics=MetricsRecorder(store), app_commit=git_commit())
+    reloader = TtsSettingsReloader(tts, args.config, fixed_speaker=args.speaker_from_cli,
+                                   speaker_ids=frozenset(s["id"] for s in args.speakers))
+    director = IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None, EnergyVad(), asr, cfg,
+                                metrics=MetricsRecorder(store), app_commit=git_commit())
+    director.set_speaker = reloader.set_speaker
+    feeds = load_topics(args.config).feeds
+    if feeds:
+        director.topic_worker = TopicWorker(store, list(feeds))
+        director.topic_worker.start()
+    return director
 
 
 def ui_defaults(cfg: Config) -> dict:
@@ -116,11 +138,12 @@ def ui_defaults(cfg: Config) -> dict:
             "quiet_start": cfg.quiet_start, "quiet_end": cfg.quiet_end}
 
 
-def start_web(port: int, ws_port: int, ui: dict | None = None, root: Path = WEB_DIR) -> ThreadingHTTPServer:
-    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポートと設定欄の初期値をブラウザへ渡す。
+def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | None = None,
+              root: Path = WEB_DIR) -> ThreadingHTTPServer:
+    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声の選択肢をブラウザへ渡す。
 
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
-    config = json.dumps({"ws_port": ws_port, "ui": ui or {}}).encode("utf-8")
+    config = json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": speakers or []}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -195,6 +218,19 @@ async def spontaneous_loop(director: IdleTalkDirector, interval_s: float = SPONT
         director.spontaneous_tick()
 
 
+async def topic_loop(worker: TopicWorker, interval_s: float,
+                     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    """起動直後と interval_s ごとにフィードを取得して話題カードを保存する。休止中は poll_once が何もしない。"""
+    while True:
+        try:
+            n = await asyncio.to_thread(worker.poll_once)
+            if n:
+                log.info("topic cards saved: %d", n)
+        except sqlite3.Error:  # 保存失敗で常駐ループを止めない (取得失敗は poll_once 内で握る)
+            log.exception("topic poll failed")
+        await sleep(interval_s)
+
+
 async def stop_watch(path: Path, stop: Callable[[], None], interval_s: float = STOP_POLL_S,
                      sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
     """path が現れたら削除して stop を呼ぶ (ctl stop からの正常終了要求)。キャンセルで終了。"""
@@ -208,7 +244,7 @@ async def stop_watch(path: Path, stop: Callable[[], None], interval_s: float = S
 
 
 async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None = None,
-               stop_file: Path | None = None) -> None:
+               stop_file: Path | None = None, topic_interval_s: float = 0) -> None:
     server, pinger = await serve(director.core, port)
     log.info("listening on 127.0.0.1:%d", port)
     sampler = ResourceSampler(director.store, clock=director.now_ms)
@@ -217,11 +253,15 @@ async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None 
     tasks = [pinger, loop.create_task(soak_loop(sampler)), loop.create_task(spontaneous_loop(director))]
     if sup is not None:
         tasks.append(loop.create_task(llm_watch(director, sup)))
+    if director.topic_worker is not None:
+        tasks.append(loop.create_task(topic_loop(director.topic_worker, topic_interval_s)))
     if stop_file is not None:
         tasks.append(loop.create_task(stop_watch(stop_file, stopped.set)))
     try:
         await stopped.wait()  # Ctrl+C はキャンセルで抜ける
     finally:
+        if director.topic_worker is not None:
+            director.topic_worker.stop()  # 取得中のフィード処理を打ち切って終了を待たせない
         for t in tasks:
             t.cancel()
         server.close()
@@ -268,10 +308,11 @@ def main(argv: list[str] | None = None) -> int:
     talk = open_talk_log(data_dir / TALK_LOG_FILE)
     try:
         cfg = Config(**load_spontaneous(args.config))
-        web = start_web(args.web_port, args.port, ui_defaults(cfg))
+        args.speakers = TtsClient(args.tts_url).speakers()  # 画面の声の選択肢。AivisSpeech 未起動なら空 (選択欄を出さない)
+        web = start_web(args.web_port, args.port, ui_defaults(cfg) | {"speaker": args.speaker}, args.speakers)
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
-        asyncio.run(_run(director, args.port, sup, stop_file))
+        asyncio.run(_run(director, args.port, sup, stop_file, load_topics(args.config).interval_min * 60))
     except KeyboardInterrupt:
         pass
     finally:
