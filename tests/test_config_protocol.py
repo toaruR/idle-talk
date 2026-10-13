@@ -321,13 +321,15 @@ def test_load_topics_rejects_invalid(tmp_path, body):
 def test_load_vad(tmp_path):
     from idle_talk.config import VadSettings, load_vad
     f = tmp_path / "s.toml"
-    assert load_vad(f) == VadSettings(500.0, 100)
-    f.write_text("[vad]\nthreshold = 800\nonset_ms = 160\n", encoding="utf-8")
-    assert load_vad(f) == VadSettings(800.0, 160)
+    assert load_vad(f) == VadSettings(500.0, 100, True, 3.0, 100.0)
+    f.write_text("[vad]\nthreshold = 800\nonset_ms = 160\nadaptive = false\nratio = 4\nmin_threshold = 50\n",
+                 encoding="utf-8")
+    assert load_vad(f) == VadSettings(800.0, 160, False, 4.0, 50.0)
 
 
 @pytest.mark.parametrize("body", ["[vad]\nthreshold = 0\n", "[vad]\nthreshold = \"500\"\n", "[vad]\nonset_ms = 10\n",
-                                  "[vad]\nonset_ms = 100.0\n", "[vad]\nonset = 100\n"])
+                                  "[vad]\nonset_ms = 100.0\n", "[vad]\nonset = 100\n", "[vad]\nadaptive = 1\n",
+                                  "[vad]\nratio = 1\n", "[vad]\nmin_threshold = -1\n"])
 def test_load_vad_rejects_invalid(tmp_path, body):
     from idle_talk.config import load_vad
     f = tmp_path / "s.toml"

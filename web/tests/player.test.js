@@ -205,6 +205,6 @@ test('client direct: pure helpers makeUi/stateLabel/makeHello/micConstraints/wsU
   assert.strictEqual(C.stateLabel({ state: 'idle', muted: true }, { idle: '待機' }), '待機 (ミュート)');
   assert.strictEqual(C.stateLabel({ state: 'x', muted: false }), 'x');
   assert.deepStrictEqual(C.makeHello('z'), { t: 'hello', version: 1, sample_rate: 16000, client_id: 'z' });
-  assert.deepStrictEqual(C.micConstraints(), { audio: { echoCancellation: true, channelCount: 1 } });
+  assert.deepStrictEqual(C.micConstraints(), { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } });
   assert.strictEqual(C.wsUrl(1), 'ws://127.0.0.1:1/ws');
 });

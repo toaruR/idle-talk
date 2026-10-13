@@ -17,7 +17,8 @@
   }
 
   function micConstraints() {
-    return { audio: { echoCancellation: true, channelCount: 1 } };
+    // AGC off: the server's VAD calibrates its threshold from the noise floor, which AGC would keep shifting.
+    return { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } };
   }
 
   function makeHello(clientId) {

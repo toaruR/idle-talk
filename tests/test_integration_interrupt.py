@@ -359,3 +359,21 @@ def test_playback_finished_during_interrupt_check_completes_after_resume(tmp_pat
             gate.set()
             store.close()
     asyncio.run(run())
+
+
+def test_vad_knows_playback_from_unreported_chunks(tmp_path):
+    """VAD の自動校正用: 現行世代の送出済みチャンクが再生終了の報告待ちの間だけ playing。"""
+    async def run():
+        d, b, store = make(tmp_path, auto_playback=False)
+        try:
+            b.speak()
+            await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            b.send_frame(b"\x00\x00" * 320)
+            assert d.ingress.vad.playing
+            for ep, utt, cid, _pcm in list(b.chunks):
+                b.playback(ep, utt, cid, "finished")
+            b.send_frame(b"\x00\x00" * 320)
+            assert not d.ingress.vad.playing
+        finally:
+            store.close()
+    asyncio.run(run())

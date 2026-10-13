@@ -56,10 +56,16 @@
 
 ### 発話検出の設定 (`[vad]`)
 
-- `threshold` (既定 500): 発話とみなすフレームの RMS (16bit PCM)。0 より大きく 32767 以下の数値。
+- `adaptive` (既定 true): 閾値を自動で決める。false なら `threshold` 固定。
+- `ratio` (既定 3.0、1 より大きく 100 以下) / `min_threshold` (既定 100): 自動校正の閾値 = 推定した雑音 × `ratio` (下限 `min_threshold`)。
+- `threshold` (既定 500): 発話とみなすフレームの RMS (16bit PCM)。0 より大きく 32767 以下の数値。自動校正では雑音の推定がそろうまで (`vad.NOISE_WARMUP_MS`=1 秒ぶんの非再生フレーム) の値。
 - `onset_ms` (既定 100): 閾値以上のフレームがこの長さ続いたら発話開始とみなす。20〜1000 の整数で、20ms (1 フレーム) 単位に切り捨てる。短い物音 (クリック・衝突音) を発話にしないため。
-- `config.load_vad` が読み、`main` が `EnergyVad(threshold, onset_frames=onset_ms // 20)` を作る。範囲外・型違い・未知キーは `ValueError`。
-- マイク音量を上げて物音で発話扱いになりすぎる場合は、`threshold` か `onset_ms` を上げる。
+- `config.load_vad` が読み、`main` が `EnergyVad` を作る。範囲外・型違い・未知キーは `ValueError`。
+- 自動校正の動き (`vad.EnergyVad`):
+  - 雑音: AI 再生中でないフレームの RMS を dB で追う。静かな方へは時定数 `NOISE_DOWN_TAU_MS`=500ms で速く、うるさい方へは `NOISE_UP_DB_PER_S`=0.5dB/秒でゆっくり (発話は断続的なので推定は雑音の床に留まる。5 秒話し続けても +2.5dB)。部屋が恒常的にうるさくなった場合は追いつくまで時間がかかり、その間は発話区間が終わりにくい。
+  - 回り込み: AI 再生中のフレームの RMS を時定数 `ECHO_TAU_MS`=2 秒で平均し、再生中の閾値を「回り込み × `ratio`」以上に上げる。値は再生をまたいで保つ (最初の再生の数秒は低めになり得るが、割り込み判定の自声除外・雑音判定で補う)。再生中の利用者の声も平均に入る。
+  - 「再生中」は、現行 epoch の送出済みチャンクが `finished` / `dropped` の報告待ちである間 (Director が上り音声を受けるたびに `vad.playing` を設定)。
+- 物音で発話扱いになりすぎる場合は `ratio` か `onset_ms` を上げ、声を拾わない場合は `ratio` を下げる。
 
 ## WebSocket プロトコル (設計書 §12.1)
 
@@ -255,7 +261,7 @@ DB は `<data-dir>/idle_talk.db`。WAL / synchronous=NORMAL で、書き込み�
 
 ## ブラウザ (web/)
 
-- `index.html` + `client.js`: WS の接続・再接続と state / error の表示、設定欄 (ミュート・自発発話・ラジオ・間隔・休止時間帯・声)。接続先ポートは `?port=`、無ければ配信元の `/config.json` の `ws_port`。マイクは `echoCancellation: true`・モノラルで取る。
+- `index.html` + `client.js`: WS の接続・再接続と state / error の表示、設定欄 (ミュート・自発発話・ラジオ・間隔・休止時間帯・声)。接続先ポートは `?port=`、無ければ配信元の `/config.json` の `ws_port`。マイクは `echoCancellation: true`・`noiseSuppression: true`・`autoGainControl: false`・モノラルで取る (AGC は VAD の自動校正の雑音推定を乱すため切る)。
 - `worklet.js`: AudioWorklet で 16kHz mono s16le の 20ms フレームに区切り、u32 の連番を付ける。実レートが 16kHz でなければ変換する。
 - `player.js`: epoch ごとの再生、`duck` / `cancel` / `resume` の処理、`playback` の通知。旧 epoch のチャンクは再生しない。PCM は 24kHz として再生する (`DEFAULT_PCM_RATE`、`clients.TTS_RATE` と一致)。再生中 1 + 先読み `MAX_LOOKAHEAD`=1 チャンクを超えて届いたチャンクは `dropped` で捨てる。
 - 下りのフロー制御: Director は送出済みで `finished` / `dropped` 未報告のチャンクを再生中 1 + `DOWN_LOOKAHEAD`=1 までに抑え、報告を待って次を送る (`director._flush_down`)。`dropped` も再生終了として扱う (待ち続けると完了判定が来ず、応答・自発発話が止まるため)。

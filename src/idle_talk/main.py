@@ -124,7 +124,8 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                    speaker_ids=frozenset(s["id"] for s in args.speakers))
     vad = load_vad(args.config)
     director = IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None,
-                                EnergyVad(vad.threshold, onset_frames=vad.onset_ms // FRAME_MS), asr, cfg,
+                                EnergyVad(vad.threshold, onset_frames=vad.onset_ms // FRAME_MS, adaptive=vad.adaptive,
+                                          ratio=vad.ratio, min_threshold=vad.min_threshold), asr, cfg,
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
     feeds = load_topics(args.config).feeds

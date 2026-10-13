@@ -164,3 +164,43 @@ def test_onset_frames_ignore_short_click_and_keep_speech_head():
     for f in (quiet, loud, loud, loud):
         ing.feed(f)
     assert d.ctx.state is State.USER_SPEAKING and bytes(ing._buf) == loud * 3  # 開始判定前の 2 フレームも区間に含む
+
+
+def _tone(amp):
+    return struct.pack("<h", amp) * 320
+
+
+def test_adaptive_threshold_follows_noise_floor():
+    v = EnergyVad(threshold=500, hangover_frames=3, adaptive=True, ratio=3.0, min_threshold=100)
+    assert v.current_threshold == 500  # 推定がそろうまでは固定値
+    for _ in range(100):  # 2 秒の雑音 (RMS 200)
+        assert v.process(_tone(200)) is None
+    assert abs(v.current_threshold - 600) < 1  # 200 x 3
+    assert v.process(_tone(500)) is None  # 固定値なら発話扱いの音も、雑音が大きい部屋では発話にしない
+    assert v.process(_tone(2000)) == SPEECH_START
+    v2 = EnergyVad(threshold=500, adaptive=True, ratio=3.0, min_threshold=100)
+    for _ in range(100):  # 静かな部屋では下限まで下がる
+        v2.process(_tone(10))
+    assert v2.current_threshold == 100
+
+
+def test_adaptive_noise_floor_rises_slowly_during_speech():
+    v = EnergyVad(threshold=500, hangover_frames=1000, adaptive=True)
+    for _ in range(100):
+        v.process(_tone(100))
+    for _ in range(250):  # 5 秒話し続けても雑音の推定は 2.5dB しか上がらない
+        v.process(_tone(3000))
+    assert v.current_threshold < 300 * 10 ** (3 / 20)
+
+
+def test_adaptive_playing_threshold_uses_echo_level():
+    v = EnergyVad(threshold=500, hangover_frames=3, adaptive=True, ratio=3.0, min_threshold=100)
+    for _ in range(100):
+        v.process(_tone(50))
+    assert abs(v.current_threshold - 150) < 1
+    v.playing = True
+    for _ in range(300):  # 再生中の回り込み (RMS 400) は雑音の推定に混ぜない
+        v.process(_tone(400))
+    assert abs(v.current_threshold - 1200) < 1  # 400 x 3
+    v.playing = False
+    assert abs(v.current_threshold - 150) < 1

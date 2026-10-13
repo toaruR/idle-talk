@@ -221,18 +221,31 @@ def load_topics(path: str | Path = SETTINGS_FILE) -> Topics:
 
 
 class VadSettings(NamedTuple):
-    """[vad]: 発話検出 (vad.EnergyVad)。マイク音量を上げて物音で止まるなら threshold か onset_ms を上げる。"""
-    threshold: float = 500.0  # 発話とみなすフレーム RMS (16bit PCM)
-    onset_ms: int = 100       # この長さ音が続いたら発話開始 (短い物音を無視する)。20ms 単位に切り捨て
+    """[vad]: 発話検出 (vad.EnergyVad)。物音で発話扱いになりすぎるなら ratio (自動校正時) か onset_ms を上げる。"""
+    threshold: float = 500.0     # 発話とみなすフレーム RMS (16bit PCM)。自動校正時は推定がそろうまでの値
+    onset_ms: int = 100          # この長さ音が続いたら発話開始 (短い物音を無視する)。20ms 単位に切り捨て
+    adaptive: bool = True        # 閾値を周囲の雑音と再生中の回り込みから自動で決める
+    ratio: float = 3.0           # 自動校正の閾値 = 推定した雑音 (再生中は回り込み) x ratio
+    min_threshold: float = 100.0  # 自動校正の閾値の下限
+
+
+_VAD_RANGES = {"threshold": (0.0, 32767.0), "ratio": (1.0, 100.0), "min_threshold": (0.0, 32767.0)}
 
 
 def load_vad(path: str | Path = SETTINGS_FILE) -> VadSettings:
     """[vad] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
     raw = _read_section(path, "vad", VadSettings._fields)
-    t = raw.get("threshold", VadSettings._field_defaults["threshold"])
-    if type(t) not in (int, float) or not 0 < t <= 32767:
-        raise ValueError(f"[vad].threshold must be a number in (0, 32767]: {t!r}")
-    onset = raw.get("onset_ms", VadSettings._field_defaults["onset_ms"])
-    if type(onset) is not int or not 20 <= onset <= 1000:
-        raise ValueError(f"[vad].onset_ms must be an int in [20, 1000]: {onset!r}")
-    return VadSettings(float(t), onset)
+    out = dict(VadSettings._field_defaults)
+    for k, v in raw.items():
+        if k in _VAD_RANGES:
+            lo, hi = _VAD_RANGES[k]
+            if type(v) not in (int, float) or not lo < v <= hi:
+                raise ValueError(f"[vad].{k} must be a number in ({lo:g}, {hi:g}]: {v!r}")
+            v = float(v)
+        elif k == "onset_ms":
+            if type(v) is not int or not 20 <= v <= 1000:
+                raise ValueError(f"[vad].onset_ms must be an int in [20, 1000]: {v!r}")
+        elif type(v) is not bool:
+            raise ValueError(f"[vad].{k} must be bool: {v!r}")
+        out[k] = v
+    return VadSettings(**out)

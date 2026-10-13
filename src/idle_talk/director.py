@@ -324,6 +324,8 @@ class IdleTalkDirector:
     def _on_up_audio(self, seq: int, pcm: bytes) -> None:
         if not self.core.hello_done:
             return
+        cur = self.epoch.current  # 再生中 = 現行世代の送出済みチャンクが再生終了の報告待ち (VAD の自動校正が使う)
+        self.ingress.vad.playing = any(k[0] == cur for k in self._down_sent)
         for i in range(0, len(pcm), FRAME_BYTES):
             before, was_speaking = self.fsm.ctx.state, self.ingress._buf is not None
             self.ingress.feed(pcm[i:i + FRAME_BYTES])
