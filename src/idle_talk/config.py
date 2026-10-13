@@ -220,6 +220,28 @@ def load_topics(path: str | Path = SETTINGS_FILE) -> Topics:
     return Topics(tuple(feeds), interval)
 
 
+class Search(NamedTuple):
+    """[search]: 利用者の質問に答えるための Web 検索。on でなければネットワークに出ない。"""
+    on: bool = False
+    engines: tuple[str, ...] = ("duckduckgo", "bing")  # 先頭から試し、失敗・0 件なら次へ
+    read_page: bool = True  # 上位 1 件のページ本文を r.jina.ai で読んで添える
+
+
+SEARCH_ENGINES = ("duckduckgo", "bing")
+
+
+def load_search(path: str | Path = SETTINGS_FILE) -> Search:
+    """[search] を読む。無ければ既定値 (検索しない)。型違い・未知キー・未知のエンジンは ValueError。"""
+    raw = _read_section(path, "search", Search._fields)
+    for k in ("on", "read_page"):
+        if k in raw and type(raw[k]) is not bool:
+            raise ValueError(f"[search].{k} must be bool: {raw[k]!r}")
+    engines = raw.get("engines", list(Search._field_defaults["engines"]))
+    if type(engines) is not list or not engines or not all(e in SEARCH_ENGINES for e in engines):
+        raise ValueError(f"[search].engines must be a non-empty list of {list(SEARCH_ENGINES)}: {engines!r}")
+    return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True))
+
+
 class VadSettings(NamedTuple):
     """[vad]: 発話検出 (vad.EnergyVad)。物音で発話扱いになりすぎるなら ratio (自動校正時) か onset_ms を上げる。"""
     threshold: float = 500.0     # 発話とみなすフレーム RMS (16bit PCM)。自動校正時は推定がそろうまでの値

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_topics, load_vad, load_voice)
+                     load_search, load_topics, load_vad, load_voice)
 from .director import IdleTalkDirector
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
@@ -27,6 +27,7 @@ from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
 from .server import serve
 from .store import Store
 from .topic_worker import TopicWorker
+from .web_search import WebSearch
 from .vad import FRAME_MS, EnergyVad
 
 log = logging.getLogger("idle_talk.main")
@@ -132,6 +133,9 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     if feeds:
         director.topic_worker = TopicWorker(store, list(feeds))
         director.topic_worker.start()
+    search = load_search(args.config)
+    if search.on:
+        director.web_search = WebSearch(engines=search.engines, read_page=search.read_page)
     return director
 
 

@@ -92,7 +92,13 @@
         return c ? this.pushChunk(c) : false;
       },
       cancel(newEpoch) {
-        if (newEpoch > minEpoch) minEpoch = newEpoch;
+        if (newEpoch > minEpoch) {
+          minEpoch = newEpoch;
+          // duck は旧世代の再生に対するもの。戻さないと次の発話以降も小さい音量のままになる
+          ducked = false;
+          gain = 1.0;
+          sink.setGain(gain);
+        }
         const keep = [];
         for (const c of queue) {
           if (c.epoch < minEpoch) report(c, 'dropped', positionMs());

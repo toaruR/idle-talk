@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><title>idle-talk</title></head>
 <body>
 <h1>idle-talk</h1>
-<p>状態: <span id="state">未接続</span></p>
+<p>状態: <span id="state">未接続</span> <span id="search"></span></p>
 <p id="error" role="alert"></p>
 <button id="start">開始</button>
 <fieldset>
@@ -76,6 +76,7 @@
         port, WebSocketCtor: WebSocket, player,
         onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); },
         onError: (m) => { $('error').textContent = `[${m.code}] ${m.message}`; },
+        onSearch: (m) => { $('search').textContent = m.active ? `(Web で「${m.query}」を調べています…)` : ''; },
         onOpen: pushUi, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
       });
       await C.startCapture({

@@ -38,9 +38,9 @@
     return msg.muted ? `${label} (ミュート)` : label;
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onOpen(), clientId }
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onOpen(), clientId }
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError, onOpen } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onSearch, onOpen } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
     const ws = new WebSocketCtor(wsUrl(port));
     ws.binaryType = 'arraybuffer';
@@ -59,6 +59,7 @@
       if (msg.t === 'ping') sendJson({ t: 'pong', ts: msg.ts });
       else if (msg.t === 'state') { if (onState) onState(msg); }
       else if (msg.t === 'error') { if (onError) onError(msg); }
+      else if (msg.t === 'search') { if (onSearch) onSearch(msg); }
       else if (player) player.handleMessage(msg);
     };
 

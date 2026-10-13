@@ -80,6 +80,17 @@ test('duck sets gain 0.2, resume restores 1.0, position never decreases', () => 
   assert.strictEqual(m.played.length, 1); // not restarted
 });
 
+test('cancel after duck restores gain for the next utterance', () => {
+  const m = mk();
+  m.player.pushBinary(chunkBytes(1, 1, 0));
+  m.player.handleMessage({ t: 'duck', epoch: 1, gain: P.DUCK_GAIN });
+  m.player.handleMessage({ t: 'cancel', new_epoch: 2 });
+  assert.strictEqual(m.player.ducked, false);
+  assert.strictEqual(m.sink.gain, 1.0);
+  m.player.pushBinary(chunkBytes(2, 2, 0));
+  assert.strictEqual(m.sink.gain, 1.0);
+});
+
 test('lookahead is at most one chunk', () => {
   const m = mk();
   assert.ok(m.player.pushBinary(chunkBytes(1, 1, 0)));

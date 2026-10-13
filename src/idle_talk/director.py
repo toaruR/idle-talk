@@ -170,6 +170,7 @@ class IdleTalkDirector:
         self._mem_stop = threading.Event()  # 取消時に抽出スレッドの LLM 受信を打ち切る (llama-server を応答に譲る)
         self.set_speaker: Callable[[int], None] | None = None  # 画面で選んだ話者 ID を TTS へ (main が結線)
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
+        self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -620,7 +621,7 @@ class IdleTalkDirector:
         me = asyncio.current_task()
         ep = self.epoch.current
         try:
-            await self.pipeline.respond(messages)
+            await self.pipeline.respond(messages, search=self.web_search)
         except asyncio.CancelledError:  # 準備中の再発話で生成が取り消された: 旧世代の結果は破棄扱い (E15)
             self.pipeline._discard(ep, "<cancelled generation>")
             raise
