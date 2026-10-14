@@ -104,7 +104,9 @@
     $(id).addEventListener('change', pushUi);
   }
 
+  // 押し直すとマイク取り込み・接続が二重になる (前の分を止めない) ので、押したら無効にし、失敗したときだけ戻す
   $('start').addEventListener('click', async () => {
+    $('start').disabled = true;
     try {
       const actx = new AudioContext();
       const port = new URLSearchParams(location.search).get('port') || String((await serverConfig).ws_port);
@@ -127,6 +129,9 @@
       $('drama').disabled = false;
     } catch (e) {
       $('error').textContent = String(e);
+      if (client) client.close();
+      client = null;
+      $('start').disabled = false;
     }
   });
 
