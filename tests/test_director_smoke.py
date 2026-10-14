@@ -126,7 +126,7 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
     monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None, stop_file=None, topic_interval_s=0: seen.update(run_port=port) or asyncio.sleep(0))
-    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui, speakers: seen.update(web=(port, ws_port), ui=ui))
+    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui, speakers, personas=None: seen.update(web=(port, ws_port), ui=ui))
     monkeypatch.setattr(main_mod.TtsClient, "speakers", lambda self: [])
     f = tmp_path / "s.toml"
     f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\nweb = 9004\n"
@@ -139,7 +139,7 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
     assert seen["speaker"] == 42
     assert seen["web"] == (9004, 9000)
     assert seen["ui"] == {"on": True, "radio": False, "interval_s": 30, "quiet_start": "22:00", "quiet_end": "07:00",
-                          "speaker": 42}
+                          "speaker": 42, "persona": "default"}
     assert main_mod.main(base + ["--port", "7000", "--llm-url", "http://h:1", "--speaker", "7"]) == 0
     assert seen["run_port"] == 7000 and seen["llm_url"] == "http://h:1" and seen["speaker"] == 7
     assert main_mod.main(base + ["--web-port", "7001"]) == 0
@@ -156,7 +156,8 @@ def test_start_web_serves_dir_and_ws_port(tmp_path):
         c.request("GET", "/config.json")
         r = c.getresponse()
         assert (r.status, json.loads(r.read())) == (200, {"ws_port": 9123, "ui": {"on": True},
-                                                          "speakers": [{"id": 1, "name": "a b"}]})
+                                                          "speakers": [{"id": 1, "name": "a b"}],
+                                                          "personas": []})
         c.request("GET", "/")
         r = c.getresponse()
         assert (r.status, r.read(), r.getheader("Cache-Control")) == (200, b"hi", "no-cache")

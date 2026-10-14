@@ -23,6 +23,7 @@ from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
+from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
 from .server import serve
@@ -130,6 +131,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                           ratio=vad.ratio, min_threshold=vad.min_threshold), asr, cfg,
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
+    director.personas = args.personas
     director.drama = DramaListener(load_drama(args.config), EnergyVad(adaptive=True, ratio=vad.ratio,
                                                                       onset_frames=vad.onset_ms // FRAME_MS,
                                                                       min_threshold=vad.min_threshold),
@@ -170,11 +172,12 @@ def ui_defaults(cfg: Config) -> dict:
 
 
 def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | None = None,
-              root: Path = WEB_DIR) -> ThreadingHTTPServer:
-    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声の選択肢をブラウザへ渡す。
+              root: Path = WEB_DIR, personas: list[dict] | None = None) -> ThreadingHTTPServer:
+    """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声とペルソナの選択肢をブラウザへ渡す。
 
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
-    config = json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": speakers or []}).encode("utf-8")
+    config = json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": speakers or [],
+                         "personas": personas or []}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -355,7 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = Config(**load_spontaneous(args.config))
         args.speakers = TtsClient(args.tts_url).speakers()  # 画面の声の選択肢。AivisSpeech 未起動なら空 (選択欄を出さない)
-        web = start_web(args.web_port, args.port, ui_defaults(cfg) | {"speaker": args.speaker}, args.speakers)
+        # personas.toml は設定ファイルと同じフォルダから読む。無ければ既定の 1 人だけ (選択欄を出さない)
+        args.personas = PersonaBook(Path(args.config).with_name(PERSONAS_FILE))
+        web = start_web(args.web_port, args.port,
+                        ui_defaults(cfg) | {"speaker": args.speaker, "persona": args.personas.current_id},
+                        args.speakers, personas=args.personas.choices())
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
         asyncio.run(_run(director, args.port, sup, stop_file, load_topics(args.config).interval_min * 60))

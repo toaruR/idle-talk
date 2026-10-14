@@ -332,6 +332,77 @@ def test_unheard_reaction_stays_silent(tmp_path):
     asyncio.run(run())
 
 
+def test_digest_and_finale_material():
+    clock = FakeClock()
+    dl = listener(clock, digest_chars=10, finale_gap_s=30, finale_min_chars=10, window_s=30)
+    dl.start()
+    assert not dl.should_finale()  # 何も聞いていない
+    dl.add_line("一二三四五")
+    assert not dl.should_digest()
+    dl.add_line("六七八九十")
+    assert dl.should_digest()  # digest_chars ちょうど
+    dl.add_note("兄が弟を疑った。", 2)
+    assert dl.undigested == [] and dl.notes == ["兄が弟を疑った。"]
+    dl.add_line("最後の台詞")
+    clock.advance(31)  # window_s を過ぎて台詞は捨てても、メモと未要約の台詞は残る
+    assert dl.context_text() == ""
+    assert dl.finale_material() == ("兄が弟を疑った。", "最後の台詞")
+    clock.advance(-1.001)
+    assert not dl.should_finale()  # finale_gap_s 未満
+    clock.advance(0.001)
+    assert dl.should_finale()  # ちょうど
+    dl.mark_finale()
+    assert not dl.should_finale() and dl.notes == [] and dl.undigested == []
+
+
+def test_finale_needs_enough_dialogue():
+    clock = FakeClock()
+    dl = listener(clock, finale_gap_s=30, finale_min_chars=11)
+    dl.add_line("一二三四五六七八九十")
+    clock.advance(30)
+    assert not dl.should_finale()  # finale_min_chars 未満 (少し聞いて止めただけ)
+    dl.add_line("十一")
+    clock.advance(30)
+    assert dl.should_finale()
+
+
+def test_notes_capped():
+    dl = listener(FakeClock())
+    for i in range(30):
+        dl.add_note(f"{i:02d}" + "あ" * 98, 0)
+    assert sum(map(len, dl.notes)) <= 1200 and dl.notes[-1].startswith("29")
+
+
+def test_finale_after_long_silence(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["兄が弟を疑った。", "最後は泣けたね。あなたはどうだった？"],
+                           ["犯人はお前だ、そうだろう。", "違う、俺じゃない。"])
+        d.drama = DramaListener(SETTINGS._replace(digest_chars=10, finale_gap_s=120, finale_min_chars=10),
+                                EnergyVad(), 200, d.clock_)
+        drama_on(d, b)
+        drama_speak(b)
+        await until(lambda: d.drama.lines)
+        assert d.spontaneous_tick() is None  # 台詞が溜まったので裏でメモに要約する
+        await until(lambda: d.drama.notes)
+        assert d.drama.notes == ["兄が弟を疑った。"] and d.drama.undigested == []
+        assert [m["role"] for m in d.seen_[0]] == ["user"]  # 要約に人物設定は使わない
+        drama_speak(b)
+        await until(lambda: len(d.drama.lines) == 2)
+        d.drama.mark_reacted()  # 一言は言い終えたことにする
+        d.clock_.advance(119)
+        assert d.spontaneous_tick() is None
+        d.clock_.advance(1)
+        assert d.spontaneous_tick() == "drama_finale"
+        await until(lambda: not d.spontaneous.pending)
+        prompt = d.seen_[1][-1]["content"]
+        assert "兄が弟を疑った" in prompt and "違う、俺じゃない" in prompt and "犯人はお前だ" not in prompt
+        ai = store.query("SELECT text FROM turns WHERE role='ai'")
+        assert [r[0] for r in ai] == ["最後は泣けたね。あなたはどうだった？"]
+        d.clock_.advance(600)
+        assert d.spontaneous_tick() is None  # 新しい台詞を聞くまで繰り返さない
+    asyncio.run(run())
+
+
 def test_drama_off_cancels_pending_reaction(tmp_path):
     async def run():
         d, b, _ = make(tmp_path, ["びっくりした！"], ["犯人はお前だ、そうだろう。"])

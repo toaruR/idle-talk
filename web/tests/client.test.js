@@ -7,6 +7,10 @@ test('makeUi: drama is passed through', () => {
   assert.deepEqual(C.makeUi({ drama: true, mute: false, other: 1 }), { t: 'ui', mute: false, drama: true });
 });
 
+test('makeUi: persona is passed through', () => {
+  assert.deepEqual(C.makeUi({ persona: 'haru' }), { t: 'ui', persona: 'haru' });
+});
+
 test('displayConstraints: tab audio without browser processing', () => {
   const c = C.displayConstraints();
   assert.equal(c.video, true); // Chrome は映像なしの共有を受け付けない

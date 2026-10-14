@@ -32,6 +32,7 @@ from .ingress import Ingress
 from .interrupt import judge
 from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, parse_extracted, remember
 from .metrics import MetricsRecorder
+from .persona import PersonaBook
 from .pipeline import ResponsePipeline
 from .protocol import is_drama, pack_down_chunk
 from .server import WsCore
@@ -45,9 +46,6 @@ from .web_search import link_items
 
 log = logging.getLogger("idle_talk.director")
 
-SYSTEM_PROMPT = ("あなたは気さくな日本語の雑談相手です。話し言葉で 2〜4 文ほど自然に返答してください。"
-                 "相づちだけで終わらせず、自分の感想や小さな体験談を添え、ときどき質問や関連する新しい話題を自分から振ってください。"
-                 "箇条書きや記号は使わないでください。")
 # 自発発話で振る話題の種。毎回ランダムに 1 つ渡して、同じ話題の繰り返しを避ける。
 SPONT_TOPICS = ("最近の天気や季節", "食べ物や料理", "休日の過ごし方", "最近気になっていること", "子どもの頃の思い出",
                 "好きな音楽や映画", "旅行してみたい場所", "ちょっとした豆知識", "動物や生き物", "今日あったこと",
@@ -82,6 +80,16 @@ DRAMA_PROMPT = ("一緒にドラマを見ています。今の場面の台詞 (�
                 "つぶやいてください。驚き・ツッコミ・心配・笑いなど、気持ちを素直に。"
                 "台詞の繰り返しや説明はせず、質問もしないでください。"
                 "台詞が聞き取れず意味が分からないときだけ『なし』とだけ出力してください。")
+# window_s を過ぎた台詞は捨てるので、長い無音での感想に備えて裏で少しずつ要約しておく (人物設定は使わない)
+DIGEST_PROMPT = ("次はドラマの台詞の音声認識結果です (誤りを含みます):\n{lines}\n\n"
+                 "この場面で起きた出来事を 60 字以内の 1〜2 文で要約してください。台詞に無いことは補わないでください。"
+                 "意味が分からなければ『なし』とだけ出力してください。")
+DRAMA_FINALE_PROMPT = ("一緒にドラマを見ていて、台詞がしばらく途切れました (見終わったか一時停止したところです)。\n"
+                       "ここまでのあらすじメモ (自動要約なので誤りを含みます):\n{notes}\n\n"
+                       "最後のあたりの台詞 (音声認識なので誤りを含みます):\n{rest}\n\n"
+                       "一緒に見ていた友人として、ここまでの総合的な感想を 2〜4 文で話してください。"
+                       "印象に残った場面や登場人物への気持ちを素直に。あらすじの説明や台詞の繰り返しはせず、"
+                       "最後に利用者の感想を軽く尋ねてください。")
 
 
 def _alnum(text: str) -> str:
@@ -186,6 +194,7 @@ class IdleTalkDirector:
         self._mem_task: asyncio.Task | None = None
         self._mem_stop = threading.Event()  # 取消時に抽出スレッドの LLM 受信を打ち切る (llama-server を応答に譲る)
         self.set_speaker: Callable[[int], None] | None = None  # 画面で選んだ話者 ID を TTS へ (main が結線)
+        self.personas = PersonaBook()  # ペルソナ (設計書 6.6)。main が personas.toml を読んだものに差し替える
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
         self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
         # 話者識別 (設計書 6.4)。enable_voice_id で有効にする
@@ -201,6 +210,8 @@ class IdleTalkDirector:
         self.drama_on = False
         self._drama_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drama-asr")
         self._drama_uid = 0
+        self._digest_task: asyncio.Task | None = None  # 台詞をあらすじメモに要約する裏の LLM 呼び出し
+        self._digest_stop = threading.Event()
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -387,6 +398,11 @@ class IdleTalkDirector:
         if "speaker" in settings and self.set_speaker is not None:
             try:
                 self.set_speaker(settings["speaker"])
+            except ValueError as e:
+                self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
+        if "persona" in settings:
+            try:
+                self.personas.select(settings["persona"])
             except ValueError as e:
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
         if bool(settings.get("drama")) != self.drama_on:
@@ -608,6 +624,7 @@ class IdleTalkDirector:
         if self.spontaneous.pending:
             self._cancel_spontaneous()
         self._cancel_memory()
+        self._cancel_digest()
 
     def _cancel_spontaneous(self) -> None:
         self._spont_hold = False
@@ -681,6 +698,7 @@ class IdleTalkDirector:
         if on:
             self.drama.start()
         else:
+            self._cancel_digest()
             self.drama.stop()
             if self.spontaneous.pending and self._spont_task is not None:  # 作りかけ・再生中の一言も取消す
                 self._cancel_spontaneous()
@@ -725,7 +743,21 @@ class IdleTalkDirector:
 
     def _drama_tick(self, idle: bool) -> str | None:
         listening = self.core.conn is not None and self.core.hello_done
-        if not (listening and idle and not self.spontaneous.pending and self.drama.should_react()):
+        if not (listening and idle and not self.spontaneous.pending):
+            return None
+        if self.drama.should_finale():  # 台詞が長く途切れた: 見終わった (一時停止) とみなし、それまでの感想を話す
+            self._cancel_digest()  # まだ要約していない台詞は感想の材料にそのまま渡す
+            notes, rest = self.drama.finale_material()
+            self.drama.mark_finale()
+            self.spontaneous.pending = True
+            self._bc_record("drama_finale", {"notes": len(notes), "rest": len(rest)})
+            self._gen_done = False
+            self._spont_task = asyncio.get_running_loop().create_task(self._drama_finale(notes, rest))
+            return "drama_finale"
+        if not self.drama.should_react():
+            if self.drama.should_digest() and (self._digest_task is None or self._digest_task.done()):
+                self._digest_stop = threading.Event()
+                self._digest_task = asyncio.get_running_loop().create_task(self._drama_digest(self._digest_stop))
             return None
         scene = self.drama.scene_text()  # 前の一言以降の台詞
         self.drama.mark_reacted()
@@ -737,7 +769,7 @@ class IdleTalkDirector:
 
     async def _drama_respond(self, scene: str) -> None:
         me = asyncio.current_task()
-        messages = [{"role": "system", "content": SYSTEM_PROMPT},
+        messages = [{"role": "system", "content": self.personas.system_prompt()},
                     {"role": "user", "content": DRAMA_PROMPT.format(scene=scene)}]
         stop = threading.Event()
         try:
@@ -768,6 +800,37 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
+    async def _drama_finale(self, notes: str, rest: str) -> None:
+        messages = [{"role": "system", "content": self.personas.system_prompt()},
+                    {"role": "user", "content": DRAMA_FINALE_PROMPT.format(notes=notes or "(なし)", rest=rest or "(なし)")}]
+        self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
+        me = asyncio.current_task()
+        await self.pipeline.respond(messages)
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        self._gen_done = True
+        self._check_done()
+
+    async def _drama_digest(self, stop: threading.Event) -> None:
+        """溜まった台詞をあらすじメモに要約する。失敗・取消なら台詞を残して次の tick で再試行する。"""
+        lines = list(self.drama.undigested)
+        try:
+            text = await asyncio.to_thread(self._collect, [{"role": "user", "content": DIGEST_PROMPT.format(
+                lines="\n".join(lines))}], stop)
+        except Exception as e:  # noqa: BLE001  メモが 1 つ欠けても感想は言える
+            log.warning("drama digest failed: %s", e)
+            return
+        if text is None or asyncio.current_task() is not self._digest_task or not self.drama_on:
+            return
+        note = text.strip().split("\n")[0].strip()
+        self.drama.add_note("" if _alnum(note).startswith("なし") else note, len(lines))
+        log.info("drama digest: %d lines -> %d chars (notes %d)", len(lines), len(note), len(self.drama.notes))
+
+    def _cancel_digest(self) -> None:
+        self._digest_stop.set()
+        if self._digest_task is not None and not self._digest_task.done():
+            self._digest_task.cancel()
+
     def _pick_topic(self) -> tuple[str, dict | None]:
         """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
         cards = select_cards(self.store, self.now_ms(), limit=2)
@@ -785,7 +848,7 @@ class IdleTalkDirector:
         """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。"""
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in history_window(self.store, self.cfg) if t["text"]]
-        system = SYSTEM_PROMPT + memory_prompt(self.store) + self._speaker_section(ask)
+        system = self.personas.system_prompt() + memory_prompt(self.store) + self._speaker_section(ask)
         lines = self.drama.context_text() if self.drama_on else ""
         if lines:
             system += DRAMA_CONTEXT_PROMPT.format(lines=lines)

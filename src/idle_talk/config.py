@@ -301,10 +301,14 @@ class Drama(NamedTuple):
     min_chars: int = 60     # 前の一言から溜まった台詞がこれ未満なら黙る
     ctx_chars: int = 1200   # LLM に渡す台詞の上限字数 (古い方から捨てる)
     max_seg_s: int = 15     # 1 区間の上限。BGM 等で区間が終わらなくても切って認識に回す
+    finale_gap_s: int = 60  # 台詞がこれだけ聞こえなければ見終わった (一時停止) とみなし、それまでの感想を話す
+    finale_min_chars: int = 600  # 前の感想 (または開始) から聞いた台詞がこれ未満なら感想は言わない
+    digest_chars: int = 800  # 台詞がこれだけ溜まったら裏であらすじメモに要約する (window_s を過ぎても話を覚えておく)
 
 
 _DRAMA_RANGES = {"interval_s": (10, 3600), "gap_ms": (500, 30000), "window_s": (30, 1800),
-                 "min_chars": (0, 2000), "ctx_chars": (100, 4000), "max_seg_s": (3, 60)}
+                 "min_chars": (0, 2000), "ctx_chars": (100, 4000), "max_seg_s": (3, 60),
+                 "finale_gap_s": (10, 1800), "finale_min_chars": (0, 20000), "digest_chars": (100, 2000)}
 
 
 def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:

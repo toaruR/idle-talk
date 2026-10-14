@@ -2,6 +2,7 @@
 
 FSM には触れない純ロジック (ドラマの台詞は利用者の発話ではない)。認識と再生は Director が行う。
 台詞はメモリにだけ置き、window_s を過ぎたものとモードを止めたときに捨てる (保存も外部送信もしない)。
+window_s より前の話は、裏で要約したあらすじメモ (notes) として覚えておき、長い無音での感想に使う。
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from .vad import BYTES_PER_MS, SPEECH_END, SPEECH_START, Vad
 # マイクの認識結果のうち、これだけの割合 (かつ ECHO_MIN_CHARS 字以上) が直近の台詞と連続して一致したら回り込みとみなす
 ECHO_RATIO = 0.6
 ECHO_MIN_CHARS = 4
+NOTES_MAX_CHARS = 1200  # あらすじメモの上限字数。超えたら古いメモから捨てる (ctx 4k に収める)
 
 
 def _alnum(text: str) -> str:
@@ -34,6 +36,10 @@ class DramaListener:
         self._last_end: float | None = None  # 最後の音声区間が終わった時刻
         self._last_react = clock()
         self._new_chars = 0  # 前の一言から溜まった台詞の字数
+        self.notes: list[str] = []  # あらすじメモ (古い順)
+        self.undigested: list[str] = []  # まだメモに要約していない台詞 (window_s で捨てない)
+        self._last_line: float | None = None  # 最後に台詞を認識した時刻
+        self._heard_chars = 0  # 前の感想 (または開始) から聞いた台詞の字数
 
     # ---- 音声 ----
     def feed(self, frame: bytes) -> bytes | None:
@@ -58,6 +64,11 @@ class DramaListener:
             return
         self.lines.append((self.clock(), text))
         self._new_chars += len(text)
+        self._heard_chars += len(text)
+        self._last_line = self.clock()
+        self.undigested.append(text)
+        while sum(map(len, self.undigested)) > 4 * self.s.digest_chars:  # 要約が追いつかない: 古い方から捨てる
+            self.undigested.pop(0)
         self._prune()
 
     def _prune(self) -> None:
@@ -100,6 +111,35 @@ class DramaListener:
         """前の一言 (または開始) 以降の台詞。ctx_chars を超える分は古い方から捨てる。"""
         return self.context_text(since=self._last_react)
 
+    # ---- あらすじメモと感想 ----
+    def should_digest(self) -> bool:
+        return sum(map(len, self.undigested)) >= self.s.digest_chars
+
+    def add_note(self, note: str, used: int) -> None:
+        """要約に使った先頭 used 件の台詞を消し、メモを足す (空なら足さない)。NOTES_MAX_CHARS を超えたら古いメモから捨てる。"""
+        del self.undigested[:used]
+        if note:
+            self.notes.append(note)
+        while sum(map(len, self.notes)) > NOTES_MAX_CHARS:
+            self.notes.pop(0)
+
+    def should_finale(self) -> bool:
+        """台詞が finale_gap_s 聞こえず、前の感想から finale_min_chars 以上聞いていれば、それまでの感想を話す。"""
+        return (self._last_line is not None and self.clock() - self._last_line >= self.s.finale_gap_s
+                and self._heard_chars >= max(1, self.s.finale_min_chars))
+
+    def finale_material(self) -> tuple[str, str]:
+        """(あらすじメモ, メモにしていない最後の台詞)。台詞は ctx_chars を超える分を古い方から捨てる。"""
+        rest = "\n".join(self.undigested)[-self.s.ctx_chars:]
+        return "\n".join(self.notes), rest
+
+    def mark_finale(self) -> None:
+        """感想を話した (黙ると決めた場合も含む): メモを捨て、次の話は新しく覚え直す。"""
+        self.notes.clear()
+        self.undigested.clear()
+        self._heard_chars = 0
+        self.mark_reacted()
+
     def contains(self, text: str) -> bool:
         """マイクの認識結果がドラマの台詞 (スピーカーからの回り込み) か。両方とも認識結果なので完全一致は求めない。"""
         mic = _alnum(text)
@@ -115,6 +155,9 @@ class DramaListener:
         self._last_react = self.clock()
 
     def stop(self) -> None:
-        """モードを止めた: 台詞と区間を捨てる。"""
+        """モードを止めた: 台詞・メモと区間を捨てる。"""
         self.lines.clear()
+        self.notes.clear()
+        self.undigested.clear()
         self._buf, self._last_end, self._new_chars = None, None, 0
+        self._last_line, self._heard_chars = None, 0
