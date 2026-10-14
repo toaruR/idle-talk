@@ -15,7 +15,7 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
 | Windows 11 + NVIDIA GPU | 音声認識・LLM | 動作確認は RTX 3060 |
 | Python 3.13 以上 | 本体 | |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) の `llama-server` | 会話 | モデルは Qwen3.5-4B Q4_K_M（gguf） |
-| [AivisSpeech](https://aivis-project.com/) | 声 | 起動しておくと `127.0.0.1:10101` で待ち受けます |
+| [AivisSpeech](https://aivis-project.com/) | 声 | `[aivis].engine` を書けば idle-talk が AivisSpeech Engine を起動します（`127.0.0.1:10101`） |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) + ReazonSpeech | 音声認識（CPU） | モデル（約 680MB、Apache-2.0）を `data/models/reazonspeech/` に置きます。`[asr].engine = "whisper"` にすると faster-whisper `small`（GPU）に戻せます |
 | onnxruntime + [WeSpeaker ResNet34](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | 声で誰か見分ける（任意） | `voxceleb_resnet34_LM.onnx`（約 26MB、CC-BY-4.0）を `data/models/` に置きます。無ければ見分けずに動きます |
 | Chrome などのブラウザ | マイク・再生 | |
@@ -40,7 +40,12 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
    model = "D:/models/Qwen3.5-4B-Q4_K_M.gguf"
    ```
    `model` を書いておくと、llama-server は idle-talk が起動し、落ちたら再起動します。空にすると自分で起動した llama-server（ポート `[ports].llm`）を使います。
-3. AivisSpeech を起動しておく
+3. [idle_talk.toml](idle_talk.toml) の `[aivis]` に AivisSpeech Engine の場所を書く
+   ```toml
+   [aivis]
+   engine = "C:/Program Files/AivisSpeech/AivisSpeech-Engine/run.exe"
+   ```
+   `idle-talk.cmd start` / `restart` が先にエンジンを起動して応答を待ち、`stop` で止めます。空にするか、AivisSpeech アプリを先に起動しておけば（`[ports].tts` で応答していれば）起動しません。
 4. （任意）声で誰か見分けるなら、話者識別モデルを置く
    ```
    pip install onnxruntime
@@ -52,7 +57,7 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
 リポジトリ直下で:
 
 ```
-idle-talk.cmd start     # 起動（音声認識ワーカーと本体をバックグラウンドで起動）
+idle-talk.cmd start     # 起動（AivisSpeech Engine・音声認識ワーカー・本体をバックグラウンドで起動）
 idle-talk.cmd stop      # 停止
 idle-talk.cmd restart   # 再起動
 idle-talk.cmd status    # 動作状況
@@ -60,7 +65,7 @@ idle-talk.cmd status    # 動作状況
 
 起動したらブラウザで **http://127.0.0.1:8000/** を開きます（`file://` で HTML を直接開くと接続できません）。
 
-うまく動かないときは `data/idle_talk.log` と `data/asr_worker.log` を見てください。
+うまく動かないときは `data/idle_talk.log`・`data/asr_worker.log`・`data/aivisspeech.log` を見てください。
 
 ## 画面の使い方
 

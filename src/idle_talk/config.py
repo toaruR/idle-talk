@@ -202,6 +202,22 @@ def load_llm_launch(path: str | Path = SETTINGS_FILE) -> LlmLaunch:
     return LlmLaunch(**raw)
 
 
+class AivisLaunch(NamedTuple):
+    """[aivis]: ctl start が AivisSpeech Engine を起動するための設定。engine が空なら手動起動。"""
+    engine: str = ""  # AivisSpeech Engine の run.exe
+    use_gpu: bool = False  # TTS は CPU (設計書 §9)
+
+
+def load_aivis_launch(path: str | Path = SETTINGS_FILE) -> AivisLaunch:
+    """[aivis] を読む。無ければ既定値 (手動起動)。型違い・未知キーは ValueError。"""
+    raw = _read_section(path, "aivis", AivisLaunch._fields)
+    for k, v in raw.items():
+        want = str if k == "engine" else bool
+        if type(v) is not want:
+            raise ValueError(f"[aivis].{k} must be a {want.__name__}: {v!r}")
+    return AivisLaunch(**raw)
+
+
 class Topics(NamedTuple):
     """[topics]: 話題カードを作る RSS / Atom フィード。feeds が空ならネットワークに出ない。"""
     feeds: tuple[str, ...] = ()

@@ -61,6 +61,12 @@ model = "D:/models/gemma-4-12b-it-qat-q4_0.gguf"  # 方言に強い 12B。思考
 ngl = 99
 ctx = 4096
 
+[aivis]
+# engine を指定すると idle-talk.cmd start / restart が AivisSpeech Engine (声) を先に起動し、stop で止める。
+# 空なら手動起動。既に [ports].tts で応答していれば (AivisSpeech アプリ起動中など) 起動せず、stop でも止めない。
+engine = "C:/Program Files/AivisSpeech/AivisSpeech-Engine/run.exe"
+use_gpu = false       # true で GPU 合成 (既定は CPU)。出力は data/aivisspeech.log
+
 [topics]
 # 話題カード: 自発発話の話題に RSS / Atom のニュース見出しを使う (未使用のカードを 1 回の自発発話で 1 枚使う)。
 # フィードの概要が短い記事はリンク先ページの説明文 (og:description) で補う。

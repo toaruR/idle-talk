@@ -93,10 +93,16 @@ flowchart LR
 - `python -m idle_talk.ctl start|stop|restart|status` で起動と停止をする。
 - Windows では `idle-talk.cmd` が同じことをする。
 - `ctl start` は ASR ワーカーと Director を端末から切り離して起動する。
+- `[aivis].engine` があれば、`ctl start` はその前に AivisSpeech Engine を起動する (`ctl.start_aivis`)。
+  - 引数は `--host 127.0.0.1 --port <[ports].tts> --no-use_gpu` (`[aivis].use_gpu = true` なら `--use_gpu`) と `--output_log_utf8` である。
+  - `/version` が応答するまで最大 `ctl.AIVIS_READY_TIMEOUT_S`=90 秒待つ。Director の起動時のウォームアップと声の一覧取得に間に合わせるためである。
+  - 起動に失敗しても、待ち切れなくても、Director は起動する (声が出ないだけ)。
+  - 既に `[ports].tts` で応答していれば起動しない (AivisSpeech アプリを先に起動した場合など)。
+  - PID を `data/aivisspeech.pid` に書く (エンジン自身は書かない)。`ctl stop` は、この PID のプロセスだけを子プロセスごと止める。
 - 二重起動は pid ロックで検出し、exit 4 で拒否する。
   - `ctl` は PID ファイル (`data/idle_talk.pid` / `data/asr_worker.pid`) の生存を確認する。
   - `asr_worker` も、`--pid-file` があれば同じ検査をする。
-- 出力は `data/idle_talk.log` / `data/asr_worker.log` に追記する。
+- 出力は `data/idle_talk.log` / `data/asr_worker.log` / `data/aivisspeech.log` に追記する。
 - Director のログは INFO 以上を出す。形式は `日時 レベル ロガー名: 本文` である。
 
 停止の流れ:
@@ -225,14 +231,15 @@ flowchart LR
 
 画面の「声」選択欄:
 
-- `main` は起動時に、AivisSpeech の `GET /speakers` を取得する (`TtsClient.speakers`)。
+- `main` は `/config.json` を配信するときに、AivisSpeech の `GET /speakers` を取得する (`SpeakerChoices`、`TtsClient.speakers`)。
+  - 取れたら覚えて、以後は取り直さない。取れるまでは要求ごとに取り直す (AivisSpeech が後から起動しても、画面を読み直せば選択欄が出る)。
   - 取得するのは talk スタイルだけである。
   - 表記は「話者 スタイル」である。
 - 一覧は `/config.json` の `speakers` で渡す。初期値は `ui.speaker` (起動時の話者) で渡す。
 - 一覧を取得できなければ、画面は選択欄を出さない。
+- 一覧に無い ID は 5006 になる (一覧が取れていない間は検査しない)。
 - 選んだ話者は、`ui` メッセージの `speaker` で届く。
 - `TtsSettingsReloader.set_speaker` が、次の文の合成からその話者を使う。
-- 一覧に無い ID は 5006 になる。
 - 画面での選択は保存しない。再起動すると設定ファイルの値に戻る。
 - `--speaker` を指定していても、画面からは変えられる。
 - 起動時に合成済みの相槌クリップは、再起動まで前の声のままである。

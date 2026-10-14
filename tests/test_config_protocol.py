@@ -336,3 +336,20 @@ def test_load_vad_rejects_invalid(tmp_path, body):
     f.write_text(body, encoding="utf-8")
     with pytest.raises(ValueError):
         load_vad(f)
+
+
+def test_load_aivis_launch(tmp_path):
+    from idle_talk.config import AivisLaunch, load_aivis_launch
+    f = tmp_path / "s.toml"
+    assert load_aivis_launch(f) == AivisLaunch() and AivisLaunch().engine == ""  # 既定は手動起動
+    f.write_text('[aivis]\nengine = "run.exe"\nuse_gpu = true\n', encoding="utf-8")
+    assert load_aivis_launch(f) == AivisLaunch(engine="run.exe", use_gpu=True)
+
+
+@pytest.mark.parametrize("body", ['[aivis]\nengin = "r"\n', "[aivis]\nengine = 1\n", "[aivis]\nuse_gpu = 1\n"])
+def test_load_aivis_launch_rejects_invalid(tmp_path, body):
+    from idle_talk.config import load_aivis_launch
+    f = tmp_path / "s.toml"
+    f.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_aivis_launch(f)

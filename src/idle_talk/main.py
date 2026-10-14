@@ -64,6 +64,30 @@ def git_commit() -> str:
         return "unknown"
 
 
+class SpeakerChoices:
+    """画面の声の選択肢 (AivisSpeech の話者一覧)。取れるまで get() のたびに取り直し、取れたら覚える。
+
+    idle-talk が AivisSpeech より先に起動しても、画面を読み直せば声の選択欄が出る。
+    in / bool は取り直さない (取れていなければ空。set_speaker の検査を飛ばす)。"""
+
+    def __init__(self, fetch: Callable[[], list[dict]]) -> None:
+        self._fetch = fetch
+        self._items: list[dict] = []
+        self._lock = threading.Lock()
+
+    def get(self) -> list[dict]:
+        with self._lock:
+            if not self._items:
+                self._items = self._fetch()
+            return self._items
+
+    def __contains__(self, speaker: object) -> bool:
+        return any(s["id"] == speaker for s in self._items)
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
+
+
 class TtsSettingsReloader:
     """設定ファイルの更新時刻が変わったら [tts] (話者・声パラメータ) を読み直して tts に反映する。
 
@@ -72,7 +96,7 @@ class TtsSettingsReloader:
     話者はファイルの speaker が変わったときだけ反映する (声パラメータの編集で画面の選択を戻さない)。"""
 
     def __init__(self, tts: TtsClient, path: str | Path, fixed_speaker: bool = False,
-                 speaker_ids: frozenset[int] = frozenset()) -> None:
+                 speaker_ids: frozenset[int] | SpeakerChoices = frozenset()) -> None:
         self.tts = tts
         self.path = Path(path)
         self.fixed_speaker = fixed_speaker
@@ -124,7 +148,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
         log.warning("tts warmup failed: %s", args.tts_url)
     asr = AsrClient(_asr_send(args.asr_url), cfg)
     reloader = TtsSettingsReloader(tts, args.config, fixed_speaker=args.speaker_from_cli,
-                                   speaker_ids=frozenset(s["id"] for s in args.speakers))
+                                   speaker_ids=args.speakers)
     vad = load_vad(args.config)
     director = IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None,
                                 EnergyVad(vad.threshold, onset_frames=vad.onset_ms // FRAME_MS, adaptive=vad.adaptive,
@@ -171,13 +195,15 @@ def ui_defaults(cfg: Config) -> dict:
             "quiet_start": cfg.quiet_start, "quiet_end": cfg.quiet_end}
 
 
-def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | None = None,
+def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | SpeakerChoices | None = None,
               root: Path = WEB_DIR, personas: list[dict] | None = None) -> ThreadingHTTPServer:
     """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声とペルソナの選択肢をブラウザへ渡す。
 
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
-    config = json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": speakers or [],
-                         "personas": personas or []}).encode("utf-8")
+    def config() -> bytes:  # 声の一覧は AivisSpeech が後から起動したときのため要求ごとに取る
+        choices = speakers.get() if isinstance(speakers, SpeakerChoices) else speakers or []
+        return json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": choices,
+                           "personas": personas or []}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -185,11 +211,12 @@ def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[di
 
         def do_GET(self):
             if self.path == "/config.json":
+                body = config()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(config)))
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(config)
+                self.wfile.write(body)
                 return
             super().do_GET()
 
@@ -357,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     talk = open_talk_log(data_dir / TALK_LOG_FILE)
     try:
         cfg = Config(**load_spontaneous(args.config))
-        args.speakers = TtsClient(args.tts_url).speakers()  # 画面の声の選択肢。AivisSpeech 未起動なら空 (選択欄を出さない)
+        args.speakers = SpeakerChoices(TtsClient(args.tts_url).speakers)  # 画面の声の選択肢。取れるまで画面の読込ごとに取り直す
         # personas.toml は設定ファイルと同じフォルダから読む。無ければ既定の 1 人だけ (選択欄を出さない)
         args.personas = PersonaBook(Path(args.config).with_name(PERSONAS_FILE))
         web = start_web(args.web_port, args.port,

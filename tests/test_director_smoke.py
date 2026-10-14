@@ -166,6 +166,25 @@ def test_start_web_serves_dir_and_ws_port(tmp_path):
         httpd.server_close()
 
 
+def test_start_web_refetches_speakers_until_available(tmp_path):
+    import http.client
+    from idle_talk.main import SpeakerChoices, start_web
+    answers = [[], [{"id": 1, "name": "a b"}], [{"id": 2, "name": "c d"}]]  # AivisSpeech が後から起動
+    choices = SpeakerChoices(lambda: answers.pop(0))
+    httpd = start_web(0, 9123, {}, choices, root=tmp_path)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        got = []
+        for _ in range(3):
+            c.request("GET", "/config.json")
+            got.append(json.loads(c.getresponse().read())["speakers"])
+        assert got == [[], [{"id": 1, "name": "a b"}], [{"id": 1, "name": "a b"}]]  # 取れたら覚える
+        assert 1 in choices and 2 not in choices and choices
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_request_rest_moves_to_rest_and_notifies(tmp_path):
     from idle_talk.fsm import State
     d, b, store = make(tmp_path)

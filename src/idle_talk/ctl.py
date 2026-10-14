@@ -1,6 +1,8 @@
 """起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status|memories|speakers。
 
 asr_worker と main をバックグラウンドで起動し、出力は data_dir の asr_worker.log / idle_talk.log に追記する。
+[aivis].engine があれば、その前に AivisSpeech Engine を起動して応答を待つ (main の起動時の空合成と声の一覧取得に間に合わせる)。
+既に [ports].tts で応答していれば起動せず、stop でも止めない (ctl が起動したもの = aivisspeech.pid だけ止める)。
 二重起動は各プロセスが書く PID ファイル (idle_talk.pid / asr_worker.pid) の生存確認で拒否する。
 停止は main に停止ファイルを置いて正常終了 (run_meta 記録・llama-server 停止) を待ち、
 STOP_TIMEOUT_S 内に終わらなければ強制終了する。asr_worker は保存する状態が無いので即終了する。
@@ -16,15 +18,18 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from .config import SETTINGS_FILE, load_ports
+from .config import SETTINGS_FILE, load_aivis_launch, load_ports
 from .errors import EXIT_DUPLICATE_LAUNCH
 from .main import DB_FILE, PID_FILE, STOP_FILE
 from .portlock import pid_alive
 
 ASR_PID_FILE = "asr_worker.pid"
+AIVIS_PID_FILE = "aivisspeech.pid"  # ctl が起動した AivisSpeech Engine (エンジン自身は PID ファイルを書かない)
+AIVIS_READY_TIMEOUT_S = 90.0  # AivisSpeech Engine の起動 (モデル読込) 待ち上限。超えても main は起動する
 START_CHECK_S = 5.0  # 起動直後の失敗 (import エラー・ポート使用中など) を待つ時間
 STOP_TIMEOUT_S = 20.0  # 正常終了の待ち上限。超えたら強制終了
 POLL_S = 0.2
@@ -50,14 +55,18 @@ def wait_until(cond: Callable[[], bool], timeout_s: float) -> bool:
 
 def spawn(module: str, args: list[str], log_path: Path) -> subprocess.Popen:
     """端末から切り離して python -m module を起動する (端末を閉じても・Ctrl+C でも止まらない)。"""
+    return spawn_exe([sys.executable, "-m", module, *args], log_path)
+
+
+def spawn_exe(argv: list[str], log_path: Path) -> subprocess.Popen:
+    """端末から切り離して argv を起動し、出力を log_path に追記する。"""
     kw: dict = {}
     if sys.platform == "win32":
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     else:
         kw["start_new_session"] = True
     with log_path.open("ab") as out:
-        return subprocess.Popen([sys.executable, "-m", module, *args], stdout=out, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, **kw)
+        return subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kw)
 
 
 def start_one(name: str, module: str, args: list[str], pid_file: Path, log_path: Path) -> int | None:
@@ -79,12 +88,59 @@ def kill(pid: int) -> None:
         pass
 
 
+def kill_tree(pid: int) -> None:
+    """子プロセスごと終了する (AivisSpeech Engine は子プロセスを持ちうる)。"""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+    else:
+        kill(pid)
+
+
+def tts_ready(base_url: str, timeout: float = 1.0) -> bool:
+    """AivisSpeech Engine の /version が 200 なら True (起動中・接続不能は False)。"""
+    try:
+        with urllib.request.urlopen(f"{base_url}/version", timeout=timeout) as r:
+            return r.status == 200
+    except OSError:
+        return False
+
+
+def start_aivis(args: argparse.Namespace, data_dir: Path) -> None:
+    """[aivis].engine があれば AivisSpeech Engine を起動して応答を待つ。失敗しても main は起動する (声なしで動く)。"""
+    port = load_ports(args.config).tts
+    url = f"http://127.0.0.1:{port}"
+    if tts_ready(url):
+        print("aivisspeech: already running")
+        return
+    launch = load_aivis_launch(args.config)
+    if not launch.engine:
+        print(f"aivisspeech: not running on port {port} (start it manually, or set [aivis].engine)")
+        return
+    log_path = data_dir / "aivisspeech.log"
+    argv = [launch.engine, "--host", "127.0.0.1", "--port", str(port),
+            "--use_gpu" if launch.use_gpu else "--no-use_gpu", "--output_log_utf8"]
+    try:
+        proc = spawn_exe(argv, log_path)
+    except OSError as e:
+        print(f"aivisspeech: failed to start ({e})")
+        return
+    (data_dir / AIVIS_PID_FILE).write_text(str(proc.pid))
+    if wait_until(lambda: tts_ready(url) or proc.poll() is not None, AIVIS_READY_TIMEOUT_S) and proc.poll() is None:
+        print(f"aivisspeech: started (pid {proc.pid})")
+    elif proc.poll() is not None:
+        (data_dir / AIVIS_PID_FILE).unlink(missing_ok=True)
+        print(f"aivisspeech: failed to start (exit {proc.returncode}). see {log_path}")
+    else:
+        print(f"aivisspeech: not ready within {AIVIS_READY_TIMEOUT_S:.0f}s (pid {proc.pid}). see {log_path}")
+
+
 def cmd_start(args: argparse.Namespace, data_dir: Path) -> int:
     pid = read_pid(data_dir / PID_FILE)
     if pid is not None:
         print(f"idle-talk: already running (pid {pid})")
         return EXIT_DUPLICATE_LAUNCH
     data_dir.mkdir(parents=True, exist_ok=True)
+    start_aivis(args, data_dir)
     common = ["--config", str(args.config)]
     asr_pid = read_pid(data_dir / ASR_PID_FILE)
     if asr_pid is not None:
@@ -120,6 +176,12 @@ def cmd_stop(args: argparse.Namespace, data_dir: Path) -> int:
         wait_until(lambda: not pid_alive(asr_pid), STOP_TIMEOUT_S)
         (data_dir / ASR_PID_FILE).unlink(missing_ok=True)
         print(f"asr_worker: stopped (pid {asr_pid})")
+    aivis_pid = read_pid(data_dir / AIVIS_PID_FILE)
+    if aivis_pid is not None:
+        kill_tree(aivis_pid)
+        wait_until(lambda: not pid_alive(aivis_pid), STOP_TIMEOUT_S)
+        print(f"aivisspeech: stopped (pid {aivis_pid})")
+    (data_dir / AIVIS_PID_FILE).unlink(missing_ok=True)
     return 0
 
 
@@ -128,6 +190,8 @@ def cmd_status(args: argparse.Namespace, data_dir: Path) -> int:
     asr_pid = read_pid(data_dir / ASR_PID_FILE)
     print(f"idle-talk: {f'running (pid {pid})' if pid else 'stopped'}")
     print(f"asr_worker: {f'running (pid {asr_pid})' if asr_pid else 'stopped'}")
+    aivis = tts_ready(f"http://127.0.0.1:{load_ports(args.config).tts}")
+    print(f"aivisspeech: {'running' if aivis else 'stopped'}")
     if pid:
         print(f"open http://127.0.0.1:{load_ports(args.config).web}/")
     return 0 if pid else 3

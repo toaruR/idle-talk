@@ -90,3 +90,42 @@ def test_memories_list_delete_clear(tmp_path, capsys):
     run_ctl(tmp_path, "memories")
     out = capsys.readouterr().out
     assert "固定" in out and "朝型" not in out and "猫" not in out
+
+
+def test_start_launches_aivis_engine_then_stop_kills_it(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "s.toml"
+    cfg.write_text('[ports]\ntts = 10199\n[aivis]\nengine = "C:/a/run.exe"\n', encoding="utf-8")
+    ready = []
+    launched, killed = [], []
+
+    class Proc:
+        pid = os.getpid()  # 生存中の PID (stop で生存確認される)
+
+        def poll(self):
+            return None
+
+    def spawn_exe(argv, log_path):
+        launched.append(argv)
+        ready.append(True)  # 起動後に応答し始める
+        return Proc()
+
+    monkeypatch.setattr(ctl, "tts_ready", lambda url: bool(ready))
+    monkeypatch.setattr(ctl, "spawn_exe", spawn_exe)
+    args = ctl.argparse.Namespace(config=cfg)
+    ctl.start_aivis(args, tmp_path)
+    assert launched == [["C:/a/run.exe", "--host", "127.0.0.1", "--port", "10199", "--no-use_gpu", "--output_log_utf8"]]
+    assert (tmp_path / ctl.AIVIS_PID_FILE).read_text() == str(os.getpid())
+    ctl.start_aivis(args, tmp_path)  # 応答中なら二重に起動しない
+    assert len(launched) == 1 and "already running" in capsys.readouterr().out
+
+    monkeypatch.setattr(ctl, "kill_tree", killed.append)
+    monkeypatch.setattr(ctl, "wait_until", lambda cond, t: True)
+    assert ctl.cmd_stop(args, tmp_path) == 0
+    assert killed == [os.getpid()] and not (tmp_path / ctl.AIVIS_PID_FILE).exists()
+
+
+def test_start_aivis_skips_without_engine(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ctl, "tts_ready", lambda url: False)
+    monkeypatch.setattr(ctl, "spawn_exe", lambda *a: pytest.fail("must not spawn"))
+    ctl.start_aivis(ctl.argparse.Namespace(config=tmp_path / "none.toml"), tmp_path)
+    assert "start it manually" in capsys.readouterr().out
