@@ -3,21 +3,22 @@
 <head><meta charset="utf-8"><title>idle-talk</title></head>
 <body>
 <h1>idle-talk</h1>
-<p>状態: <span id="state">未接続</span> <span id="search"></span></p>
+<p>状態: <span id="state">未接続</span> <span id="drama_state"></span> <span id="search"></span></p>
 <p id="error" role="alert"></p>
 <button id="start">開始</button>
+<button id="drama" disabled>ドラマを一緒に見る</button>
 <fieldset>
   <legend>設定</legend>
-  <label><input type="checkbox" id="mute"> ミュート</label>
+  <label><input type="checkbox" id="mute"> 休止</label>
   <label><input type="checkbox" id="on" checked> 自発発話 ON</label>
-  <label><input type="checkbox" id="radio"> ラジオ (返事を待たず話し続ける)</label>
-  <label>沈黙(秒) <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
+  <label><input type="checkbox" id="radio"> ラジオ</label>
+  <label>沈黙秒数 <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
   <label>静音開始 <input type="time" id="quiet_start" value="23:00"></label>
   <label>静音終了 <input type="time" id="quiet_end" value="07:00"></label>
   <label id="speaker_label" hidden>声 <select id="speaker"></select></label>
 </fieldset>
 <fieldset id="links_box" hidden>
-  <legend>URL (話したニュース・調べたページ。新しいものが上)</legend>
+  <legend>URL</legend>
   <ul id="links" style="max-height: 20em; overflow-y: auto;"></ul>
 </fieldset>
 <script src="worklet.js"></script>
@@ -30,6 +31,7 @@
     preparing: '返答準備中', ai_playing: 'AI再生中', interrupt_check: '割り込み確認中', rest: '休止' };
   const $ = (id) => document.getElementById(id);
   let client = null;
+  let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
 
   // 話したニュース・調べたページを URL 欄の先頭に積む (1 回分の並びは保つ)。MAX_LINKS 行を超えたら古い順 (下) から消す。
   // 同じ URL は前の行を消して先頭に付け直す。http(s) 以外は出さず、文字列は textContent で入れる (HTML として解釈しない)
@@ -48,7 +50,7 @@
       const li = document.createElement('li');
       li.dataset.url = it.url;
       li.append(a);
-      if (it.title) li.append(` (${it.title})`);
+      if (it.title) li.append(` ${it.title}`);
       batch.append(li);
     }
     list.prepend(batch);
@@ -65,6 +67,7 @@
       interval_s: parseInt($('interval_s').value, 10),
       quiet_start: $('quiet_start').value,
       quiet_end: $('quiet_end').value,
+      drama: drama !== null,
     };
     if ($('speaker').options.length) ui.speaker = parseInt($('speaker').value, 10);
     return ui;
@@ -106,7 +109,7 @@
         port, WebSocketCtor: WebSocket, player,
         onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); },
         onError: (m) => { $('error').textContent = `[${m.code}] ${m.message}`; },
-        onSearch: (m) => { $('search').textContent = m.active ? `(Web で「${m.query}」を調べています…)` : ''; },
+        onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
         onOpen: pushUi, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
       });
@@ -114,6 +117,28 @@
         getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
         AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
       });
+      $('drama').disabled = false;
+    } catch (e) {
+      $('error').textContent = String(e);
+    }
+  });
+
+  // ドラマモード: 共有したタブの音を AI も聞き、場面の切れ目にたまに一言言う
+  function showDrama() {
+    $('drama').textContent = drama ? 'ドラマを見るのをやめる' : 'ドラマを一緒に見る';
+    $('drama_state').textContent = drama ? 'ドラマ視聴中' : '';
+  }
+  $('drama').addEventListener('click', async () => {
+    if (drama) { drama.stop(); return; }
+    try {
+      drama = await C.startDramaCapture({
+        getDisplayMedia: (c) => navigator.mediaDevices.getDisplayMedia(c),
+        AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
+        onEnded: () => { drama = null; showDrama(); pushUi(); },
+      });
+      $('error').textContent = '';
+      showDrama();
+      pushUi();
     } catch (e) {
       $('error').textContent = String(e);
     }

@@ -225,7 +225,8 @@ test('client direct: pure helpers makeUi/stateLabel/makeHello/micConstraints/wsU
   assert.deepStrictEqual(C.makeUi(null), { t: 'ui' });
   assert.deepStrictEqual(C.makeUi({ speaker: 893625024 }), { t: 'ui', speaker: 893625024 });
   assert.strictEqual(C.stateLabel({ state: 'idle', muted: false }, { idle: '待機' }), '待機');
-  assert.strictEqual(C.stateLabel({ state: 'idle', muted: true }, { idle: '待機' }), '待機 (ミュート)');
+  assert.strictEqual(C.stateLabel({ state: 'idle', muted: true }, { idle: '待機' }), '待機 (休止)');
+  assert.strictEqual(C.stateLabel({ state: 'rest', muted: true }, { rest: '休止' }), '休止');
   assert.strictEqual(C.stateLabel({ state: 'x', muted: false }), 'x');
   assert.deepStrictEqual(C.makeHello('z'), { t: 'hello', version: 1, sample_rate: 16000, client_id: 'z' });
   assert.deepStrictEqual(C.micConstraints(), { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } });

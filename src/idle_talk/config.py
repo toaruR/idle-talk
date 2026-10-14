@@ -291,3 +291,27 @@ def load_vad(path: str | Path = SETTINGS_FILE) -> VadSettings:
             raise ValueError(f"[vad].{k} must be bool: {v!r}")
         out[k] = v
     return VadSettings(**out)
+
+
+class Drama(NamedTuple):
+    """[drama]: ドラマモード (共有したタブの音を聞き、場面の切れ目にたまに一言)。台詞はメモリにだけ置く。"""
+    interval_s: int = 90    # 前の一言 (または開始) から最低これだけ空ける
+    gap_ms: int = 2500      # ドラマの台詞が途切れてこれだけ経ったら場面の切れ目とみなす
+    window_s: int = 180     # LLM に見せる台詞の範囲 (直近の秒数)
+    min_chars: int = 60     # 前の一言から溜まった台詞がこれ未満なら黙る
+    ctx_chars: int = 1200   # LLM に渡す台詞の上限字数 (古い方から捨てる)
+    max_seg_s: int = 15     # 1 区間の上限。BGM 等で区間が終わらなくても切って認識に回す
+
+
+_DRAMA_RANGES = {"interval_s": (10, 3600), "gap_ms": (500, 30000), "window_s": (30, 1800),
+                 "min_chars": (0, 2000), "ctx_chars": (100, 4000), "max_seg_s": (3, 60)}
+
+
+def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:
+    """[drama] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "drama", Drama._fields)
+    for k, v in raw.items():
+        lo, hi = _DRAMA_RANGES[k]
+        if type(v) is not int or not lo <= v <= hi:
+            raise ValueError(f"[drama].{k} must be an int in [{lo}, {hi}]: {v!r}")
+    return Drama(**raw)

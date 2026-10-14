@@ -17,8 +17,9 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_search, load_topics, load_vad, load_voice, load_voice_id)
+                     load_drama, load_search, load_topics, load_vad, load_voice, load_voice_id)
 from .director import IdleTalkDirector
+from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
@@ -129,6 +130,10 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                           ratio=vad.ratio, min_threshold=vad.min_threshold), asr, cfg,
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
+    director.drama = DramaListener(load_drama(args.config), EnergyVad(adaptive=True, ratio=vad.ratio,
+                                                                      onset_frames=vad.onset_ms // FRAME_MS,
+                                                                      min_threshold=vad.min_threshold),
+                                   cfg.MIN_SEG)
     enable_voice_id(director, args.config)
     feeds = load_topics(args.config).feeds
     search = load_search(args.config)

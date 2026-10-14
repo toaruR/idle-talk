@@ -20,7 +20,8 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from .backchannel import Backchannel, event_payload
-from .config import Config
+from .config import Config, Drama
+from .drama import DramaListener
 from .echo_chain import CANCEL_KIND
 from .epoch import Epoch
 from .errors import ERR_OUT_OF_RANGE
@@ -32,12 +33,12 @@ from .interrupt import judge
 from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, parse_extracted, remember
 from .metrics import MetricsRecorder
 from .pipeline import ResponsePipeline
-from .protocol import pack_down_chunk
+from .protocol import is_drama, pack_down_chunk
 from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
 from .topics import mark_used, select_cards
-from .vad import Vad
+from .vad import EnergyVad, Vad
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
                        name_messages, parse_name, speaker_prompt)
 from .web_search import link_items
@@ -68,6 +69,19 @@ FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 DOWN_LOOKAHEAD = 1
 MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
 ECHO_SUPPRESSED_KIND = "echo_suppressed"  # AI 再生中に拾った自声の認識結果を捨てた 1 回 = 1 行
+# ドラマモード (設計書 6.5)
+DRAMA_ECHO_KIND = "drama_echo_suppressed"  # マイクが拾ったドラマの台詞を捨てた 1 回 = 1 行
+DRAMA_CONTEXT_PROMPT = "\n利用者と一緒にドラマを見ています。直近の台詞 (音声認識なので誤りを含みます):\n{lines}\n"
+# 「なし」の代わりに「聞こえなくて分からない」と言うことがある (実機 2026-10-14)。言っても楽しくないので黙る
+DRAMA_UNHEARD = re.compile(r"聞こえ(な|ず)|聞き取れ|分から(な|ず)|わから(な|ず)")
+DRAMA_HOLD_S = 8.0  # 一言の生成中に台詞が再開したら、次の切れ目をこれだけ待つ (来なければ古くなったので黙る)
+# 一言には会話履歴も前の一言も渡さず、前の一言以降の台詞 (今の場面) だけを見せる。
+# 履歴や 3 分ぶんの台詞を渡すと、4B は前の一言や古い台詞の目立つ語 (「噛み詰め」等) を毎回繰り返した (実機 2026-10-14)
+DRAMA_PROMPT = ("一緒にドラマを見ています。今の場面の台詞 (音声認識なので誤りを含みます):\n{scene}\n\n"
+                "場面が切れました。一緒に見ている友人として、今の場面への感想を一言 (25 字以内、1 文) で"
+                "つぶやいてください。驚き・ツッコミ・心配・笑いなど、気持ちを素直に。"
+                "台詞の繰り返しや説明はせず、質問もしないでください。"
+                "台詞が聞き取れず意味が分からないときだけ『なし』とだけ出力してください。")
 
 
 def _alnum(text: str) -> str:
@@ -182,6 +196,11 @@ class IdleTalkDirector:
         self._ask_sid: int | None = None  # 名前を尋ねた相手。その人の次の発話から名前を抜き出す
         self._ask_plan: int | None = None  # 名前を尋ねる応答を生成中の相手。最後まで再生されたら _ask_sid にする
         self._name_pending: list[str] = []  # 名前の抜き出し待ちの発話
+        # ドラマモード (設計書 6.5)。画面でタブ共有を始めると ui.drama で on。main が [drama] の設定で差し替える
+        self.drama = DramaListener(Drama(), EnergyVad(adaptive=True), self.cfg.MIN_SEG, clock)
+        self.drama_on = False
+        self._drama_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drama-asr")
+        self._drama_uid = 0
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -215,6 +234,7 @@ class IdleTalkDirector:
                     "ended_at": ended, "app_commit": self.app_commit, "sample_count": n}
             self.store.add_event(ended, self.epoch.current, "run_meta", json.dumps(meta))
         self._asr_pool.shutdown(wait=False, cancel_futures=True)
+        self._drama_pool.shutdown(wait=False, cancel_futures=True)
         self.store.close()
 
     # ---- 相槌 (設計書 6.1): 事前合成クリップも通常応答と同じ play_utterance / cancel 経路を通る ----
@@ -341,6 +361,13 @@ class IdleTalkDirector:
     def _on_up_audio(self, seq: int, pcm: bytes) -> None:
         if not self.core.hello_done:
             return
+        if is_drama(seq):  # 共有したタブの音: マイクの VAD・FSM・相槌・E6 には入れない
+            if self.drama_on:
+                for i in range(0, len(pcm), FRAME_BYTES):
+                    seg = self.drama.feed(pcm[i:i + FRAME_BYTES])
+                    if seg is not None:
+                        self._drama_asr(seg)
+            return
         cur = self.epoch.current  # 再生中 = 現行世代の送出済みチャンクが再生終了の報告待ち (VAD の自動校正が使う)
         self.ingress.vad.playing = any(k[0] == cur for k in self._down_sent)
         for i in range(0, len(pcm), FRAME_BYTES):
@@ -362,6 +389,8 @@ class IdleTalkDirector:
                 self.set_speaker(settings["speaker"])
             except ValueError as e:
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
+        if bool(settings.get("drama")) != self.drama_on:
+            self._set_drama(bool(settings.get("drama")))
         self._last_op = self.clock()
         muted = bool(settings.get("mute"))
         if muted and not self.fsm.ctx.muted:
@@ -377,6 +406,11 @@ class IdleTalkDirector:
             log.info("transcript without words discarded: utterance %d %r", uid, text)
             return False
         if in_ai and self._is_echo(uid, text):
+            return False
+        if self.drama_on and self.drama.contains(text):  # スピーカーから回り込んだドラマの台詞
+            log.info("drama echo discarded: utterance %d %r", uid, text)
+            self.store.add_event(self.now_ms(), self.epoch.current, DRAMA_ECHO_KIND,
+                                 json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
         self._text = text
         self._identify(uid)
@@ -601,6 +635,8 @@ class IdleTalkDirector:
         """定期呼び出し。'rest' (IDLE_TIMEOUT 遷移) / 'spontaneous' (発火) / None を返す。"""
         now = self.clock() if now is None else now
         idle = self.fsm.ctx.state is State.IDLE
+        if self.drama_on:  # 見ている間は黙って長く過ごすので、無操作休止と普段の自発発話の代わりに一言の判定だけ
+            return self._drama_tick(idle)
         if idle and not self.spontaneous.radio and now - self._last_op >= self.cfg.IDLE_TIMEOUT:  # ラジオは聞き流し前提
             self.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
             self._pump()
@@ -639,6 +675,99 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
+    # ---- ドラマモード (設計書 6.5): 一言は自発発話と同じ pending / 保留 / 取消 / 再生完了の経路を通る ----
+    def _set_drama(self, on: bool) -> None:
+        self.drama_on = on
+        if on:
+            self.drama.start()
+        else:
+            self.drama.stop()
+            if self.spontaneous.pending and self._spont_task is not None:  # 作りかけ・再生中の一言も取消す
+                self._cancel_spontaneous()
+        log.info("drama mode %s", "on" if on else "off")
+        self._bc_record("drama_mode", {"on": on})
+
+    def _drama_asr(self, pcm: bytes) -> None:
+        """ドラマの区間を別ワーカーで認識し、台詞に足す。利用者の発話の認識 (_asr_pool) を待たせない。"""
+        asr = self.ingress.asr
+        if asr is None:
+            return
+        self._drama_uid = (self._drama_uid + 1) % (1 << 31)
+        uid = self._drama_uid
+        name = self.ingress._put_shm(pcm)
+        seg_s = len(pcm) / (FRAME_BYTES * 50)
+
+        def work() -> object:
+            try:
+                return asr.transcribe(uid, name, seg_s)
+            except Exception as e:  # noqa: BLE001  台詞が 1 区間欠けるだけ
+                log.info("drama asr failed: %s", e)
+                return None
+            finally:
+                self.ingress.release(name)
+
+        def done(res: object) -> None:
+            if isinstance(res, dict) and self.drama_on:
+                self.drama.add_line(res["text"])
+                # 台詞の本文は残さない (設計書 7)。聞き取れているかは字数で見る
+                log.info("drama line: %d chars (pending %d)", len(res["text"]), self.drama._new_chars)
+            elif res is None:
+                log.info("drama segment discarded (hallucination / failed): %.1fs", seg_s)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # ループ外 (同期テスト等): その場で実行
+            done(work())
+            return
+        fut = self._drama_pool.submit(work)
+        fut.add_done_callback(lambda f: None if f.cancelled() or loop.is_closed()  # 終了中に届いた結果は捨てる
+                              else loop.call_soon_threadsafe(done, f.result()))
+
+    def _drama_tick(self, idle: bool) -> str | None:
+        listening = self.core.conn is not None and self.core.hello_done
+        if not (listening and idle and not self.spontaneous.pending and self.drama.should_react()):
+            return None
+        scene = self.drama.scene_text()  # 前の一言以降の台詞
+        self.drama.mark_reacted()
+        self.spontaneous.pending = True
+        self._bc_record("drama_react", {})
+        self._gen_done = False
+        self._spont_task = asyncio.get_running_loop().create_task(self._drama_respond(scene))
+        return "drama"
+
+    async def _drama_respond(self, scene: str) -> None:
+        me = asyncio.current_task()
+        messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": DRAMA_PROMPT.format(scene=scene)}]
+        stop = threading.Event()
+        try:
+            text = await asyncio.to_thread(self._collect, messages, stop)
+        except asyncio.CancelledError:
+            stop.set()  # 取消 (利用者が話し始めた): llama-server を応答に譲る
+            raise
+        except Exception as e:  # noqa: BLE001  一言は言わなくても困らない
+            log.warning("drama reaction failed: %s", e)
+            text = None
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        line = (text or "").strip().strip("「」『』\"").split("\n")[0].strip()  # 4B は 2 文目を足すことがある
+        held = 0.0
+        while _alnum(line) and self.drama.quiet_ms() < self.drama.s.gap_ms and held < DRAMA_HOLD_S:
+            # 生成中に台詞が再開した: かぶせず次の切れ目まで待つ (利用者の発話ならこのタスクごと取消される)
+            await asyncio.sleep(0.1)
+            held += 0.1
+        if not _alnum(line) or _alnum(line).startswith("なし") or DRAMA_UNHEARD.search(line) or self.drama.quiet_ms() < self.drama.s.gap_ms:
+            # 言うことが無い / 切れ目が来ないまま古くなった: 黙る
+            self._bc_record("drama_skip", {"text": line[:50], "held_s": round(held, 1)})
+            self.spontaneous.done()
+            return
+        self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
+        await self.pipeline.play_utterance(iter([line]))
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        self._gen_done = True
+        self._check_done()
+
     def _pick_topic(self) -> tuple[str, dict | None]:
         """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
         cards = select_cards(self.store, self.now_ms(), limit=2)
@@ -657,6 +786,9 @@ class IdleTalkDirector:
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in history_window(self.store, self.cfg) if t["text"]]
         system = SYSTEM_PROMPT + memory_prompt(self.store) + self._speaker_section(ask)
+        lines = self.drama.context_text() if self.drama_on else ""
+        if lines:
+            system += DRAMA_CONTEXT_PROMPT.format(lines=lines)
         return [{"role": "system", "content": system}] + (
             history[-turns:] if turns else history)
 

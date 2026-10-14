@@ -7,6 +7,7 @@
   const TARGET_RATE = 16000;
   const MIN_FRAME_SAMPLES = 320; // 20ms
   const MAX_FRAME_SAMPLES = 640; // 40ms
+  const DRAMA_FLAG = 0x80000000; // protocol.DRAMA_FLAG
 
   function validateFrameSamples(n) {
     if (!Number.isInteger(n) || n < MIN_FRAME_SAMPLES || n > MAX_FRAME_SAMPLES) {
@@ -69,7 +70,8 @@
     return (frame.byteLength - 4) / 2;
   }
 
-  function createFramer({ inRate = TARGET_RATE, frameSamples = 320 } = {}) {
+  // seqBase: seq に OR する値。共有したタブの音 (ドラマモード) は DRAMA_FLAG を立ててマイクと区別する
+  function createFramer({ inRate = TARGET_RATE, frameSamples = 320, seqBase = 0 } = {}) {
     validateFrameSamples(frameSamples);
     const resampler = createResampler(inRate, TARGET_RATE);
     let pending = new Float32Array(0);
@@ -83,7 +85,7 @@
         const frames = [];
         let off = 0;
         while (merged.length - off >= frameSamples) {
-          frames.push(packFrame(seq++, merged.subarray(off, off + frameSamples)));
+          frames.push(packFrame((seqBase | seq++) >>> 0, merged.subarray(off, off + frameSamples)));
           off += frameSamples;
         }
         pending = merged.slice(off);
@@ -101,6 +103,7 @@
         this.framer = createFramer({
           inRate: po.inRate || sampleRate,
           frameSamples: po.frameSamples || 320,
+          seqBase: po.seqBase || 0,
         });
       }
       process(inputs) {
@@ -115,7 +118,7 @@
   }
 
   const api = {
-    TARGET_RATE, MIN_FRAME_SAMPLES, MAX_FRAME_SAMPLES,
+    TARGET_RATE, MIN_FRAME_SAMPLES, MAX_FRAME_SAMPLES, DRAMA_FLAG,
     validateFrameSamples, createResampler, packFrame, readSeq, frameSampleCount, createFramer,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

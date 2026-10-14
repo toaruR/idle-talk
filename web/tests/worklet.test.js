@@ -75,3 +75,9 @@ test('checks: serializeResult has 11 keys', () => {
   assert.deepEqual(Object.keys(j), ['C1', 'C2', 'C3', 'C4', 'ts', 'userAgent', 'host',
     'started_at', 'ended_at', 'app_commit', 'frame_count']);
 });
+
+test('frame: seqBase (drama) sets the top bit of seq', () => {
+  const fr = W.createFramer({ inRate: 16000, frameSamples: 320, seqBase: W.DRAMA_FLAG });
+  const frames = fr.push(sine(640));
+  assert.deepEqual(frames.map(W.readSeq), [0x80000000, 0x80000001]);
+});

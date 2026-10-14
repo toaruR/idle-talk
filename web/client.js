@@ -21,13 +21,22 @@
     return { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } };
   }
 
+  // ドラマモード: 共有したタブ (画面) の音だけを使う。Chrome は video 無しの共有を受け付けないので映像は取ってすぐ止める
+  function displayConstraints() {
+    return {
+      video: true,
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      systemAudio: 'include',
+    };
+  }
+
   function makeHello(clientId) {
     return { t: 'hello', version: PROTOCOL_VERSION, sample_rate: SAMPLE_RATE, client_id: clientId };
   }
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker']) {
+    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;
@@ -35,7 +44,8 @@
 
   function stateLabel(msg, names) {
     const label = (names && names[msg.state]) || msg.state;
-    return msg.muted ? `${label} (ミュート)` : label;
+    // 休止のチェック中は状態も「休止」になるので重ねて書かない (状態がまだ切り替わる前だけ添える)
+    return msg.muted && msg.state !== 'rest' ? `${label} (休止)` : label;
   }
 
   // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onOpen(), clientId }
@@ -87,9 +97,55 @@
     return { ctx, stream, node };
   }
 
+  // 共有したタブの音 -> worklet (seq に DRAMA_FLAG) -> client.sendFrame。共有が終わったら onEnded。Browser only.
+  // 失敗した段階をエラーに付ける (ブラウザの例外は "Not supported" のように段階が分からない)
+  async function step(name, fn) {
+    try {
+      return await fn();
+    } catch (e) {
+      throw new Error(`${name}: ${e && e.name ? `${e.name}: ${e.message}` : e}`);
+    }
+  }
+
+  async function startDramaCapture({ getDisplayMedia, AudioContextCtor, workletUrl, client, onEnded }) {
+    const stream = await step('タブの共有', async () => {
+      try {
+        return await getDisplayMedia(displayConstraints());
+      } catch (e) {
+        // 音声の詳細な制約や systemAudio を受け付けないブラウザ: 最小の制約で取り直す
+        if (!e || (e.name !== 'NotSupportedError' && e.name !== 'TypeError' && e.name !== 'OverconstrainedError')) throw e;
+        return getDisplayMedia({ video: true, audio: true });
+      }
+    });
+    const audio = stream.getAudioTracks();
+    if (!audio.length) {
+      for (const t of stream.getVideoTracks()) t.stop();
+      throw new Error('音声が共有されていません。共有の画面で「タブの音声も共有する」をオンにしてください');
+    }
+    for (const t of stream.getVideoTracks()) t.stop();
+    const ctx = await step('音声の準備', () => new AudioContextCtor());
+    await step('音声処理の読み込み', () => ctx.audioWorklet.addModule(workletUrl));
+    const node = await step('音声処理の作成', () => new AudioWorkletNode(ctx, 'capture-processor', {
+      processorOptions: { inRate: ctx.sampleRate, frameSamples: FRAME_SAMPLES, seqBase: W.DRAMA_FLAG },
+    }));
+    node.port.onmessage = (ev) => client.sendFrame(ev.data);
+    await step('共有した音の接続', () => ctx.createMediaStreamSource(new MediaStream(audio)).connect(node));
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      for (const t of audio) t.stop();
+      ctx.close();
+      if (onEnded) onEnded();
+    };
+    audio[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
+    return { ctx, stream, node, stop };
+  }
+
   const api = {
     PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, W, P,
-    wsUrl, micConstraints, makeHello, makeUi, stateLabel, createClient, startCapture,
+    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, createClient,
+    startCapture, startDramaCapture,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else if (typeof globalThis !== 'undefined') globalThis.IdleTalkClient = api;
