@@ -13,7 +13,7 @@ from idle_talk.director import IdleTalkDirector
 from idle_talk.main import DB_FILE, enable_voice_id
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
-from idle_talk.voice_id import (ASK_MAX, ASK_PROMPT, ASKED_PROMPT, ENROLL_N, NAME_PROMPT, VoiceBook, fbank,
+from idle_talk.voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, ENROLL_N, NAME_PROMPT, VoiceBook, fbank,
                                 parse_name)
 
 LONG = 100  # 2s の発話 (MIN_VOICE_MS 以上)
@@ -175,9 +175,30 @@ def test_new_voice_is_asked_name_then_called_by_it(tmp_path):
         try:
             assert ASK_PROMPT not in await turn(d, b, systems)  # 1 回目: まだ登録しない
             assert ASK_PROMPT in await turn(d, b, systems)  # 登録した声: 名前を尋ねる
+            spoken = [m["text"] for m in b.of("text")]
+            assert spoken[-2:] == ["そうなんだ。", ASK_QUESTION]  # 質問は LLM 任せにせず返答の後に読む
+            assert ASK_QUESTION not in spoken[:-1]
             assert ASKED_PROMPT in await turn(d, b, systems)  # 返事: 名前で挨拶 (抜き出しは再生後)
             assert store.query("SELECT name FROM speakers")[0][0] == "たろう"
             assert "「たろう」さん" in await turn(d, b, systems)
+        finally:
+            store.close()
+    asyncio.run(run())
+
+
+def test_interrupted_question_does_not_take_next_utterance_as_name(tmp_path):
+    """名前を尋ねる応答が割り込みで止まった (聞こえていない) なら、次の発話を名前として抜き出さない (実機 2026-10-14)。"""
+    async def run():
+        d, b, store, systems = make(tmp_path, lambda pcm: vec(1))
+        try:
+            await turn(d, b, systems)
+            await turn(d, b, systems)  # 登録 + 尋ねる応答 (最後まで再生)
+            assert d._ask_sid is not None
+            d._ask_sid = None
+            assert d._speaker_section(ask=True) == ASK_PROMPT
+            d._cancel_path("interrupt")  # 再生途中で割り込まれた
+            assert d._ask_sid is None and d._asks[d._speaker] == 1
+            assert d._speaker_section(ask=True) == ASK_PROMPT  # 次の応答で改めて尋ねる
         finally:
             store.close()
     asyncio.run(run())

@@ -25,7 +25,10 @@ MAX_WEIGHT = 20  # 平均の更新で過去の埋め込みに掛ける重みの�
 ASK_MAX = 2  # 名前を尋ねるのは 1 人あたり起動中にこの回数まで (答えたくない人にしつこく聞かない)
 NAME_MAX = 12  # 名前として受け付ける長さの上限 (超えたら抜き出しの失敗とみなす)
 
-ASK_PROMPT = "\n\n今話している相手の名前をまだ知りません。返答の最後に、自然な流れで一度だけ名前 (呼び名) を尋ねてください。"
+# 4B は「名前を尋ねて」という指示を無視することが多い (実機 2026-10-14)。質問は返答の後に定型文 ASK_QUESTION で読む
+UNNAMED_PROMPT = "\n\n今話している相手の名前はまだ知りません (知っているふりはしないでください)。"
+ASK_PROMPT = UNNAMED_PROMPT + "返答のあとで名前を尋ねるので、返答の最後に質問はしないでください。"
+ASK_QUESTION = "ところで、まだ名前を聞いてなかったね。なんて呼べばいい？"
 ASKED_PROMPT = "\n\n直前にあなたは相手の名前を尋ねました。相手が名乗っていれば、その名前で呼んで軽く挨拶してください。"
 NAME_PROMPT = ("あなたは会話記録から名前を抜き出す係です。以下は、名前を尋ねられた利用者の返事です。"
                "利用者が自分の名前や呼び名を名乗っていれば、その名前だけを 1 行で出力してください (敬称は付けない)。"
@@ -118,6 +121,7 @@ class VoiceBook:
             s = float(row["emb"] @ emb)
             if s > score:
                 best, score = sid, s
+        log.info("voice similarity to nearest: %.2f (speaker %s)", score, best)  # 閾値の調整用
         if best is not None and score >= self.threshold:
             row = self._rows[best]
             row["emb"] = _unit(row["emb"] * min(row["n"], MAX_WEIGHT) + emb)

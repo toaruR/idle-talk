@@ -155,8 +155,17 @@ class ResponsePipeline:
             yield from sp.feed(tok)
         yield from sp.flush()
 
-    async def respond(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None) -> int:
-        """search を渡すと、LLM が「検索: 語」と答えたときに Web 検索してから答える。"""
+    async def respond(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
+                      tail: str = "") -> int:
+        """search を渡すと、LLM が「検索: 語」と答えたときに Web 検索してから答える。tail は返答の後に必ず読む定型文。"""
         loop = asyncio.get_running_loop()
         emit = lambda m: loop.call_soon_threadsafe(self._emit, m)  # noqa: E731  節の生成は別スレッドで回る
-        return await self.play_utterance(self._llm_clauses(messages, search, emit))
+        clauses = self._llm_clauses(messages, search, emit)
+        if tail:
+            clauses = _then(clauses, tail)
+        return await self.play_utterance(clauses)
+
+
+def _then(clauses, tail: str):
+    yield from clauses
+    yield tail

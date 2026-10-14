@@ -38,8 +38,8 @@ from .spontaneous import Spontaneous
 from .store import Store
 from .topics import mark_used, select_cards
 from .vad import Vad
-from .voice_id import (ASK_MAX, ASK_PROMPT, ASKED_PROMPT, MIN_VOICE_MS, VoiceBook, name_messages, parse_name,
-                       speaker_prompt)
+from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
+                       name_messages, parse_name, speaker_prompt)
 from .web_search import link_items
 
 log = logging.getLogger("idle_talk.director")
@@ -180,6 +180,7 @@ class IdleTalkDirector:
         self._speaker: int | None = None  # 今の話し相手 (speakers.id)。None = 知らない声 / 未判定
         self._asks: Counter[int] = Counter()  # 起動してから名前を尋ねた回数 (話者別)
         self._ask_sid: int | None = None  # 名前を尋ねた相手。その人の次の発話から名前を抜き出す
+        self._ask_plan: int | None = None  # 名前を尋ねる応答を生成中の相手。最後まで再生されたら _ask_sid にする
         self._name_pending: list[str] = []  # 名前の抜き出し待ちの発話
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
@@ -411,16 +412,26 @@ class IdleTalkDirector:
 
     def _speaker_section(self, ask: bool) -> str:
         """今の話し相手の節。名前の分からない登録済みの相手には、ask なら ASK_MAX 回まで名前を尋ねさせる。"""
+        self._ask_plan = None
         if self.voices is None or self._speaker is None:
             return ""
         name = self.voices.name(self._speaker)
         if not name and self._ask_sid == self._speaker and self._name_pending:  # 尋ねた直後の返事 (抜き出しは再生後)
             return ASKED_PROMPT
-        if name or not ask or self._asks[self._speaker] >= ASK_MAX:
+        if name:
             return speaker_prompt(name)
-        self._asks[self._speaker] += 1
-        self._ask_sid, self._name_pending = self._speaker, []
+        if not ask or self._asks[self._speaker] >= ASK_MAX:
+            return UNNAMED_PROMPT
+        self._ask_plan = self._speaker  # 尋ねたことにするのは再生し終えてから (割り込みで聞こえていない返事を名前にしない)
         return ASK_PROMPT
+
+    def _asked(self, heard: bool) -> None:
+        """名前を尋ねる応答が最後まで再生されたら (heard)、その人の次の発話から名前を抜き出す。"""
+        sid, self._ask_plan = self._ask_plan, None
+        if sid is None or not heard:
+            return
+        self._asks[sid] += 1
+        self._ask_sid, self._name_pending = sid, []
 
     async def _learn_name(self, utterances: list[str], stop: threading.Event) -> None:
         sid = self._ask_sid
@@ -573,6 +584,7 @@ class IdleTalkDirector:
 
     def _act_commit_history(self, a: Action) -> None:
         self._last_op = self.clock()
+        self._asked(heard=True)
         self._finalize_utterance("response", interrupted=False)
         self._start_memory()
 
@@ -698,7 +710,8 @@ class IdleTalkDirector:
         me = asyncio.current_task()
         ep = self.epoch.current
         try:
-            await self.pipeline.respond(messages, search=self.web_search)
+            await self.pipeline.respond(messages, search=self.web_search,
+                                        tail=ASK_QUESTION if self._ask_plan is not None else "")
         except asyncio.CancelledError:  # 準備中の再発話で生成が取り消された: 旧世代の結果は破棄扱い (E15)
             self.pipeline._discard(ep, "<cancelled generation>")
             raise
@@ -715,6 +728,8 @@ class IdleTalkDirector:
     def _cancel_path(self, route: str) -> None:
         """pipeline.cancel は await を含まないので eager 実行して epoch を即時に確定させる。"""
         self.path_calls.append((route, "cancel"))
+        if route == "interrupt":
+            self._asked(heard=False)
         t = asyncio.Task(self.pipeline.cancel(), loop=asyncio.get_running_loop(), eager_start=True)
         self._cancels.add(t)
         t.add_done_callback(self._cancels.discard)
