@@ -7,6 +7,13 @@ llm = 8091   # llama-server
 tts = 10101  # AivisSpeech
 web = 8000   # web/ の配信 (main が起動。ブラウザは http://127.0.0.1:8000/ を開く)
 
+[asr]
+# 音声認識のエンジン。reazon = ReazonSpeech (CPU、日本語の精度が高い。pip install sherpa-onnx とモデルが要る)、
+# whisper = faster-whisper small (GPU0)。変えたら idle-talk.cmd restart。
+engine = "reazon"
+model_dir = "data/models/reazonspeech"  # reazon のモデル (sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01, Apache-2.0)
+threads = 2           # reazon の CPU スレッド数 (1〜32)。AivisSpeech の声が遅れるなら下げる
+
 [tts]
 # speaker: AivisSpeech の話者 (スタイル) ID。一覧は AivisSpeech の GET /speakers
 #   まお: ノーマル=888753760 ふつー=888753761 あまあま=888753762 おちつき=888753763 からかい=888753764 せつなめ=888753765
@@ -22,7 +29,7 @@ speed = 1.0          # 話速 0.5〜2.0 (既定 1.0。大きいほど速い)
 intonation = 1.0      # スタイルの感情表現の強さ 0.0〜2.0 (既定 1.0。上げすぎると発声が崩れることがある)
 tempo_dynamics = 0.0  # テンポの緩急 0.0〜2.0 (既定 1.0。大きいほど早口で生っぽい)
 pitch = 0.0           # 音高 -0.15〜0.15 (既定 0.0。0 以外は音質が劣化する)
-volume = 0.5          # 音量 0.0〜2.0 (既定 1.0)
+volume = 0.2          # 音量 0.0〜2.0 (既定 1.0)
 pause = 1.0           # 句読点の無音の倍率 0 以上 (既定 1.0。小さいほど間が短い)
 pre_silence = 0.1     # 音声の前の無音 (秒、既定 0.1)
 post_silence = 0.1    # 音声の後の無音 (秒、既定 0.1)

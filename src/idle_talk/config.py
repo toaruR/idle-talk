@@ -242,6 +242,28 @@ def load_search(path: str | Path = SETTINGS_FILE) -> Search:
     return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True))
 
 
+class Asr(NamedTuple):
+    """[asr]: 音声認識のエンジン。reazon は ReazonSpeech (sherpa-onnx, CPU)、whisper は faster-whisper small (GPU)。"""
+    engine: str = "reazon"
+    model_dir: str = "data/models/reazonspeech"  # reazon の encoder/decoder/joiner*.onnx と tokens.txt
+    threads: int = 2  # reazon の CPU スレッド数 (AivisSpeech・話者識別と CPU を分け合う)
+
+
+ASR_ENGINES = ("reazon", "whisper")
+
+
+def load_asr(path: str | Path = SETTINGS_FILE) -> Asr:
+    """[asr] を読む。無ければ既定値 (reazon)。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "asr", Asr._fields)
+    if "engine" in raw and raw["engine"] not in ASR_ENGINES:
+        raise ValueError(f"[asr].engine must be one of {list(ASR_ENGINES)}: {raw['engine']!r}")
+    if "model_dir" in raw and (type(raw["model_dir"]) is not str or not raw["model_dir"]):
+        raise ValueError(f"[asr].model_dir must be a non-empty string: {raw['model_dir']!r}")
+    if "threads" in raw and (type(raw["threads"]) is not int or not 1 <= raw["threads"] <= 32):
+        raise ValueError(f"[asr].threads must be an int in [1, 32]: {raw['threads']!r}")
+    return Asr(**raw)
+
+
 class VoiceId(NamedTuple):
     """[voice_id]: 声で話し相手を見分け、初めての声なら名前を聞く (設計書 6.4)。声の特徴は外部に送らない。"""
     on: bool = False

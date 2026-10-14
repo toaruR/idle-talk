@@ -15,7 +15,7 @@
 ## 全体構成
 
 - 利用者 1 人・Windows 11・ローカル完結の常駐型日本語音声雑談アプリ。
-- 経路: ブラウザ (マイク取り込み / 再生) ⇄ WebSocket ⇄ Director (Python, 単一イベントループ) ⇄ llama-server (LLM) / AivisSpeech (TTS) / ASR ワーカー (faster-whisper)。
+- 経路: ブラウザ (マイク取り込み / 再生) ⇄ WebSocket ⇄ Director (Python, 単一イベントループ) ⇄ llama-server (LLM) / AivisSpeech (TTS) / ASR ワーカー (ReazonSpeech、または faster-whisper)。
 - ネットワークに出るのは RSS Topic Worker のみ。他はすべて 127.0.0.1。
 - ヘッドホン・スピーカーのどちらでも使う。スピーカーからの回り込みは、ブラウザの AEC (`echoCancellation: true`) と自声除外 (「割り込み判定」節) で抑える。
 
@@ -24,7 +24,7 @@
 | プロセス | 起動 | 既定ポート | 備考 |
 |---|---|---|---|
 | Director | `python -m idle_talk.main` | WS 8765 / Web 8000 | `--web-port`、`--data-dir`(既定 `data`)、`--pid-file`、`--llm-url` / `--tts-url` / `--asr-url` |
-| ASR ワーカー | `python -m idle_talk.asr_worker` | 8090 (`--port`) | 127.0.0.1 固定。faster-whisper `small` を CUDA/float16 で起動時に 1 回ロード。未導入なら exit 2 |
+| ASR ワーカー | `python -m idle_talk.asr_worker` | 8090 (`--port`) | 127.0.0.1 固定。`[asr].engine` のモデルを起動時に 1 回ロード。既定 `reazon` は ReazonSpeech (sherpa-onnx、CPU `[asr].threads` スレッド、int8 版があれば使う、25 秒ごとに切って認識)、`whisper` は faster-whisper `small` を CUDA/float16。パッケージ未導入・モデル無しなら exit 2 |
 | llama-server | `[llm].model` 設定時は Director が起動・監督、未設定なら手動 | 8080 | 起動引数は `llm_supervisor.build_llama_argv`(`--jinja` + `enable_thinking=false` で思考無効) |
 | AivisSpeech | 手動 | 10101 | 話者 ID 既定 888753760 (`idle_talk.toml` の `[tts].speaker` / `--speaker`) |
 
@@ -177,7 +177,7 @@ JSON Schema (`protocol.MESSAGE_SCHEMA`) で検証し、違反・不正 JSON は 
 - AivisSpeech には `/audio_query` → `/synthesis` の順で要求する。`/cancellable_synthesis` は AivisSpeech Engine 1.2.0 で 501 Not Implemented のため使わない。`/synthesis` は切断後も計算が続くので、中止した文の結果は epoch 不一致で破棄し、残る計算は合成中の 1 文ぶん (`tts_sentence` 以内) になる。
 - Director は起動時に `TtsClient.warmup` で 1 回空合成してから待ち受ける。初回合成は GPU (DirectML) 初期化で約 14 秒かかり `tts_sentence` (3s) を超えるため。タイムアウトは `WARMUP_TIMEOUT_S` (60s)。失敗は警告ログのみで起動は続ける。
 - LLM の SSE チャンクは `delta.content` が null でも受け付け、読み飛ばす (llama-server は最初のチャンクで null を送る)。
-- ASR の幻聴除外: `no_speech_prob` > 0.6、または `compression_ratio` > 2.4 のセグメントは捨てる (境界値ちょうどは採用)。
+- ASR の幻聴除外: `no_speech_prob` > 0.6、または `compression_ratio` > 2.4 のセグメントは捨てる (境界値ちょうどは採用)。ReazonSpeech は `no_speech_prob` を出さないので 0 とし、`compression_ratio` は faster-whisper と同じ定義 (UTF-8 長 / zlib 圧縮長) で本文から計算する。語が出ない、または 1 音 (+促音・長音・小書き・句読点) だけ (「え」「あっ」「何」等。物音の聞き違い) ならセグメントを返さない。「うん」など 2 音以上は残す。
 
 ## 終話判定・相槌・自発発話
 

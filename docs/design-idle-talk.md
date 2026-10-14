@@ -14,6 +14,7 @@
 - 2026-10-14：ドラマモードを追加（§3.1、§6.5、§7）。共有したタブの音を聞き、場面の切れ目にたまに一言つぶやく。上りバイナリの seq 最上位ビットでマイクと区別し、ドラマの台詞は FSM に入れずメモリにだけ置く。
 - 2026-10-14：ドラマモードに総合的な感想を追加（§6.5）。台詞が長く途切れたら、裏で要約したあらすじメモをもとにそれまでの感想を話す。
 - 2026-10-14：ペルソナを追加（§6.6）。人物設定を `personas.toml` に書き、画面で切り替える（`ui.persona`）。
+- 2026-10-14：ASR を faster-whisper small（GPU0）から ReazonSpeech（sherpa-onnx、CPU）に変更（§2.2、§8.1）。放送字幕を正解にした 80 クリップで CER 29.1% → 10.8%、遅延 p50 334 → 212ms（`tools/asr_bench.py`）。`no_speech_prob` は出ないので幻聴除外は `compression_ratio`（本文から計算）と語なし判定に頼る。`[asr].engine = "whisper"` で戻せる。
 - 2026-10-12：llama-server（b11564）はストリーム最初のチャンクで `delta.content` が `null` のため、SSE data 行スキーマの `content` を string または null に変更（§12.1）。
 
 ---
@@ -48,7 +49,7 @@
 ブラウザ（マイク/AudioWorklet・再生キュー・UI）⇄ WebSocket ⇄ Director（状態機械）。Director は VAD（CPU）、ASR（GPU0）、SQLite、llama-server（GPU0）、AivisSpeech（CPU）を呼ぶ。Topic Worker は M4 以降に SQLite へ書く。
 
 ### 2.2 技術選定
-LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート設定）、ASR は faster-whisper を GPU0、TTS は AivisSpeech を CPU に置く。各配置の切替条件は §8.1/§9。
+LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート設定）、ASR は ReazonSpeech（sherpa-onnx、int8）を CPU、TTS は AivisSpeech を CPU に置く（faster-whisper small を GPU0 に戻すことも設定でできる）。各配置の切替条件は §8.1/§9。
 
 ---
 
@@ -267,7 +268,7 @@ E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 |`RATIO_Q`（質問終わり）|3 応答に 1 回以下|合議書の目安|M3|
 |`ASR_HALLU`|no_speech_prob > 0.6 または compression_ratio > 2.4 で破棄|faster-whisper の標準的な閾値|M0|
 |LLM モデル|暫定 4B（9B は §9 の決定ルールで昇格）|遅延目標を確実に満たす側|M0|
-|ASR 配置|GPU0|§9|M0|
+|ASR 配置|CPU（ReazonSpeech、2 スレッド）。faster-whisper に戻すときは GPU0|§9、2026-10-14 の比較|M0|
 |TTS 配置|CPU|§9|M0|
 
 

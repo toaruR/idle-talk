@@ -6,7 +6,7 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
 - 黙っていると AI から話しかけます（ニュースの見出しを話題にすることもあります）
 - 調べないと答えられない質問は Web で検索してから答えます
 
-構成: ブラウザ（マイク・再生）⇄ Director（Python）⇄ llama-server（LLM）/ AivisSpeech（声）/ faster-whisper（音声認識）。設計は [docs/design-idle-talk.md](docs/design-idle-talk.md) にあります。
+構成: ブラウザ（マイク・再生）⇄ Director（Python）⇄ llama-server（LLM）/ AivisSpeech（声）/ ReazonSpeech（音声認識）。設計は [docs/design-idle-talk.md](docs/design-idle-talk.md) にあります。
 
 ## 必要なもの
 
@@ -16,7 +16,7 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
 | Python 3.13 以上 | 本体 | |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) の `llama-server` | 会話 | モデルは Qwen3.5-4B Q4_K_M（gguf） |
 | [AivisSpeech](https://aivis-project.com/) | 声 | 起動しておくと `127.0.0.1:10101` で待ち受けます |
-| faster-whisper | 音声認識 | 初回起動時に `small` モデルを自動で取得します |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) + ReazonSpeech | 音声認識（CPU） | モデル（約 680MB、Apache-2.0）を `data/models/reazonspeech/` に置きます。`[asr].engine = "whisper"` にすると faster-whisper `small`（GPU）に戻せます |
 | onnxruntime + [WeSpeaker ResNet34](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | 声で誰か見分ける（任意） | `voxceleb_resnet34_LM.onnx`（約 26MB、CC-BY-4.0）を `data/models/` に置きます。無ければ見分けずに動きます |
 | Chrome などのブラウザ | マイク・再生 | |
 
@@ -25,7 +25,13 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
 1. Python パッケージを入れる
    ```
    pip install -e .[dev]
-   pip install faster-whisper
+   pip install sherpa-onnx
+   ```
+   音声認識のモデルを `data/models/reazonspeech/` に展開します（約 680MB）。
+   ```
+   curl -L -o reazonspeech.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
+   tar -xjf reazonspeech.tar.bz2 -C data/models
+   move data\models\sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01 data\models\reazonspeech
    ```
 2. [idle_talk.toml](idle_talk.toml) の `[llm]` を自分の環境に合わせる
    ```toml
@@ -144,5 +150,5 @@ idle-talk.cmd status    # 動作状況
 次のものはこのリポジトリに含まれず、それぞれのライセンス・利用規約に従います。
 
 - AivisSpeech と音声モデル（話者ごとに規約が異なり、合成音声の商用利用やクレジット表記に条件があるものがあります）
-- LLM のモデル（Qwen3.5 など）と llama.cpp、faster-whisper
+- LLM のモデル（Qwen3.5 など）と llama.cpp、sherpa-onnx・ReazonSpeech（faster-whisper）
 - 外部サービス（DuckDuckGo、Bing、r.jina.ai、ニュースの RSS 配信元）
