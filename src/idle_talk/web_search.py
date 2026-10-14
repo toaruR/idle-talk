@@ -20,6 +20,7 @@ log = logging.getLogger("idle_talk.web_search")
 
 DDG_URL = "https://lite.duckduckgo.com/lite/?kl=jp-jp&q="
 BING_URL = "https://www.bing.com/search?setlang=ja&cc=JP&q="
+BING_NEWS_URL = "https://www.bing.com/news/search?setlang=ja&cc=JP&qft=sortbydate%3d%221%22&q="  # 新しい順
 READER_URL = "https://r.jina.ai/"
 FETCH_TIMEOUT_S = 8.0
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # 既定の Python-urllib だと結果が返らないことがある
@@ -32,7 +33,9 @@ SEARCH_WAIT_NOTICE = "もう少し待ってね。"  # 検索が SEARCH_WAIT_S �
 SEARCH_WAIT_S = 5.0
 
 _MARK = re.compile(r"^\s*(?:検索|けんさく)\s*[:：]\s*")
-_MARK_HEAD = "検索:"
+_SEARCH_ANY = re.compile(r"(?:検索|けんさく)\s*[:：]")
+_ANY_MARK = re.compile(r"(?:検索|けんさく|リンク)\s*[:：]")
+LINK_NOTICE = "画面に表示するね。"  # 調べたページの URL を画面の URL 欄に出したことを声で伝える
 
 
 def search_rule(today: datetime.date) -> str:
@@ -50,17 +53,32 @@ def with_search_rule(messages: list[dict], today: datetime.date | None = None) -
     return [{"role": "system", "content": rule}] + messages
 
 
-def mark_state(head: str) -> str | None:
-    """LLM 出力の先頭 head が検索指示か。'yes' / 'no' / None (まだ判断できない)。"""
-    s = head.lstrip().replace("：", ":")
-    if not s:
-        return None
-    if _MARK.match(s):
-        return "yes"
-    t = s.replace(" ", "")
-    if _MARK_HEAD.startswith(t) or "けんさく:".startswith(t):
-        return None
-    return "no"
+def link_rule() -> str:
+    return ("利用者が、さっき話したニュースや調べたページの URL・リンク・出典・記事を見たい、教えてほしいと言ったときは、"
+            "URL を読み上げず、返答の代わりに 1 行で「リンク:」とだけ出力してください。")
+
+
+def with_link_rule(messages: list[dict]) -> list[dict]:
+    """system メッセージにリンク表示の指示を足した複製を返す (直近の検索結果があるときだけ使う)。"""
+    if messages and messages[0]["role"] == "system":
+        return [{"role": "system", "content": messages[0]["content"] + link_rule()}] + messages[1:]
+    return [{"role": "system", "content": link_rule()}] + messages
+
+
+def find_mark(clause: str, links: bool = False) -> tuple[str, str | None, str]:
+    """節の中の指示を探す (先頭とは限らない)。(指示の前の文, 'search' / 'links' / None, 指示より後)。
+    指示が無ければ (clause, None, "")。links=False ならリンク表示の指示は探さない。"""
+    m = (_ANY_MARK if links else _SEARCH_ANY).search(clause)
+    if m is None:
+        return clause, None, ""
+    kind = "links" if m.group(0).startswith("リンク") else "search"
+    return clause[:m.start()].strip(), kind, clause[m.end():]
+
+
+def link_items(results: list[dict]) -> list[dict]:
+    """画面の URL 欄に出す [{title, url}]。http(s) 以外は出さない。"""
+    return [{"title": r["title"][:200], "url": r["url"]} for r in results
+            if r.get("url", "").startswith(("http://", "https://"))]
 
 
 def parse_query(text: str) -> str:
@@ -111,6 +129,40 @@ def parse_bing(page: str) -> list[dict]:
         out.append({"title": _clean(h.group(2)), "snippet": _clean(sn.group(1)) if sn else "",
                     "url": _bing_url(html.unescape(h.group(1)))})
     return out
+
+
+_LISTING_SEGS = {"tag", "tags", "theme", "themes", "category", "categories", "search", "ranking", "list"}
+# 話題カードの補充で順に検索するジャンル (毎回同じ記事にならないよう回す)
+NEWS_QUERIES = ("ニュース", "経済 ニュース", "IT 技術 ニュース", "科学 研究 ニュース", "スポーツ ニュース",
+                "エンタメ ニュース", "国際 ニュース", "暮らし ニュース")
+
+
+def parse_bing_news(page: str) -> list[dict]:
+    """Bing ニュース検索の結果から記事の [{title, snippet, url}] を取り出す。
+    概要が無いもの・URL がサイトのトップや 1 階層だけのもの (広告・特集ページ) は除く。"""
+    out: list[dict] = []
+    for block in page.split('<div class="news-card newsitem')[1:]:
+        attrs = dict(re.findall(r'data-(url|title)="([^"]*)"', block.split(">", 1)[0]))
+        sn = re.search(r'class="snippet"[^>]*>(.*?)</div>', block, re.S)
+        url, title = html.unescape(attrs.get("url", "")), _clean(attrs.get("title", ""))
+        snippet = _clean(sn.group(1)) if sn else ""
+        segs = urllib.parse.urlparse(url).path.strip("/").split("/")
+        if not (title and snippet and url.startswith(("http://", "https://")) and len(segs) >= 2):
+            continue
+        if _LISTING_SEGS & {s.lower() for s in segs}:  # タグ・特集などの一覧ページは記事ではない
+            continue
+        out.append({"title": title.removesuffix("...").strip(), "snippet": snippet, "url": url})
+    return out
+
+
+def news_search(query: str, fetch: Callable[..., bytes] | None = None) -> list[dict]:
+    """新しい順のニュース記事を検索する (話題カードの補充用)。失敗は []。"""
+    try:
+        page = (fetch or http_fetch)(BING_NEWS_URL + urllib.parse.quote(query)).decode("utf-8", "replace")
+    except (OSError, ValueError) as e:
+        log.warning("news search failed: %r %s", query, e)
+        return []
+    return parse_bing_news(page)
 
 
 ENGINES: dict[str, tuple[str, Callable[[str], list[dict]]]] = {

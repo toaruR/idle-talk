@@ -16,6 +16,10 @@
   <label>静音終了 <input type="time" id="quiet_end" value="07:00"></label>
   <label id="speaker_label" hidden>声 <select id="speaker"></select></label>
 </fieldset>
+<fieldset id="links_box" hidden>
+  <legend>URL (話したニュース・調べたページ。新しいものが上)</legend>
+  <ul id="links" style="max-height: 20em; overflow-y: auto;"></ul>
+</fieldset>
 <script src="worklet.js"></script>
 <script src="player.js"></script>
 <script src="client.js"></script>
@@ -26,6 +30,32 @@
     preparing: '返答準備中', ai_playing: 'AI再生中', interrupt_check: '割り込み確認中', rest: '休止' };
   const $ = (id) => document.getElementById(id);
   let client = null;
+
+  // 話したニュース・調べたページを URL 欄の先頭に積む (1 回分の並びは保つ)。MAX_LINKS 行を超えたら古い順 (下) から消す。
+  // 同じ URL は前の行を消して先頭に付け直す。http(s) 以外は出さず、文字列は textContent で入れる (HTML として解釈しない)
+  const MAX_LINKS = 100;
+  function showLinks(items) {
+    const list = $('links');
+    const batch = document.createDocumentFragment();
+    for (const it of items || []) {
+      if (!it || typeof it.url !== 'string' || !/^https?:\/\//.test(it.url)) continue;
+      for (const old of list.querySelectorAll('li')) if (old.dataset.url === it.url) old.remove();
+      const a = document.createElement('a'); // URL 自体をリンクにする
+      a.href = it.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = it.url;
+      const li = document.createElement('li');
+      li.dataset.url = it.url;
+      li.append(a);
+      if (it.title) li.append(` (${it.title})`);
+      batch.append(li);
+    }
+    list.prepend(batch);
+    while (list.children.length > MAX_LINKS) list.lastElementChild.remove();
+    $('links_box').hidden = list.children.length === 0;
+    list.scrollTop = 0;
+  }
 
   function readUi() {
     const ui = {
@@ -77,6 +107,7 @@
         onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); },
         onError: (m) => { $('error').textContent = `[${m.code}] ${m.message}`; },
         onSearch: (m) => { $('search').textContent = m.active ? `(Web で「${m.query}」を調べています…)` : ''; },
+        onLinks: (m) => showLinks(m.items),
         onOpen: pushUi, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
       });
       await C.startCapture({

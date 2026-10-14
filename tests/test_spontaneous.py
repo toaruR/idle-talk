@@ -363,6 +363,61 @@ def test_spontaneous_uses_topic_card_once(tmp_path):
     asyncio.run(run())
 
 
+def test_topic_card_url_shown_without_asking_and_kept_for_link_request(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        topics.add_card(store, "新しい駅が開業", source_url="https://news.test/a", expires_at=10_000)
+        d.pipeline._llm = lambda m: iter(["駅の話です。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        items = [{"title": "新しい駅が開業", "url": "https://news.test/a"}]
+        assert [m for m in b.texts if m["t"] == "links"] == [{"t": "links", "items": items}]
+        assert d.pipeline.links == items  # 後で「さっきのニュースの URL は?」と聞かれたら出せる
+    asyncio.run(run())
+
+
+def test_last_topic_card_requests_refill(tmp_path):
+    class Worker:
+        def __init__(self):
+            self.requests = 0
+
+        def request_refill(self):
+            self.requests += 1
+            return True
+
+        def on_state(self, state):
+            pass
+
+    async def run():
+        d, b, store = make(tmp_path)
+        d.topic_worker = w = Worker()
+        topics.add_card(store, "a", expires_at=10_000)
+        topics.add_card(store, "b", expires_at=10_000)
+        d.pipeline._llm = lambda m: iter(["話です。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "radio": True}))
+        for want in (0, 1, 2):  # 残り 2 枚: 補充しない / 最後の 1 枚: 補充 / 在庫なし: 補充
+            d.clock_.advance(3)
+            assert d.spontaneous_tick() == "spontaneous"
+            await until(lambda: not d.spontaneous.pending)
+            assert w.requests == want
+    asyncio.run(run())
+
+
+def test_topic_card_without_http_url_shows_nothing(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        topics.add_card(store, "新しい駅が開業", expires_at=10_000)
+        d.pipeline._llm = lambda m: iter(["駅の話です。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        assert not [m for m in b.texts if m["t"] == "links"] and d.pipeline.links == []
+    asyncio.run(run())
+
+
 def test_topic_card_trims_history_and_forbids_repeating_scenery(tmp_path):
     async def run():
         d, b, store = make(tmp_path)

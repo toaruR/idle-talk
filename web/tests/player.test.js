@@ -170,6 +170,18 @@ test('client: downlink binary and cancel routed to player; state/ui', () => {
     t: 'ui', mute: true, on: false, radio: true, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
 });
 
+test('client direct: search and links routed to their handlers', () => {
+  const { WS, created } = fakeWs();
+  const searches = [];
+  const links = [];
+  C.createClient({ port: 1, WebSocketCtor: WS, onSearch: (m) => searches.push(m), onLinks: (m) => links.push(m) });
+  const ws = created[0];
+  ws.onmessage({ data: JSON.stringify({ t: 'search', query: 'q', active: true }) });
+  ws.onmessage({ data: JSON.stringify({ t: 'links', items: [{ title: 'A', url: 'https://a.test/' }] }) });
+  assert.deepStrictEqual(searches, [{ t: 'search', query: 'q', active: true }]);
+  assert.deepStrictEqual(links, [{ t: 'links', items: [{ title: 'A', url: 'https://a.test/' }] }]);
+});
+
 test('client direct: malformed/non-object JSON ignored, error routed to onError, no player ok', () => {
   const { WS, created } = fakeWs();
   const errors = [];

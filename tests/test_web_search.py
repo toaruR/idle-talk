@@ -6,9 +6,9 @@ import pytest
 
 from idle_talk import pipeline as pipeline_mod
 from idle_talk.pipeline import ResponsePipeline
-from idle_talk.web_search import (ANSWER_TURNS, BING_URL, DDG_URL, READER_URL, SEARCH_NOTICE, SEARCH_WAIT_NOTICE,
-                                  WebSearch, answer_messages, format_results, mark_state, page_excerpt, parse_bing,
-                                  parse_duckduckgo, parse_query, with_search_rule)
+from idle_talk.web_search import (ANSWER_TURNS, BING_NEWS_URL, BING_URL, DDG_URL, LINK_NOTICE, READER_URL, SEARCH_NOTICE, SEARCH_WAIT_NOTICE,
+                                  WebSearch, answer_messages, find_mark, format_results, link_items, page_excerpt, parse_bing,
+                                  news_search, parse_bing_news, parse_duckduckgo, parse_query, with_search_rule)
 
 LITE_PAGE = """
 <table>
@@ -43,13 +43,14 @@ def test_parse_duckduckgo_bot_page_is_empty():
     assert parse_duckduckgo("<html>anomaly detected</html>") == []
 
 
-@pytest.mark.parametrize("head,want", [
-    ("", None), ("  ", None), ("検", None), ("検索", None), (" 検索 ", None),
-    ("検索:", "yes"), ("検索： 日経平均", "yes"), ("けんさく: 天気", "yes"),
-    ("検査", "no"), ("こんにちは", "no"), ("検索した", "no"),
+@pytest.mark.parametrize("clause,want", [
+    ("検索:", ("", "search", "")), ("検索： 日経平均", ("", "search", " 日経平均")),
+    ("けんさく: 天気", ("", "search", " 天気")),
+    ("知りたいなら検索: ベトナム 資金洗浄", ("知りたいなら", "search", " ベトナム 資金洗浄")),
+    ("検査の結果、", ("検査の結果、", None, "")), ("検索した", ("検索した", None, "")),
 ])
-def test_mark_state(head, want):
-    assert mark_state(head) == want
+def test_find_mark(clause, want):
+    assert find_mark(clause) == want
 
 
 def test_parse_query_first_line_only():
@@ -91,6 +92,33 @@ BING_PAGE = """
 """
 JINA_TEXT = ("Title: 日経平均株価\n\nURL Source: https://www.nikkei.com/\n\nMarkdown Content:\nメニュー\n速報\n"
              "国内株式\n日経平均株価\n\n67,777.52\n(10/13 15:45 大引)\n始値\n68,564.85\n")
+
+
+BING_NEWS_PAGE = """
+<div class="news-card newsitem cardcommon" data-url="https://www.msn.com/ja-jp/sports/baseball/abc" data-title="日本シリーズ進出は? プロ野球 ..." data-author="BASEBALL KING">
+<div class="snippet" title="x">12日に放送された番組で、日本シリーズ進出チームを予想した。</div></div>
+<div class="news-card newsitem cardcommon" data-url="https://mainichi.jp/kyushu/" data-title="秋得キャンペーン">
+<div class="snippet">50%OFF で読み放題</div></div>
+<div class="news-card newsitem cardcommon" data-url="https://www.sanspo.com/tag/player-mlb/otani/" data-title="大谷翔平ニュース">
+<div class="snippet">最新ニュース一覧</div></div>
+<div class="news-card newsitem cardcommon" data-url="https://example.test/a/1" data-title="概要なし"></div>
+"""
+
+
+def test_parse_bing_news_keeps_articles_only():
+    assert parse_bing_news(BING_NEWS_PAGE) == [
+        {"title": "日本シリーズ進出は? プロ野球", "snippet": "12日に放送された番組で、日本シリーズ進出チームを予想した。",
+         "url": "https://www.msn.com/ja-jp/sports/baseball/abc"}]
+
+
+def test_news_search_sorted_by_date_and_failure_is_empty():
+    urls = []
+    assert len(news_search("経済 ニュース", lambda u: urls.append(u) or BING_NEWS_PAGE.encode())) == 1
+    assert urls[0].startswith(BING_NEWS_URL) and "sortbydate" in urls[0]
+
+    def boom(u):
+        raise OSError("down")
+    assert news_search("x", boom) == []
 
 
 def test_parse_bing_decodes_redirect_url():
@@ -213,6 +241,55 @@ def test_slow_search_says_wait_notice_once(monkeypatch):
     p, _, audio, _ = make([["検索: x\n"], ["はい。"]], None)
     asyncio.run(p.respond(MSGS, search=lambda q: time.sleep(0.3) or []))
     assert audio == [SEARCH_NOTICE, SEARCH_WAIT_NOTICE, "はい。"]
+
+
+@pytest.mark.parametrize("clause,links,want", [
+    ("リンク:", True, ("", "links", "")), ("リンク：1", True, ("", "links", "1")),
+    ("はい、リンク:", True, ("はい、", "links", "")),
+    ("リンク:", False, ("リンク:", None, "")), ("リンゴ", True, ("リンゴ", None, "")),
+    ("検索: x", True, ("", "search", " x")),
+])
+def test_find_mark_links(clause, links, want):
+    assert find_mark(clause, links=links) == want
+
+
+def test_search_mark_at_end_speaks_preamble_then_searches():
+    """実機ログ: 返答の末尾に「検索: 語」を書いた。前の文は読み上げ、指示は読まずに検索する。"""
+    queries = []
+    p, calls, audio, _ = make([["ニュースの URL を", "探しているんですね。", "知りたいなら、",
+                                "検索: ベトナム 資金洗浄 最新ニュース"], ["分かりました。"]], None)
+    asyncio.run(p.respond(MSGS, search=lambda q: queries.append(q) or []))
+    assert queries == ["ベトナム 資金洗浄 最新ニュース"]
+    assert audio == ["ニュースの URL を探しているんですね。", "知りたいなら、", SEARCH_NOTICE, "分かりました。"]
+    assert not any("検索" in a for a in audio)
+
+
+def test_link_items_only_http():
+    rs = [{"title": "A", "url": "https://a.test/"}, {"title": "B", "url": "javascript:alert(1)"}, {"title": "C"}]
+    assert link_items(rs) == [{"title": "A", "url": "https://a.test/"}]
+
+
+def test_search_keeps_links_then_link_request_shows_them():
+    p, calls, audio, emits = make([["検索: 日経平均株価\n"], ["6万円台です。"], ["リンク", ":"]], None)
+
+    async def run():
+        await p.respond(MSGS, search=lambda q: parse_duckduckgo(LITE_PAGE))
+        await p.respond(MSGS + [{"role": "user", "content": "そのページを教えて"}], search=lambda q: [])
+        await asyncio.sleep(0)
+    asyncio.run(run())
+    assert "リンク:" not in calls[0][0]["content"]  # 検索結果が無いうちはリンクの指示を足さない
+    assert "「リンク:」" in calls[2][0]["content"]
+    assert audio[-1] == LINK_NOTICE and len(calls) == 3
+    shown = [m for m in emits if m["t"] == "links"]
+    assert shown == [{"t": "links", "items": [
+        {"title": "日経平均株価 (日経225) & チャート", "url": "https://www.nikkei.com/marketdata/quote/NK225/"},
+        {"title": "日経平均株価：指数情報 - Yahoo!ファイナンス", "url": "https://finance.yahoo.co.jp/quote/998407.O"}]}]
+
+
+def test_link_mark_without_search_results_is_spoken():
+    p, _, audio, emits = make([["リンク:", "はこちら。"]], None)
+    asyncio.run(p.respond(MSGS, search=lambda q: []))
+    assert audio == ["リンク:はこちら。"] and not [m for m in emits if m["t"] == "links"]
 
 
 def test_cancel_during_search_skips_second_llm():

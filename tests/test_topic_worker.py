@@ -156,3 +156,73 @@ def test_no_duplicate_cards_across_restart(store):
     assert again.poll_once() == 0
     assert store.count("topic_cards") == 3
     assert pages == []  # 保存済みの記事はページも読まない
+
+
+# ---- 在庫切れの補充 (フィードの取り直し + ニュース検索) ----
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+NEWS = [{"title": "新型ロケット打ち上げ成功", "snippet": "宇宙機関は 14 日、新型ロケットの打ち上げに成功したと発表した。",
+         "url": "https://news.test/space/1"}]
+
+
+def test_request_refill_throttled_and_ignored_when_stopped(store):
+    from idle_talk.topic_worker import REFILL_MIN_S
+    clock = Clock()
+    w = TopicWorker(store, [], fetch=lambda u: FEED, clock=clock)
+    assert not w.request_refill() and not w.wake.is_set()  # 停止中
+    w.start()
+    assert w.request_refill() and w.wake.is_set()
+    w.wake.clear()
+    clock.t = REFILL_MIN_S - 1
+    assert not w.request_refill() and not w.wake.is_set()  # 取得先に負荷をかけない
+    clock.t = REFILL_MIN_S
+    assert w.request_refill()
+
+
+def test_refill_uses_feed_first_then_news_search_rotating_queries(store):
+    queries = []
+    w = TopicWorker(store, ["http://feed.test/rss"], fetch=lambda u: FEED,
+                    news=lambda q: queries.append(q) or NEWS, news_queries=("A", "B"))
+    w.start()
+    assert w.refill() == 3 and queries == []  # フィードに新着があればニュース検索はしない
+    assert w.refill() == 1 and queries == ["A"]
+    row = store.query("SELECT * FROM topic_cards WHERE source_url=?", ("https://news.test/space/1",))[0]
+    assert row["hook"] == "新型ロケット打ち上げ成功" and "打ち上げに成功" in row["facts"]
+    assert row["expires_at"] > row["published_at"]
+    assert w.refill() == 0 and queries == ["A", "B"]  # 同じ記事は重複保存しない。ジャンルは順に回す
+
+
+def test_refill_without_news_is_poll_only(store):
+    w = TopicWorker(store, ["http://feed.test/rss"], fetch=lambda u: FEED)
+    w.start()
+    assert w.refill() == 3 and w.refill() == 0
+
+
+def test_topic_loop_wakes_on_refill_request(store):
+    import asyncio
+
+    from idle_talk.main import topic_loop
+    calls = []
+    w = TopicWorker(store, [], fetch=lambda u: FEED)
+    w.poll_once = lambda: calls.append("poll") or 0
+    w.refill = lambda: calls.append("refill") or 0
+
+    async def run():
+        t = asyncio.get_running_loop().create_task(topic_loop(w, 3600))
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        assert calls == ["poll"]  # 起動直後の 1 回。次は 1 時間後
+        w.start()
+        assert w.request_refill()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        t.cancel()
+    asyncio.run(run())
+    assert calls == ["poll", "refill"]

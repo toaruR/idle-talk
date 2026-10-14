@@ -8,13 +8,13 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from .clause import ClauseSplitter
+from .clause import ClauseSplitter, is_synthesizable
 from .clients import ClientError
 from .epoch import Epoch
 from .errors import ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 from .llm_supervisor import FALLBACK_PHRASE
-from .web_search import (SEARCH_NOTICE, SEARCH_WAIT_NOTICE, SEARCH_WAIT_S, answer_messages, mark_state,
-                         parse_query, with_search_rule)
+from .web_search import (LINK_NOTICE, SEARCH_NOTICE, SEARCH_WAIT_NOTICE, SEARCH_WAIT_S, answer_messages, find_mark,
+                         link_items, parse_query, with_link_rule, with_search_rule)
 
 log = logging.getLogger("idle_talk.pipeline")
 _END = object()
@@ -37,6 +37,7 @@ class ResponsePipeline:
         self._tts_lock = asyncio.Lock()
         self._utt = 0
         self.discarded = 0
+        self.links: list[dict] = []  # 直近の検索結果の [{title, url}]。「URL を教えて」で画面に出す
 
     # ---- cancel (不変条件 1: LLM/ASR の完了を待たない) ----
     async def cancel(self) -> int:
@@ -85,31 +86,49 @@ class ResponsePipeline:
         sp = ClauseSplitter()
         ep = self.epoch.current
         try:
-            toks = iter(self._llm(with_search_rule(messages) if search else messages))
+            links = list(self.links) if search is not None else []
+            first = messages
             if search is not None:
-                head, verdict = "", None
-                for tok in toks:  # 先頭が「検索:」か判断できるまで節分割に回さない
-                    head += tok
-                    verdict = mark_state(head)
-                    if verdict is not None:
-                        break
-                if verdict == "yes":
-                    while "\n" not in head.lstrip():  # 検索語の行を最後まで受け取る (以降の出力は使わない)
-                        tok = next(toks, None)
-                        if tok is None:
-                            break
-                        head += tok
-                    getattr(toks, "close", lambda: None)()
-                    yield from self._search_clauses(messages, parse_query(head), search, ep, emit)
-                    return
-                yield from sp.feed(head)
+                first = with_search_rule(with_link_rule(messages) if links else messages)
+            toks = iter(self._llm(first))
+            if search is None:
+                for tok in toks:
+                    yield from sp.feed(tok)
+                yield from sp.flush()
+                return
+            # 「検索:」「リンク:」は返答の先頭とは限らない (末尾に書くこともある)。節ごとに探し、前の文だけ読み上げる
             for tok in toks:
-                yield from sp.feed(tok)
-            yield from sp.flush()
+                for clause in sp.feed(tok):
+                    kind, after = yield from self._before_mark(clause, links)
+                    if kind is not None:
+                        getattr(toks, "close", lambda: None)()
+                        yield from self._mark_clauses(kind, after, messages, links, search, ep, emit)
+                        return
+            for clause in sp.flush():
+                kind, after = yield from self._before_mark(clause, links)
+                if kind is not None:
+                    yield from self._mark_clauses(kind, after, messages, links, search, ep, emit)
         except (ClientError, OSError, ValueError, TimeoutError) as e:  # LlmTimeout 等/接続断。5001 + 定型句にフォールバック
             log.warning("llm failed: %s", e)
             emit({"t": "error", "code": ERR_LLM_TIMEOUT, "message": str(e)[:200]})
             yield FALLBACK_PHRASE
+
+    @staticmethod
+    def _before_mark(clause: str, links: list[dict]):
+        """節に指示があれば前の文を読み上げ (yield)、(種類, 指示以降) を返す。無ければ節を読み上げて (None, "")。"""
+        before, kind, after = find_mark(clause, links=bool(links))
+        if is_synthesizable(before):
+            yield before
+        return kind, after
+
+    def _mark_clauses(self, kind: str, after: str, messages: list[dict], links: list[dict],
+                      search: Callable[[str], list[dict]], ep: int, emit: Callable[[dict], None]):
+        if kind == "links":  # 話したニュース・調べたページの URL は読み上げず画面の URL 欄に出す
+            log.info("show links: %d", len(links))
+            emit({"t": "links", "items": links})
+            yield LINK_NOTICE
+            return
+        yield from self._search_clauses(messages, parse_query(after), search, ep, emit)
 
     def _search_clauses(self, messages: list[dict], query: str, search: Callable[[str], list[dict]], ep: int,
                         emit: Callable[[dict], None]):
@@ -127,6 +146,8 @@ class ResponsePipeline:
                     yield SEARCH_WAIT_NOTICE
                 results = fut.result()
         emit({"t": "search", "query": query[:200], "active": False})
+        if results:  # 取消されても調べた結果は残す (後で「URL を教えて」と言われたら出す)
+            self.links = link_items(results)
         if not self.epoch.is_current(ep):
             return
         sp = ClauseSplitter()

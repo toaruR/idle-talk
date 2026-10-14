@@ -38,6 +38,7 @@ from .spontaneous import Spontaneous
 from .store import Store
 from .topics import mark_used, select_cards
 from .vad import Vad
+from .web_search import link_items
 
 log = logging.getLogger("idle_talk.director")
 
@@ -543,6 +544,10 @@ class IdleTalkDirector:
 
     async def _spontaneous_respond(self) -> None:
         topic, card = self._pick_topic()
+        if card is not None and (card["source_url"] or "").startswith(("http://", "https://")):
+            # カードで話すニュースは聞かれる前に画面の URL 欄へ出し、「URL を教えて」にも答えられるよう覚えておく
+            self.pipeline.links = link_items([{"title": card["hook"], "url": card["source_url"]}])
+            self._emit({"t": "links", "items": self.pipeline.links})
         messages = self._chat_messages(CARD_TURNS if card else None)
         if card:
             prompt = (RADIO_CARD_PROMPT if self.spontaneous.radio else CARD_PROMPT).format(topic=topic)
@@ -560,15 +565,17 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
-    def _pick_topic(self) -> tuple[str, bool]:
-        """(話題, カードか)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
-        cards = select_cards(self.store, self.now_ms())
+    def _pick_topic(self) -> tuple[str, dict | None]:
+        """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
+        cards = select_cards(self.store, self.now_ms(), limit=2)
+        if len(cards) < 2 and self.topic_worker is not None:  # これで在庫切れ: 次の発話までにニュースを仕入れる
+            self.topic_worker.request_refill()
         if not cards:
-            return f"「{random.choice(SPONT_TOPICS)}」", False
+            return f"「{random.choice(SPONT_TOPICS)}」", None
         card = cards[0]
         mark_used(self.store, card["id"], self.now_ms())
         facts = re.sub(r"<[^>]+>", "", card["facts"] or "").strip()[:CARD_FACTS_MAX]
-        return f"最近見かけたニュース「{card['hook']}」" + (f"(概要: {facts})" if facts else ""), True
+        return f"最近見かけたニュース「{card['hook']}」" + (f"(概要: {facts})" if facts else ""), card
 
     # ---- 記憶 (設計書 3.4): 応答の再生完了後に、溜まった利用者発話から抜き出して保存する ----
     def _chat_messages(self, turns: int | None = None) -> list[dict]:

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import logging
 import re
@@ -19,6 +20,7 @@ from .topics import add_card, has_card
 
 TOPIC_TTL_MS = 24 * 60 * 60 * 1000  # カード有効期間 (published_at から)
 FETCH_TIMEOUT_S = 10.0
+REFILL_MIN_S = 300  # 在庫切れによる取り直しの最短間隔 (秒)。取得先に負荷をかけない
 SUMMARY_MIN_CHARS = 30  # フィードの概要 (タグ除去後) がこれより短ければ記事ページの説明文で補う
 log = logging.getLogger("idle_talk.topic_worker")
 _ATOM = "{http://www.w3.org/2005/Atom}"
@@ -105,9 +107,17 @@ class TopicWorker:
     def __init__(self, store: Store, feed_urls: list[str],
                  fetch: Callable[[str], bytes] = http_fetch,
                  generate: Callable[[dict, threading.Event], str | None] | None = None,
-                 now_ms: Callable[[], int] | None = None, ttl_ms: int = TOPIC_TTL_MS) -> None:
+                 now_ms: Callable[[], int] | None = None, ttl_ms: int = TOPIC_TTL_MS,
+                 news: Callable[[str], list[dict]] | None = None, news_queries: tuple[str, ...] = (),
+                 clock: Callable[[], float] | None = None) -> None:
         import time
         self.store = store
+        self._news = news  # 在庫切れでフィードに新着も無いときのニュース検索 (query -> [{title, snippet, url}])
+        self.news_queries = news_queries
+        self._news_i = 0
+        self._clock = clock or time.monotonic
+        self._last_refill: float | None = None
+        self.wake = asyncio.Event()  # request_refill で立つ。topic_loop が待ち合わせる
         self.feed_urls = list(feed_urls)
         self._fetch = fetch
         self._generate = generate or (lambda item, cancel: item["title"])
@@ -158,6 +168,31 @@ class TopicWorker:
                 if not self.running or self._cancel.is_set():
                     break
                 n += self._store_item(item)
+        return n
+
+    # ---- 在庫切れの補充 ----
+    def request_refill(self) -> bool:
+        """未使用の話題カードが尽きたとき Director が呼ぶ。REFILL_MIN_S 以内の再要求と停止中は無視する。"""
+        now = self._clock()
+        if not self.running or (self._last_refill is not None and now - self._last_refill < REFILL_MIN_S):
+            return False
+        self._last_refill = now
+        self.wake.set()
+        return True
+
+    def refill(self) -> int:
+        """フィードを取り直し、新着が無ければニュース検索 (ジャンルを順に回す) の記事をカードにする。保存件数を返す。"""
+        n = self.poll_once()
+        if n or self._news is None or not self.news_queries or not self.running:
+            return n
+        query = self.news_queries[self._news_i % len(self.news_queries)]
+        self._news_i += 1
+        for r in self._news(query):
+            if not self.running or self._cancel.is_set():
+                break
+            n += self._store_item({"title": r["title"], "summary": r.get("snippet") or "",
+                                   "url": r.get("url"), "published_at": None})
+        log.info("topic cards from news search %r: %d", query, n)
         return n
 
     def _store_item(self, item: dict) -> int:

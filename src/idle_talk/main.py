@@ -27,7 +27,7 @@ from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
 from .server import serve
 from .store import Store
 from .topic_worker import TopicWorker
-from .web_search import WebSearch
+from .web_search import NEWS_QUERIES, WebSearch, news_search
 from .vad import FRAME_MS, EnergyVad
 
 log = logging.getLogger("idle_talk.main")
@@ -130,12 +130,13 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
     feeds = load_topics(args.config).feeds
-    if feeds:
-        director.topic_worker = TopicWorker(store, list(feeds))
-        director.topic_worker.start()
     search = load_search(args.config)
     if search.on:
         director.web_search = WebSearch(engines=search.engines, read_page=search.read_page)
+    if feeds or search.on:  # 話題カードが尽きたらニュース検索でも補充する ([search].on のとき)
+        director.topic_worker = TopicWorker(store, list(feeds), news=news_search if search.on else None,
+                                            news_queries=NEWS_QUERIES)
+        director.topic_worker.start()
     return director
 
 
@@ -227,15 +228,30 @@ async def spontaneous_loop(director: IdleTalkDirector, interval_s: float = SPONT
 
 async def topic_loop(worker: TopicWorker, interval_s: float,
                      sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
-    """起動直後と interval_s ごとにフィードを取得して話題カードを保存する。休止中は poll_once が何もしない。"""
+    """起動直後と interval_s ごとにフィードを取得して話題カードを保存する。休止中は poll_once が何もしない。
+    在庫切れで worker.wake が立ったら待たずに refill (フィードの取り直し + ニュース検索) する。"""
+    refill = False
     while True:
         try:
-            n = await asyncio.to_thread(worker.poll_once)
+            n = await asyncio.to_thread(worker.refill if refill else worker.poll_once)
             if n:
                 log.info("topic cards saved: %d", n)
         except sqlite3.Error:  # 保存失敗で常駐ループを止めない (取得失敗は poll_once 内で握る)
             log.exception("topic poll failed")
-        await sleep(interval_s)
+        worker.wake.clear()
+        refill = await _sleep_or_wake(sleep(interval_s), worker.wake)
+
+
+async def _sleep_or_wake(sleeping: Awaitable[None], wake: asyncio.Event) -> bool:
+    """sleeping が終わるか wake が立つまで待つ。wake で起きたら True。"""
+    timer = asyncio.ensure_future(sleeping)
+    waiter = asyncio.ensure_future(wake.wait())
+    try:
+        await asyncio.wait({timer, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        timer.cancel()
+        waiter.cancel()
+    return wake.is_set()
 
 
 async def stop_watch(path: Path, stop: Callable[[], None], interval_s: float = STOP_POLL_S,
