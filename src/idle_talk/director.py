@@ -14,7 +14,7 @@ import re
 import socket
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import replace
@@ -38,6 +38,8 @@ from .spontaneous import Spontaneous
 from .store import Store
 from .topics import mark_used, select_cards
 from .vad import Vad
+from .voice_id import (ASK_MAX, ASK_PROMPT, ASKED_PROMPT, MIN_VOICE_MS, VoiceBook, name_messages, parse_name,
+                       speaker_prompt)
 from .web_search import link_items
 
 log = logging.getLogger("idle_talk.director")
@@ -172,6 +174,13 @@ class IdleTalkDirector:
         self.set_speaker: Callable[[int], None] | None = None  # 画面で選んだ話者 ID を TTS へ (main が結線)
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
         self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
+        # 話者識別 (設計書 6.4)。enable_voice_id で有効にする
+        self.voices: VoiceBook | None = None
+        self._voice: tuple[int, object] | None = None  # 認識結果待ちの声の特徴 (utterance_id, 埋め込み)
+        self._speaker: int | None = None  # 今の話し相手 (speakers.id)。None = 知らない声 / 未判定
+        self._asks: Counter[int] = Counter()  # 起動してから名前を尋ねた回数 (話者別)
+        self._ask_sid: int | None = None  # 名前を尋ねた相手。その人の次の発話から名前を抜き出す
+        self._name_pending: list[str] = []  # 名前の抜き出し待ちの発話
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -219,6 +228,11 @@ class IdleTalkDirector:
         self.backchannel = Backchannel(clips, self._bc_play, lambda: self._cancel_path("backchannel"),
                                        self._bc_record, self.cfg, self.clock)
         return self.backchannel
+
+    def enable_voice_id(self, embed: Callable[[bytes], object], threshold: float) -> VoiceBook:
+        self.voices = VoiceBook(self.store, threshold)
+        self.ingress.embed, self.ingress.on_voice, self.ingress.voice_min_ms = embed, self._on_voice, MIN_VOICE_MS
+        return self.voices
 
     def _bc_play(self, text: str, wav: bytes) -> None:
         self._bc_active = text
@@ -364,6 +378,7 @@ class IdleTalkDirector:
         if in_ai and self._is_echo(uid, text):
             return False
         self._text = text
+        self._identify(uid)
         self._m_mark("asr_done")
         self._release_spont_hold(speech=True)
         if self.fsm.ctx.state is State.INTERRUPT_CHECK and self._judge_interrupt(text) == "backchannel":
@@ -374,9 +389,56 @@ class IdleTalkDirector:
             self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=self.cfg.MIN_SEG))
         talk_log.info("USER: %s", text)
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
+        if self._ask_sid is not None and self._speaker == self._ask_sid:  # 名前を尋ねた相手の返事
+            self._name_pending = self._name_pending[-1:] + [text]
         if len(text) >= MIN_UTTERANCE_CHARS:  # 古い分は捨て、直近 MEM_BATCH 発話だけ抽出に回す
             self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text)]
         return True
+
+    # ---- 話者識別 (設計書 6.4) ----
+    def _on_voice(self, uid: int, emb: object) -> None:
+        self._voice = (uid, emb)
+
+    def _identify(self, uid: int) -> None:
+        """自声・語なしを除いた発話の声で話し相手を決める。声の特徴が無い (短い発話) なら直前の相手のまま。"""
+        v, self._voice = self._voice, None
+        if self.voices is None or v is None or v[0] != uid:
+            return
+        sid = self.voices.identify(v[1], self.now_ms())
+        if sid != self._speaker:
+            log.info("speaker changed: %s -> %s (%s)", self._speaker, sid, self.voices.name(sid) or "名前未登録")
+        self._speaker = sid
+
+    def _speaker_section(self, ask: bool) -> str:
+        """今の話し相手の節。名前の分からない登録済みの相手には、ask なら ASK_MAX 回まで名前を尋ねさせる。"""
+        if self.voices is None or self._speaker is None:
+            return ""
+        name = self.voices.name(self._speaker)
+        if not name and self._ask_sid == self._speaker and self._name_pending:  # 尋ねた直後の返事 (抜き出しは再生後)
+            return ASKED_PROMPT
+        if name or not ask or self._asks[self._speaker] >= ASK_MAX:
+            return speaker_prompt(name)
+        self._asks[self._speaker] += 1
+        self._ask_sid, self._name_pending = self._speaker, []
+        return ASK_PROMPT
+
+    async def _learn_name(self, utterances: list[str], stop: threading.Event) -> None:
+        sid = self._ask_sid
+        try:
+            text = await asyncio.to_thread(self._collect, name_messages(utterances), stop)
+        except Exception as e:  # noqa: BLE001  LLM の失敗で会話を止めない (次に尋ねたときに再挑戦)
+            log.warning("name extraction failed: %s", e)
+            return
+        if text is None or asyncio.current_task() is not self._mem_task or sid != self._ask_sid:
+            return
+        self._name_pending = []
+        name, self._ask_sid = parse_name(text), None  # 名乗らなかったら、次の応答で (ASK_MAX まで) 改めて尋ねる
+        if name is None:
+            return
+        kept = self.voices.set_name(sid, name, self.now_ms())
+        if self._speaker == sid:
+            self._speaker = kept
+        log.info("speaker %d named %r%s", sid, name, f" (merged into {kept})" if kept != sid else "")
 
     def _is_echo(self, uid: int, text: str) -> bool:
         """AI 再生中に始まった発話の認識結果が直近 AI 発話の本文に含まれる = スピーカーから回り込んだ自声 (§6.2)。
@@ -578,20 +640,28 @@ class IdleTalkDirector:
         return f"最近見かけたニュース「{card['hook']}」" + (f"(概要: {facts})" if facts else ""), card
 
     # ---- 記憶 (設計書 3.4): 応答の再生完了後に、溜まった利用者発話から抜き出して保存する ----
-    def _chat_messages(self, turns: int | None = None) -> list[dict]:
-        """system + 履歴。turns を指定すると直近 turns 件だけ渡す。"""
+    def _chat_messages(self, turns: int | None = None, ask: bool = False) -> list[dict]:
+        """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。"""
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in history_window(self.store, self.cfg) if t["text"]]
-        return [{"role": "system", "content": SYSTEM_PROMPT + memory_prompt(self.store)}] + (
+        system = SYSTEM_PROMPT + memory_prompt(self.store) + self._speaker_section(ask)
+        return [{"role": "system", "content": system}] + (
             history[-turns:] if turns else history)
 
     def _start_memory(self) -> None:
         """応答と LLM を取り合わないよう、再生完了 (IDLE) 後にだけ走らせる。利用者発話で取消し、次回まとめて再試行する。"""
-        if not self._mem_pending or (self._mem_task is not None and not self._mem_task.done()):
+        if not (self._mem_pending or self._name_pending) or (self._mem_task is not None and not self._mem_task.done()):
             return
         self._mem_stop = threading.Event()
         self._mem_task = asyncio.get_running_loop().create_task(
-            self._extract_memory(list(self._mem_pending), self._mem_stop))
+            self._background(list(self._mem_pending), list(self._name_pending), self._mem_stop))
+
+    async def _background(self, batch: list[tuple[int, str]], names: list[str], stop: threading.Event) -> None:
+        """名前の抜き出し (尋ねた直後なので先に) と記憶の抽出を順に行う。"""
+        if names:
+            await self._learn_name(names, stop)
+        if batch and not stop.is_set():
+            await self._extract_memory(batch, stop)
 
     def _cancel_memory(self) -> None:
         self._mem_stop.set()
@@ -623,7 +693,7 @@ class IdleTalkDirector:
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:
-        messages = self._chat_messages()
+        messages = self._chat_messages(ask=True)
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current

@@ -14,7 +14,7 @@ from typing import Any
 
 from .errors import ERR_DB
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: speakers (話者識別、設計書 6.4)
 
 log = logging.getLogger("idle_talk.store")
 
@@ -53,9 +53,16 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at INTEGER,
     deletable INTEGER
 );
+CREATE TABLE IF NOT EXISTS speakers (
+    id INTEGER PRIMARY KEY,
+    name TEXT NULL,
+    embedding BLOB NOT NULL,
+    n INTEGER,
+    updated_at INTEGER
+);
 """
 
-TABLES = ("events", "turns", "topic_cards", "memories")
+TABLES = ("events", "turns", "topic_cards", "memories", "speakers")
 
 
 def _integrity_ok(path: Path) -> bool:
@@ -191,7 +198,7 @@ class Store:
         return self.query(f"SELECT COUNT(*) FROM {table}")[0][0]
 
     def delete_all(self) -> None:
-        """§7 全削除: 4 テーブルの全行を削除する。"""
+        """§7 全削除: 全テーブルの全行を削除する。"""
         def _do(con: sqlite3.Connection) -> None:
             con.execute("BEGIN")
             try:

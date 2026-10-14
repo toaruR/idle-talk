@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import Counter, deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import shared_memory
 
 from .clients import AsrClient
@@ -30,7 +31,10 @@ class Ingress:
                  clock: Callable[[], float] = time.monotonic,
                  silent_rms: float = 1.0,
                  on_speech_end: Callable[[], None] | None = None,
-                 offload: Offload | None = None) -> None:
+                 offload: Offload | None = None,
+                 embed: Callable[[bytes], object] | None = None,
+                 on_voice: Callable[[int, object], None] | None = None,
+                 voice_min_ms: int = 0) -> None:
         self.director = director
         self.cfg = director.cfg
         self.vad = vad
@@ -40,6 +44,11 @@ class Ingress:
         self.on_speech_end = on_speech_end  # MIN_SEG 以上の発話終了通知 (M1 計測 eot_wait)
         self.offload = offload  # None なら ASR を呼び出し元で同期実行する
         self.asr_pending = 0  # 認識待ちの区間数
+        # 話者識別 (設計書 6.4): voice_min_ms 以上の区間の声の特徴を ASR と並行して計算し、認識結果の直前に on_voice へ渡す
+        self.embed = embed
+        self.on_voice = on_voice
+        self.voice_min_ms = voice_min_ms
+        self._embed_pool: ThreadPoolExecutor | None = None
         self.clock = clock
         self.silent_rms = silent_rms
         self.frames_by_state: Counter[str] = Counter()
@@ -112,23 +121,34 @@ class Ingress:
         uid = self._uid
         name = self._put_shm(pcm)
         self.asr_pending += 1
+        voice = self._start_embed(pcm) if seg_ms >= self.voice_min_ms else None
 
-        def work() -> object:
+        def work() -> tuple[object, object]:
             try:
-                return self.asr.transcribe(uid, name, seg_ms / 1000)
+                res = self.asr.transcribe(uid, name, seg_ms / 1000)
             except Exception as e:  # noqa: BLE001  認識の失敗で会話を止めない (該当発話だけ捨てる)
                 log.warning("asr failed: utterance %d discarded: %s", uid, e)
-                return _FAILED
+                res = _FAILED
             finally:
                 self.release(name)
+            return res, _embed_result(voice, uid)
 
         if self.offload is None:
-            self._asr_done(uid, work())
+            self._asr_done(uid, *work())
         else:
-            self.offload(work, lambda res: self._asr_done(uid, res))
+            self.offload(work, lambda r: self._asr_done(uid, *r))
 
-    def _asr_done(self, uid: int, res: object) -> None:
+    def _start_embed(self, pcm: bytes) -> Future | None:
+        if self.embed is None:
+            return None
+        if self._embed_pool is None:
+            self._embed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voice")
+        return self._embed_pool.submit(self.embed, pcm)
+
+    def _asr_done(self, uid: int, res: object, voice: object = None) -> None:
         self.asr_pending -= 1
+        if voice is not None and self.on_voice and isinstance(res, dict):
+            self.on_voice(uid, voice)
         latest = uid == self._uid  # 後続区間の認識待ちがあれば、終話・破棄はそちらの結果で確定させる
         if res is None:  # 幻聴 (E4): 応答トリガを送らない
             log.info("asr hallucination discarded: utterance %d", uid)
@@ -153,3 +173,14 @@ class Ingress:
             self.director.enqueue(Event(Ev.FAILURES))
             if self.on_error:
                 self.on_error(ERR_MIC_LOST, "microphone device lost")
+
+
+def _embed_result(fut: Future | None, uid: int) -> object:
+    """声の特徴。計算していない・失敗したら None (話者識別だけ諦め、認識結果は使う)。"""
+    if fut is None:
+        return None
+    try:
+        return fut.result()
+    except Exception as e:  # noqa: BLE001
+        log.warning("voice embedding failed: utterance %d: %s", uid, e)
+        return None

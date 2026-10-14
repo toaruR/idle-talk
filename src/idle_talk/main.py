@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_search, load_topics, load_vad, load_voice)
+                     load_search, load_topics, load_vad, load_voice, load_voice_id)
 from .director import IdleTalkDirector
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
@@ -129,6 +129,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                           ratio=vad.ratio, min_threshold=vad.min_threshold), asr, cfg,
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
+    enable_voice_id(director, args.config)
     feeds = load_topics(args.config).feeds
     search = load_search(args.config)
     if search.on:
@@ -138,6 +139,23 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                             news_queries=NEWS_QUERIES)
         director.topic_worker.start()
     return director
+
+
+def enable_voice_id(director: IdleTalkDirector, config: str | Path) -> bool:
+    """[voice_id].on なら話者埋め込みモデルを読んで話者識別を有効にする。読めなければ警告して識別なしで続ける。"""
+    vid = load_voice_id(config)
+    if not vid.on:
+        return False
+    try:
+        from .voice_id import Embedder
+
+        embed = Embedder(vid.model)
+    except (ImportError, OSError, RuntimeError) as e:  # モデル未配置・onnxruntime 未導入・モデル不正
+        log.warning("voice id disabled: %s", e)
+        return False
+    director.enable_voice_id(embed, vid.threshold)
+    log.info("voice id enabled: %s (threshold %.2f)", vid.model, vid.threshold)
+    return True
 
 
 def ui_defaults(cfg: Config) -> dict:

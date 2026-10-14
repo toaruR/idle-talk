@@ -17,6 +17,7 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) の `llama-server` | 会話 | モデルは Qwen3.5-4B Q4_K_M（gguf） |
 | [AivisSpeech](https://aivis-project.com/) | 声 | 起動しておくと `127.0.0.1:10101` で待ち受けます |
 | faster-whisper | 音声認識 | 初回起動時に `small` モデルを自動で取得します |
+| onnxruntime + [WeSpeaker ResNet34](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | 声で誰か見分ける（任意） | `voxceleb_resnet34_LM.onnx`（約 26MB、CC-BY-4.0）を `data/models/` に置きます。無ければ見分けずに動きます |
 | Chrome などのブラウザ | マイク・再生 | |
 
 ## セットアップ
@@ -34,6 +35,11 @@ PC に常駐して、日本語で気軽に雑談できる音声アプリです�
    ```
    `model` を書いておくと、llama-server は idle-talk が起動し、落ちたら再起動します。空にすると自分で起動した llama-server（ポート `[ports].llm`）を使います。
 3. AivisSpeech を起動しておく
+4. （任意）声で誰か見分けるなら、話者識別モデルを置く
+   ```
+   pip install onnxruntime
+   curl -L -o data/models/voxceleb_resnet34_LM.onnx https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx
+   ```
 
 ## 起動と停止
 
@@ -82,6 +88,7 @@ idle-talk.cmd status    # 動作状況
 - AI の話を止めたいときは「待って」「ストップ」などと言うと、すぐに止まります。
 - 「うん」「へえ」などの相槌なら、AI は少し音量を下げるだけで話し続けます。
 - スピーカーで使うと AI 自身の声を拾うことがあります。気になる場合はヘッドホンを使ってください。
+- 初めての声だと、2 回ほど話したあとで AI が名前を聞いてきます。答えると以後は名前で呼びます（声の登録は不要）。別人扱いされたら同じ名前を答えれば 1 人にまとまります。
 
 ## 設定ファイル
 
@@ -94,6 +101,7 @@ idle-talk.cmd status    # 動作状況
 | `[vad]` | 声の検出感度。物音に反応しすぎるなら `ratio` を上げ、声を拾わないなら下げます |
 | `[spontaneous]` | 自発発話・ラジオモードの初期値 |
 | `[topics]` | 話題に使うニュースの RSS |
+| `[voice_id]` | 声で話し相手を見分ける。取り違えるなら `threshold` を上げ、同じ人を別人扱いするなら下げます |
 | `[search]` | Web 検索の有無。on のときは、話題カード（ニュース）が尽きたら Bing ニュースで補充もします（`on = false` にすると検索も補充もせず、ネットワークにも出ません） |
 
 ## データとプライバシー
@@ -105,6 +113,12 @@ idle-talk.cmd status    # 動作状況
   idle-talk.cmd memories              # 一覧
   idle-talk.cmd memories --delete ID  # 1 件削除
   idle-talk.cmd memories --clear      # 全削除
+  ```
+- 覚えた声と名前も同様に確認・削除できます。声の特徴は `data/idle_talk.db` にだけ保存し、外部に送りません（起動中に消した場合は再起動後に効きます）。
+  ```
+  idle-talk.cmd speakers              # 一覧
+  idle-talk.cmd speakers --delete ID  # 1 件削除
+  idle-talk.cmd speakers --clear      # 全削除
   ```
 
 ## 開発者向け

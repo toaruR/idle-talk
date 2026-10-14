@@ -242,6 +242,26 @@ def load_search(path: str | Path = SETTINGS_FILE) -> Search:
     return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True))
 
 
+class VoiceId(NamedTuple):
+    """[voice_id]: 声で話し相手を見分け、初めての声なら名前を聞く (設計書 6.4)。声の特徴は外部に送らない。"""
+    on: bool = False
+    model: str = "data/models/voxceleb_resnet34_LM.onnx"  # WeSpeaker の話者埋め込みモデル (ONNX)
+    threshold: float = 0.6  # 同じ人とみなすコサイン類似度。別人を同じ人と取り違えるなら上げる
+
+
+def load_voice_id(path: str | Path = SETTINGS_FILE) -> VoiceId:
+    """[voice_id] を読む。無ければ既定値 (使わない)。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "voice_id", VoiceId._fields)
+    if "on" in raw and type(raw["on"]) is not bool:
+        raise ValueError(f"[voice_id].on must be bool: {raw['on']!r}")
+    if "model" in raw and (type(raw["model"]) is not str or not raw["model"]):
+        raise ValueError(f"[voice_id].model must be a non-empty string: {raw['model']!r}")
+    th = raw.get("threshold", VoiceId._field_defaults["threshold"])
+    if type(th) not in (int, float) or not 0 < th < 1:
+        raise ValueError(f"[voice_id].threshold must be a number in (0, 1): {th!r}")
+    return VoiceId(raw.get("on", False), raw.get("model", VoiceId._field_defaults["model"]), float(th))
+
+
 class VadSettings(NamedTuple):
     """[vad]: 発話検出 (vad.EnergyVad)。物音で発話扱いになりすぎるなら ratio (自動校正時) か onset_ms を上げる。"""
     threshold: float = 500.0     # 発話とみなすフレーム RMS (16bit PCM)。自動校正時は推定がそろうまでの値

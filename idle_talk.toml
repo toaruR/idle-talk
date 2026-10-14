@@ -70,3 +70,12 @@ interval_min = 30     # 取得間隔 (分)。休止中は取得しない
 on = true
 engines = ["duckduckgo", "bing"]  # 先頭から試し、失敗・0 件なら次へ (使えるのは duckduckgo / bing)
 read_page = true      # 上位 1 件のページ本文を r.jina.ai 経由で読んで添える (株価などの今の値が取れる。約 1〜5 秒)
+
+[voice_id]
+# 話者識別: 声の特徴で話し相手を見分け、初めての声 (2 回続けて同じ知らない声) なら会話の中で名前を聞いて覚える。
+# 以後はその名前で呼ぶ。1.5 秒未満の短い発話では判定せず、直前の相手のままにする。
+# 声の特徴は data/idle_talk.db にだけ保存し、外部に送らない。確認・削除は idle-talk.cmd speakers。
+# 別人を同じ人と取り違えるなら threshold を上げ、同じ人を別人扱いするなら下げる。
+on = true
+model = "data/models/voxceleb_resnet34_LM.onnx"  # WeSpeaker ResNet34 (CC-BY-4.0)。無ければ警告して識別なしで動く
+threshold = 0.6       # 同じ人とみなす声の近さ (0〜1、既定 0.6)
