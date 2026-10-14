@@ -159,6 +159,7 @@ test('client: downlink binary and cancel routed to player; state/ui', () => {
   const states = [];
   const client = C.createClient({ port: 1, WebSocketCtor: WS, player: m.player, onState: (s) => states.push(s) });
   const ws = created[0];
+  ws.onopen();
   ws.onmessage({ data: chunkBytes(1, 1, 0).buffer });
   assert.strictEqual(m.played.length, 1);
   ws.onmessage({ data: JSON.stringify({ t: 'cancel', new_epoch: 2 }) });
@@ -205,9 +206,10 @@ test('client direct: ping->pong echoes ts, duck routed to player, sendJson/sendF
   WS.prototype.close = function () { closed = true; };
   const client = C.createClient({ port: 9, WebSocketCtor: WS, player: m.player });
   const ws = created[0];
+  ws.onopen();
   assert.match(client.clientId, /^web-/);
   ws.onmessage({ data: JSON.stringify({ t: 'ping', ts: 7 }) });
-  assert.deepStrictEqual(JSON.parse(ws.sent[0]), { t: 'pong', ts: 7 });
+  assert.deepStrictEqual(JSON.parse(ws.sent[1]), { t: 'pong', ts: 7 }); // sent[0] は hello
   m.player.pushBinary(chunkBytes(1, 1, 0, 2400));
   ws.onmessage({ data: JSON.stringify({ t: 'duck', epoch: 1, gain: 0.2 }) });
   assert.strictEqual(m.sink.gain, 0.2);
@@ -231,4 +233,24 @@ test('client direct: pure helpers makeUi/stateLabel/makeHello/micConstraints/wsU
   assert.deepStrictEqual(C.makeHello('z'), { t: 'hello', version: 1, sample_rate: 16000, client_id: 'z' });
   assert.deepStrictEqual(C.micConstraints(), { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } });
   assert.strictEqual(C.wsUrl(1), 'ws://127.0.0.1:1/ws');
+});
+
+test('reset: drops queue silently and accepts epoch 0 again', () => {
+  const P = require('../player.js');
+  const sent = [];
+  let stops = 0;
+  const sink = { play() {}, stop() { stops += 1; }, setGain() {}, positionMs: () => 0 };
+  const p = P.createPlayer({ sink, send: (m) => sent.push(m) });
+  p.cancel(5);
+  const chunk = (epoch, id) => ({ epoch, utterance_id: 1, chunk_id: id, pcm: new Int16Array(10) });
+  assert.equal(p.pushChunk(chunk(5, 0)), true);
+  p.pushChunk(chunk(5, 1));
+  p.duck(5);
+  const n = sent.length;
+  p.reset();
+  assert.equal(sent.length, n);
+  assert.equal(stops, 1);
+  assert.equal(p.queueLength, 0);
+  assert.equal(p.gain, 1.0);
+  assert.equal(p.pushChunk(chunk(0, 0)), true);
 });

@@ -11,6 +11,7 @@
   const PROTOCOL_VERSION = 1;
   const SAMPLE_RATE = 16000;
   const FRAME_SAMPLES = 320; // 20ms @16kHz
+  const RECONNECT_MS = 2000; // 切断から再接続までの間隔
 
   function wsUrl(port) {
     return `ws://127.0.0.1:${port}/ws`;
@@ -48,19 +49,39 @@
     return msg.muted && msg.state !== 'rest' ? `${label} (休止)` : label;
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onOpen(), clientId }
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onOpen(), onClose(),
+  //         clientId, reconnectMs, setTimeoutFn }
+  // 接続が切れた・つながらなかったら reconnectMs 後につなぎ直す (サーバの再起動中に開始を押しても待てば動く)。close() で止める
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError, onSearch, onLinks, onOpen } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onSearch, onLinks, onOpen, onClose } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
-    const ws = new WebSocketCtor(wsUrl(port));
-    ws.binaryType = 'arraybuffer';
-    const sendJson = (m) => ws.send(JSON.stringify(m));
+    const reconnectMs = opts.reconnectMs || RECONNECT_MS;
+    const setTimeoutFn = opts.setTimeoutFn || setTimeout;
+    let ws = null;
+    let closed = false;
+    // hello 前・切断中は送らない (CONNECTING の send は例外、サーバは hello 前のメッセージを受け付けない)
+    let ready = false;
+    const sendJson = (m) => { if (ready) ws.send(JSON.stringify(m)); };
 
-    ws.onopen = () => {
-      sendJson(makeHello(clientId));
-      if (onOpen) onOpen(); // hello の後 (サーバは hello 前のメッセージを受け付けない)
-    };
-    ws.onmessage = (ev) => {
+    function connect() {
+      ws = new WebSocketCtor(wsUrl(port));
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => {
+        ready = true;
+        sendJson(makeHello(clientId));
+        if (onOpen) onOpen(); // hello の後 (サーバは hello 前のメッセージを受け付けない)
+      };
+      ws.onclose = () => {
+        ready = false;
+        if (player && player.reset) player.reset(); // 前の接続の音は鳴らさない。新しい接続の epoch は 0 から
+        if (closed) return;
+        if (onClose) onClose();
+        setTimeoutFn(() => { if (!closed) connect(); }, reconnectMs);
+      };
+      ws.onmessage = onMessage;
+    }
+
+    function onMessage(ev) {
       const d = ev.data;
       if (typeof d !== 'string') { if (player) player.pushBinary(d); return; }
       let msg;
@@ -72,15 +93,16 @@
       else if (msg.t === 'search') { if (onSearch) onSearch(msg); }
       else if (msg.t === 'links') { if (onLinks) onLinks(msg); }
       else if (player) player.handleMessage(msg);
-    };
+    }
 
+    connect();
     return {
-      ws,
+      get ws() { return ws; },
       clientId,
-      sendFrame(frame) { ws.send(frame); },
+      sendFrame(frame) { if (ready) ws.send(frame); },
       sendUi(settings) { sendJson(makeUi(settings)); },
       sendJson,
-      close() { ws.close(); },
+      close() { closed = true; ws.close(); },
     };
   }
 

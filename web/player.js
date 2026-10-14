@@ -114,6 +114,18 @@
         }
         startNext();
       },
+      // 再接続時: 前の接続の音を報告せずに捨て、epoch を 0 から受け直す (サーバを再起動すると epoch は 0 に戻る)
+      reset() {
+        queue = [];
+        if (current) { current = null; sink.stop(); }
+        minEpoch = 0;
+        ducked = false;
+        gain = 1.0;
+        sink.setGain(gain);
+        uttId = null;
+        uttBaseMs = 0;
+        lastPos = 0;
+      },
       duck(epoch, g = duckGain) {
         if (epoch < minEpoch) return;
         ducked = true;

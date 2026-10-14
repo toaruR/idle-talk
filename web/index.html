@@ -120,7 +120,8 @@
         onError: (m) => { $('error').textContent = `[${m.code}] ${m.message}`; },
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
-        onOpen: pushUi, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
+        onOpen: () => { $('error').textContent = ''; pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
+        onClose: () => { $('state').textContent = '再接続中…'; $('search').textContent = ''; },
       });
       await C.startCapture({
         getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
