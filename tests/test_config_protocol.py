@@ -29,7 +29,7 @@ def test_defaults_structs():
     assert (c.STRONG_UTT.volume_ratio, c.STRONG_UTT.window_s) == (2.0, 1.0)
     assert (c.ASR_HALLU.no_speech_prob, c.ASR_HALLU.compression_ratio) == (0.6, 2.4)
     h = c.HTTP_TIMEOUT
-    assert (h.llm_first, h.llm_total, h.tts_sentence) == (5, 20, 3)
+    assert (h.llm_first, h.llm_total, h.tts_sentence) == (5, 20, 6)
     assert h.asr(3.0) == 8.0
     e = c.E_PARAMS
     assert (e.silence_input_s, e.device_lost_s, e.tts_cpu_settle_s, e.tts_cpu_delta_pt) == (60, 3, 2, 5)

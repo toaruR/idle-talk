@@ -12,11 +12,13 @@ from collections.abc import Callable
 from difflib import SequenceMatcher
 
 from .config import Drama
-from .vad import BYTES_PER_MS, SPEECH_END, SPEECH_START, Vad
+from .vad import BYTES_PER_MS, SPEECH_END, SPEECH_START, Vad, rms
 
 # マイクの認識結果のうち、これだけの割合 (かつ ECHO_MIN_CHARS 字以上) が直近の台詞と連続して一致したら回り込みとみなす
 ECHO_RATIO = 0.6
 ECHO_MIN_CHARS = 4
+# タブの音が閾値を超えてからこの間は「鳴っている」とみなす (スピーカーからマイクへの遅れと部屋の残響のぶん)
+BLEED_HOLD_S = 0.3
 NOTES_MAX_CHARS = 1200  # あらすじメモの上限字数。超えたら古いメモから捨てる (ctx 4k に収める)
 
 
@@ -40,12 +42,16 @@ class DramaListener:
         self.undigested: list[str] = []  # まだメモに要約していない台詞 (window_s で捨てない)
         self._last_line: float | None = None  # 最後に台詞を認識した時刻
         self._heard_chars = 0  # 前の感想 (または開始) から聞いた台詞の字数
+        self._loud_at: float | None = None  # タブの音が最後に閾値を超えた時刻 (マイクへの回り込みの判定用)
 
     # ---- 音声 ----
     def feed(self, frame: bytes) -> bytes | None:
         """1 フレームを処理し、認識に回す区間が確定したらその PCM を返す。"""
         if self._buf is not None:
             self._buf += frame
+        threshold = getattr(self.vad, "current_threshold", None)
+        if threshold is not None and rms(frame) >= threshold:  # 台詞に限らず笑い声・音楽も含む
+            self._loud_at = self.clock()
         ev = self.vad.process(frame)
         if ev == SPEECH_START:
             self._buf = bytearray(frame)
@@ -57,6 +63,10 @@ class DramaListener:
             pcm, self._buf = bytes(self._buf), bytearray()  # BGM 等で終わらない区間: 切って認識に回し、続きを溜める
             return pcm
         return None
+
+    def sounding(self) -> bool:
+        """タブの音が今鳴っているか (BLEED_HOLD_S 以内に閾値を超えた)。マイクの VAD が回り込みを測るのに使う。"""
+        return self._loud_at is not None and self.clock() - self._loud_at <= BLEED_HOLD_S
 
     def add_line(self, text: str) -> None:
         text = text.strip()
@@ -160,4 +170,4 @@ class DramaListener:
         self.notes.clear()
         self.undigested.clear()
         self._buf, self._last_end, self._new_chars = None, None, 0
-        self._last_line, self._heard_chars = None, 0
+        self._last_line, self._heard_chars, self._loud_at = None, 0, None

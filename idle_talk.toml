@@ -13,6 +13,10 @@ web = 8000   # web/ の配信 (main が起動。ブラウザは http://127.0.0.1
 engine = "reazon"
 model_dir = "data/models/reazonspeech"  # reazon のモデル (sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01, Apache-2.0)
 threads = 2           # reazon の CPU スレッド数 (1〜32)。AivisSpeech の声が遅れるなら下げる
+# 食器の音・咳などを「はい」「誰」「ハハ」と聞き違える対策: short_chars 字以下の認識結果は、
+# AI の声の最中か、話し終えてから short_reply_s 秒以内 (返事・相槌) のときだけ使う。0 で無効
+short_chars = 2       # 0〜10
+short_reply_s = 20    # 0〜3600 (秒)
 
 [tts]
 # speaker: AivisSpeech の話者 (スタイル) ID。一覧は AivisSpeech の GET /speakers

@@ -70,12 +70,12 @@ def test_timeout_llm_total():
 
 def test_timeout_tts_sentence():
     clk = FakeClock()
-    t = TtsClient(clock=clk, post=mock_tts_post(clk, delay=1.6))  # 2 呼び出しで 3.2s
+    t = TtsClient(clock=clk, post=mock_tts_post(clk, delay=3.1))  # 2 呼び出しで 6.2s
     with pytest.raises(TtsTimeout) as e:
         t.synthesize("こんにちは")
     assert e.value.code == 5002
     clk2 = FakeClock()
-    ok = TtsClient(clock=clk2, post=mock_tts_post(clk2, delay=1.5))  # 3.0s は許容
+    ok = TtsClient(clock=clk2, post=mock_tts_post(clk2, delay=3.0))  # 6.0s は許容
     assert ok.synthesize("a").startswith(b"RIFF")
 
 

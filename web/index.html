@@ -35,6 +35,8 @@
   let client = null;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
   let sink = null;
+  let errorCode = null; // 表示中のサーバのエラーコード (一時的なものは再生が始まったら消す)
+  function showError(text, code) { $('error').textContent = text; errorCode = code; }
 
   // 音量はブラウザ内だけで掛ける (サーバに送らない)。開始前でも変えられ、localStorage に残す
   const VOLUME_KEY = 'idle-talk.volume';
@@ -113,7 +115,7 @@
     }
   }
   const serverConfig = loadServerConfig().then((c) => { fillSpeakers(c.speakers); fillPersonas(c.personas); applyUiDefaults(c.ui); return c; });
-  serverConfig.catch((e) => { $('error').textContent = String(e); });
+  serverConfig.catch((e) => { showError(String(e), null); });
   function pushUi() { if (client) client.sendUi(readUi()); }
   for (const id of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'persona']) {
     $(id).addEventListener('change', pushUi);
@@ -128,19 +130,22 @@
       sink = IdleTalkPlayer.createWebAudioSink(actx, undefined, volume());
       const player = IdleTalkPlayer.createPlayer({
         sink,
-        send: (m) => { if (client) client.sendJson(m); },
+        send: (m) => {
+          if (C.errorResolved(errorCode, m)) showError('', null); // 再生が始まった = 一時的な失敗は解消した
+          if (client) client.sendJson(m);
+        },
       });
       client = C.createClient({
         port, WebSocketCtor: WebSocket, player,
         onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); },
-        onError: (m) => { $('error').textContent = `[${m.code}] ${m.message}`; },
+        onError: (m) => showError(`[${m.code}] ${m.message}`, m.code),
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省く
           const jpeg = drama && drama.snapshot ? await drama.snapshot() : null;
           if (client) client.sendJson(jpeg ? { t: 'snap', id: m.id, jpeg } : { t: 'snap', id: m.id });
         },
-        onOpen: () => { $('error').textContent = ''; pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
+        onOpen: () => { showError('', null); pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
         onClose: () => { $('state').textContent = '再接続中…'; $('search').textContent = ''; },
       });
       await C.startCapture({
@@ -149,7 +154,7 @@
       });
       $('drama').disabled = false;
     } catch (e) {
-      $('error').textContent = String(e);
+      showError(String(e), null);
       if (client) client.close();
       client = null;
       $('start').disabled = false;
@@ -171,11 +176,11 @@
         vision: loadServerConfig().then((c) => Boolean(c.vision), () => false),
         onEnded: () => { drama = null; showDrama(); pushUi(); },
       });
-      $('error').textContent = '';
+      showError('', null);
       showDrama();
       pushUi();
     } catch (e) {
-      $('error').textContent = String(e);
+      showError(String(e), null);
     }
   });
 })();

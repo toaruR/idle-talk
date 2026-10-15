@@ -72,6 +72,7 @@ DRAMA_ECHO_KIND = "drama_echo_suppressed"  # マイクが拾ったドラマの�
 DRAMA_CONTEXT_PROMPT = "\n利用者と一緒にドラマを見ています。直近の台詞 (音声認識なので誤りを含みます):\n{lines}\n"
 # 「なし」の代わりに「聞こえなくて分からない」と言うことがある (実機 2026-10-14)。言っても楽しくないので黙る
 DRAMA_UNHEARD = re.compile(r"聞こえ(な|ず)|聞き取れ|分から(な|ず)|わから(な|ず)")
+SHORT_KIND = "short_discarded"  # 文脈の無い短い認識結果 (物音の聞き違い) を捨てた 1 回 = 1 行
 DRAMA_HOLD_S = 8.0  # 一言の生成中に台詞が再開したら、次の切れ目をこれだけ待つ (来なければ古くなったので黙る)
 # 一言には会話履歴も前の一言も渡さず、前の一言以降の台詞 (今の場面) だけを見せる。
 # 履歴や 3 分ぶんの台詞を渡すと、4B は前の一言や古い台詞の目立つ語 (「噛み詰め」等) を毎回繰り返した (実機 2026-10-14)
@@ -215,6 +216,9 @@ class IdleTalkDirector:
         self._drama_uid = 0
         self._digest_task: asyncio.Task | None = None  # 台詞をあらすじメモに要約する裏の LLM 呼び出し
         self._digest_stop = threading.Event()
+        # 短い認識結果の判定 ([asr].short_chars / short_reply_s。main が設定から差し替える)
+        self.short_chars, self.short_reply_s = 2, 20
+        self._ai_heard_at: float | None = None  # AI の声 (応答・自発発話・一言・相槌) を最後に再生した時刻
         # 一言・感想に画面 1 枚を添える (mmproj ありのときだけ main が True にする)
         self.drama_vision = False
         self._snap_id = 0
@@ -388,6 +392,8 @@ class IdleTalkDirector:
             return
         cur = self.epoch.current  # 再生中 = 現行世代の送出済みチャンクが再生終了の報告待ち (VAD の自動校正が使う)
         self.ingress.vad.playing = any(k[0] == cur for k in self._down_sent)
+        # ドラマの音が鳴っている間は、スピーカーからの回り込みを測ってマイクの閾値を上げる (笑い声や BGM を声と取らない)
+        self.ingress.vad.bleed = self.drama_on and self.drama.sounding()
         for i in range(0, len(pcm), FRAME_BYTES):
             before, was_speaking = self.fsm.ctx.state, self.ingress._buf is not None
             self.ingress.feed(pcm[i:i + FRAME_BYTES])
@@ -422,6 +428,12 @@ class IdleTalkDirector:
             self.fsm.enqueue(Event(Ev.WAKE))  # 無操作・連続失敗による休止もミュートなしの操作で解除する
         self._pump()
 
+    def _out_of_context(self, in_ai: bool, text: str) -> bool:
+        """short_chars 字以下で、AI の声の最中でも直後 (short_reply_s 秒以内) でもない = 物音の聞き違いとみなす。"""
+        if not 0 < len(_alnum(text)) <= self.short_chars or in_ai:
+            return False
+        return self._ai_heard_at is None or self.clock() - self._ai_heard_at > self.short_reply_s
+
     def _on_transcript(self, uid: int, text: str) -> bool:
         """認識結果を受ける。語が無い・自声なら False (Ingress が捨てて DISCARDED を送る)。"""
         in_ai, self._speech_in_ai = self._speech_in_ai, False
@@ -433,6 +445,11 @@ class IdleTalkDirector:
         if self.drama_on and self.drama.contains(text):  # スピーカーから回り込んだドラマの台詞
             log.info("drama echo discarded: utterance %d %r", uid, text)
             self.store.add_event(self.now_ms(), self.epoch.current, DRAMA_ECHO_KIND,
+                                 json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
+            return False
+        if self._out_of_context(in_ai, text):
+            log.info("short transcript out of context discarded: utterance %d %r", uid, text)
+            self.store.add_event(self.now_ms(), self.epoch.current, SHORT_KIND,
                                  json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
         self._text = text
@@ -522,6 +539,7 @@ class IdleTalkDirector:
 
     def _on_playback(self, msg: dict) -> None:
         self.history.on_playback(msg)
+        self._ai_heard_at = self.clock()
         if self.metrics is not None and msg["utterance_id"] not in self._bc_utts:  # 相槌クリップは turns に載らないので G3/履歴照合から除外
             self.store.add_event(self.now_ms(), self.epoch.current, "playback", json.dumps(
                 {k: msg[k] for k in ("epoch", "utterance_id", "chunk_id", "state", "position_ms")}))

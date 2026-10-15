@@ -125,3 +125,12 @@ test('startDramaCapture: vision keeps video until stop', async () => {
   assert.deepEqual(f.stops, { audio: 1, video: 1 });
   assert.equal(await d.snapshot(), null); // 止めた後は求めない
 });
+
+test('errorResolved: transient errors clear when playback starts', () => {
+  const started = { t: 'playback', state: 'started' };
+  for (const code of [5001, 5002, 5003]) assert.equal(C.errorResolved(code, started), true);
+  assert.equal(C.errorResolved(5002, { t: 'playback', state: 'finished' }), false);
+  assert.equal(C.errorResolved(5002, { t: 'snap', id: 1 }), false);
+  assert.equal(C.errorResolved(5006, started), false); // 設定の範囲外は再生では解消しない
+  assert.equal(C.errorResolved(null, started), false);
+});

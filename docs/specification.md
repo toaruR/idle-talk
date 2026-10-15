@@ -627,7 +627,7 @@ AivisSpeech の呼び方:
 - 中止した文の結果は、epoch の不一致で破棄する。
 - 中止後に残る計算は、合成中の 1 文ぶん (`tts_sentence` 以内) である。
 - Director は、起動時に `TtsClient.warmup` で 1 回空合成してから待ち受ける。
-  - 初回の合成は、GPU (DirectML) の初期化で約 14 秒かかる。`tts_sentence` (3s) を超えるためである。
+  - 初回の合成は、GPU (DirectML) の初期化で約 14 秒かかる。`tts_sentence` (6s) を超えるためである。
   - タイムアウトは `WARMUP_TIMEOUT_S` (60s) である。
   - 失敗しても警告ログだけ出し、起動を続ける。
 

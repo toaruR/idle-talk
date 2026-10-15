@@ -415,3 +415,21 @@ def test_drama_off_cancels_pending_reaction(tmp_path):
         await asyncio.sleep(0.2)
         assert not d.spontaneous.pending and b.chunks == []
     asyncio.run(run())
+
+
+def test_tab_sound_raises_mic_threshold(tmp_path):
+    d, b, _ = make(tmp_path, [], [])
+    vad = d.ingress.vad
+    drama_on(d, b)
+    b.core.on_binary(b, pack_up_frame(DRAMA_FLAG | b.seq, LOUD))  # タブの音が鳴った
+    b.seq += 1
+    assert d.drama.sounding()
+    b.core.on_binary(b, pack_up_frame(b.seq, QUIET))  # 次のマイクのフレームから回り込みを測る
+    b.seq += 1
+    assert vad.bleed
+    d.clock_.advance(0.31)  # BLEED_HOLD_S を過ぎた
+    b.core.on_binary(b, pack_up_frame(b.seq, QUIET))
+    b.seq += 1
+    assert not vad.bleed
+    d.core.on_text(b, json.dumps({"t": "ui", "drama": False}))
+    assert not d.drama.sounding()

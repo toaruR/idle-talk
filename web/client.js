@@ -53,6 +53,12 @@
     return msg.muted && msg.state !== 'rest' ? `${label} (休止)` : label;
   }
 
+  // 一時的な失敗 (LLM・TTS・ASR) のエラー表示は、次に音声の再生が始まったら (応答が通ったら) 消す
+  const TRANSIENT_ERRORS = [5001, 5002, 5003];
+  function errorResolved(code, playback) {
+    return TRANSIENT_ERRORS.includes(code) && Boolean(playback) && playback.t === 'playback' && playback.state === 'started';
+  }
+
   // 縦横比を保って SNAP_W x SNAP_H に収める (拡大はしない)
   function snapSize(w, h) {
     const s = Math.min(SNAP_W / w, SNAP_H / h, 1);
@@ -204,7 +210,7 @@
 
   const api = {
     PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, SNAP_W, SNAP_H, W, P,
-    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, createClient,
+    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, errorResolved, createClient,
     startCapture, startDramaCapture,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

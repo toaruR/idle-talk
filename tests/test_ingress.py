@@ -204,3 +204,22 @@ def test_adaptive_playing_threshold_uses_echo_level():
     assert abs(v.current_threshold - 1200) < 1  # 400 x 3
     v.playing = False
     assert abs(v.current_threshold - 150) < 1
+
+
+def test_adaptive_bleed_threshold_separate_from_ai_echo():
+    v = EnergyVad(threshold=500, hangover_frames=3, adaptive=True, ratio=3.0, min_threshold=100)
+    for _ in range(100):
+        v.process(_tone(50))
+    v.playing = True
+    for _ in range(300):  # AI の回り込み (AEC で小さい)
+        v.process(_tone(100))
+    v.playing = False
+    v.bleed = True
+    for _ in range(300):  # ドラマの音の回り込み (AEC が効かず大きい) は別に測る
+        v.process(_tone(1000))
+    assert abs(v.current_threshold - 3000) < 1  # 1000 x 3
+    assert v.process(_tone(2000)) is None  # 回り込みより少し大きい程度の音 (笑い声等) では発話にしない
+    v.bleed = False
+    assert abs(v.current_threshold - 150) < 1  # 鳴り止んだら雑音の推定に戻る (雑音に混ぜていない)
+    v.playing = True
+    assert abs(v.current_threshold - 300) < 1  # AI の回り込みは別のまま

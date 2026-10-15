@@ -28,7 +28,7 @@ class AsrHallu(NamedTuple):
 class HttpTimeout(NamedTuple):
     llm_first: int = 5
     llm_total: int = 20
-    tts_sentence: int = 3
+    tts_sentence: int = 6  # ドラマ視聴中は台詞の認識と CPU を取り合い、長めの 1 文が 3 秒を超えた (2026-10-15)
     asr_factor: int = 2  # asr = 区間長 x asr_factor + asr_offset_s 秒
     asr_offset_s: int = 2
 
@@ -267,6 +267,10 @@ class Asr(NamedTuple):
     engine: str = "reazon"
     model_dir: str = "data/models/reazonspeech"  # reazon の encoder/decoder/joiner*.onnx と tokens.txt
     threads: int = 2  # reazon の CPU スレッド数 (AivisSpeech・話者識別と CPU を分け合う)
+    # short_chars 字以下の認識結果は、AI の声から short_reply_s 秒以内 (返事・相槌) でなければ物音の聞き違いとして捨てる。
+    # ReazonSpeech は食器・咳を「はい」「誰」「ハハ」と聞き違えるが、音では本物の返事と見分けられなかった (2026-10-15)
+    short_chars: int = 2  # 0 で無効
+    short_reply_s: int = 20
 
 
 ASR_ENGINES = ("reazon", "whisper")
@@ -281,6 +285,9 @@ def load_asr(path: str | Path = SETTINGS_FILE) -> Asr:
         raise ValueError(f"[asr].model_dir must be a non-empty string: {raw['model_dir']!r}")
     if "threads" in raw and (type(raw["threads"]) is not int or not 1 <= raw["threads"] <= 32):
         raise ValueError(f"[asr].threads must be an int in [1, 32]: {raw['threads']!r}")
+    for k, hi in (("short_chars", 10), ("short_reply_s", 3600)):
+        if k in raw and (type(raw[k]) is not int or not 0 <= raw[k] <= hi):
+            raise ValueError(f"[asr].{k} must be an int in [0, {hi}]: {raw[k]!r}")
     return Asr(**raw)
 
 

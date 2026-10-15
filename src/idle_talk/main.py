@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_drama, load_search, load_topics, load_vad, load_voice, load_voice_id)
+                     load_asr, load_drama, load_search, load_topics, load_vad, load_voice, load_voice_id)
 from .director import IdleTalkDirector
 from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
@@ -160,6 +160,8 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                                                       onset_frames=vad.onset_ms // FRAME_MS,
                                                                       min_threshold=vad.min_threshold),
                                    cfg.MIN_SEG)
+    asr_settings = load_asr(args.config)
+    director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)
     feeds = load_topics(args.config).feeds
     search = load_search(args.config)
