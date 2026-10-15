@@ -353,6 +353,7 @@ class Drama(NamedTuple):
     finale_gap_s: int = 60  # 台詞がこれだけ聞こえなければ見終わった (一時停止) とみなし、それまでの感想を話す
     finale_min_chars: int = 600  # 前の感想 (または開始) から聞いた台詞がこれ未満なら感想は言わない
     digest_chars: int = 800  # 台詞がこれだけ溜まったら裏であらすじメモに要約する (window_s を過ぎても話を覚えておく)
+    log_prompt: bool = False  # 一言・感想・要約に LLM へ渡した台詞とメモを talk.log に残す (既定は保存しない)
 
 
 _DRAMA_RANGES = {"interval_s": (10, 3600), "gap_ms": (500, 30000), "window_s": (30, 1800),
@@ -364,6 +365,10 @@ def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:
     """[drama] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
     raw = _read_section(path, "drama", Drama._fields)
     for k, v in raw.items():
+        if k == "log_prompt":
+            if type(v) is not bool:
+                raise ValueError(f"[drama].log_prompt must be bool: {v!r}")
+            continue
         lo, hi = _DRAMA_RANGES[k]
         if type(v) is not int or not lo <= v <= hi:
             raise ValueError(f"[drama].{k} must be an int in [{lo}, {hi}]: {v!r}")

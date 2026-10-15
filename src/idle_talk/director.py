@@ -792,6 +792,15 @@ class IdleTalkDirector:
         self._spont_task = asyncio.get_running_loop().create_task(self._drama_respond(scene))
         return "drama"
 
+    def _log_drama(self, kind: str, text: str, jpeg: str | None = None) -> None:
+        """[drama].log_prompt なら LLM に渡した台詞・メモを talk.log に 1 行で残す (画像は大きさだけ)。"""
+        if not self.drama.s.log_prompt:
+            return
+        body = " / ".join(line.strip() for line in text.splitlines() if line.strip()) or "(なし)"
+        if jpeg:
+            body += f" [画像あり {len(jpeg) * 3 // 4 // 1024} KB]"
+        talk_log.info("DRAMA(%s): %s", kind, body)
+
     # ---- 画面 (設計書 6.5): 一言・感想の直前に 1 枚だけ求め、使ったら捨てる ----
     def _on_snap(self, msg: dict) -> None:
         if self._snap_wait is not None and self._snap_wait[0] == msg["id"] and not self._snap_wait[1].done():
@@ -838,6 +847,7 @@ class IdleTalkDirector:
     async def _drama_respond(self, scene: str) -> None:
         me = asyncio.current_task()
         jpeg = await self._snapshot()
+        self._log_drama("一言", scene, jpeg)
         messages = [{"role": "system", "content": self.personas.system_prompt()},
                     {"role": "user", "content": self._with_image(DRAMA_PROMPT.format(scene=scene), jpeg)}]
         stop = threading.Event()
@@ -875,6 +885,8 @@ class IdleTalkDirector:
         if self._spont_task is not me or not self.spontaneous.pending:
             return
         prompt = DRAMA_FINALE_PROMPT.format(notes=notes or "(なし)", rest=rest or "(なし)")
+        self._log_drama("感想・メモ", notes)
+        self._log_drama("感想・台詞", rest, jpeg)
         messages = [{"role": "system", "content": self.personas.system_prompt()},
                     {"role": "user", "content": self._with_image(prompt, jpeg)}]
         self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
@@ -896,6 +908,8 @@ class IdleTalkDirector:
         if text is None or asyncio.current_task() is not self._digest_task or not self.drama_on:
             return
         note = text.strip().split("\n")[0].strip()
+        self._log_drama("要約・台詞", "\n".join(lines))
+        self._log_drama("要約・メモ", note)
         self.drama.add_note("" if _alnum(note).startswith("なし") else note, len(lines))
         log.info("drama digest: %d lines -> %d chars (notes %d)", len(lines), len(note), len(self.drama.notes))
 
