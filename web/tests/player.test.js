@@ -254,3 +254,30 @@ test('reset: drops queue silently and accepts epoch 0 again', () => {
   assert.equal(p.gain, 1.0);
   assert.equal(p.pushChunk(chunk(0, 0)), true);
 });
+
+test('web audio sink: volume is applied after duck gain and clamped', () => {
+  const P = require('../player.js');
+  const nodes = [];
+  const ctx = {
+    destination: { name: 'dest' },
+    createGain() {
+      const n = { gain: { value: 1 }, to: null, connect(d) { this.to = d; } };
+      nodes.push(n);
+      return n;
+    },
+  };
+  const sink = P.createWebAudioSink(ctx, 24000, 0.5);
+  const [duckNode, volumeNode] = nodes;
+  assert.equal(duckNode.to, volumeNode);
+  assert.equal(volumeNode.to, ctx.destination);
+  assert.equal(volumeNode.gain.value, 0.5);
+  sink.setGain(0.2);
+  assert.equal(duckNode.gain.value, 0.2);
+  assert.equal(volumeNode.gain.value, 0.5);
+  sink.setVolume(5);
+  assert.equal(volumeNode.gain.value, P.MAX_VOLUME);
+  sink.setVolume(-1);
+  assert.equal(volumeNode.gain.value, 0);
+  sink.setVolume('x');
+  assert.equal(volumeNode.gain.value, 1);
+});

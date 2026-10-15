@@ -153,10 +153,21 @@
     };
   }
 
+  // 0..MAX_VOLUME に収める (画面の音量欄。数値でなければ 1)
+  const MAX_VOLUME = 2;
+  function clampVolume(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(MAX_VOLUME, Math.max(0, n)) : 1;
+  }
+
   // Browser sink built on Web Audio.
-  function createWebAudioSink(ctx, pcmRate = DEFAULT_PCM_RATE) {
+  // gainNode は duck 用 (player が操作)、volumeNode は利用者の音量で、duck とは別に掛ける。
+  function createWebAudioSink(ctx, pcmRate = DEFAULT_PCM_RATE, volume = 1) {
     const gainNode = ctx.createGain();
-    gainNode.connect(ctx.destination);
+    const volumeNode = ctx.createGain();
+    volumeNode.gain.value = clampVolume(volume);
+    gainNode.connect(volumeNode);
+    volumeNode.connect(ctx.destination);
     let src = null;
     let startedAt = 0;
     return {
@@ -178,13 +189,14 @@
         if (s) { s.onended = null; try { s.stop(); } catch (_e) { /* already stopped */ } }
       },
       setGain(g) { gainNode.gain.value = g; },
+      setVolume(v) { volumeNode.gain.value = clampVolume(v); },
       positionMs() { return src ? (ctx.currentTime - startedAt) * 1000 : 0; },
     };
   }
 
   const api = {
-    HEADER_SIZE, MAX_CHUNK_PCM, DUCK_GAIN, MAX_LOOKAHEAD,
-    parseDownFrame, createPlayer, createWebAudioSink,
+    HEADER_SIZE, MAX_CHUNK_PCM, DUCK_GAIN, MAX_LOOKAHEAD, MAX_VOLUME,
+    parseDownFrame, createPlayer, createWebAudioSink, clampVolume,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else if (typeof globalThis !== 'undefined') globalThis.IdleTalkPlayer = api;

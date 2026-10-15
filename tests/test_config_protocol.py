@@ -288,10 +288,16 @@ def test_load_llm_launch(tmp_path):
     assert load_llm_launch(f) == LlmLaunch() and LlmLaunch().model == ""  # 既定は監督なし
     f.write_text('[llm]\nmodel = "m.gguf"\nctx = 2048\n', encoding="utf-8")
     assert load_llm_launch(f) == LlmLaunch(model="m.gguf", ctx=2048)
+    assert LlmLaunch().main_gpu == 0  # 既定は GPU0 だけに載せる
+    f.write_text('[llm]\nmain_gpu = -1\n', encoding="utf-8")
+    assert load_llm_launch(f).main_gpu == -1  # 自動配置
+    f.write_text('[llm]\nmmproj = "p.gguf"\nimage_max_tokens = 256\n', encoding="utf-8")
+    assert load_llm_launch(f)[-2:] == ("p.gguf", 256)
 
 
 @pytest.mark.parametrize("body", ['[llm]\nmodle = "m"\n', "[llm]\nmodel = 1\n", '[llm]\nngl = "9"\n',
-                                  "[llm]\nctx = -1\n"])
+                                  "[llm]\nctx = -1\n", "[llm]\nmain_gpu = -2\n",
+                                  "[llm]\nmmproj = 1\n", "[llm]\nimage_max_tokens = -1\n"])
 def test_load_llm_launch_rejects_invalid(tmp_path, body):
     from idle_talk.config import load_llm_launch
     f = tmp_path / "s.toml"

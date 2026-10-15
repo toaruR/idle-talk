@@ -12,6 +12,10 @@
   const SAMPLE_RATE = 16000;
   const FRAME_SAMPLES = 320; // 20ms @16kHz
   const RECONNECT_MS = 2000; // 切断から再接続までの間隔
+  // ドラマモードの画面 (設計書 6.5): サーバに求められたら 1 枚をこの大きさに収めて JPEG で返す (640x360 で約 106 トークン)
+  const SNAP_W = 640;
+  const SNAP_H = 360;
+  const SNAP_QUALITY = 0.7;
 
   function wsUrl(port) {
     return `ws://127.0.0.1:${port}/ws`;
@@ -49,11 +53,32 @@
     return msg.muted && msg.state !== 'rest' ? `${label} (休止)` : label;
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onOpen(), onClose(),
+  // 縦横比を保って SNAP_W x SNAP_H に収める (拡大はしない)
+  function snapSize(w, h) {
+    const s = Math.min(SNAP_W / w, SNAP_H / h, 1);
+    return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+  }
+
+  // 映像トラックの今の 1 コマを JPEG の base64 にする。描けなければ null。Browser only (ImageCapture / canvas)
+  async function grabJpeg(track, createCanvas) {
+    if (!track || track.readyState !== 'live' || typeof ImageCapture === 'undefined') return null;
+    const frame = await new ImageCapture(track).grabFrame();
+    try {
+      const [w, h] = snapSize(frame.width, frame.height);
+      const canvas = createCanvas(w, h);
+      canvas.getContext('2d').drawImage(frame, 0, 0, w, h);
+      const url = canvas.toDataURL('image/jpeg', SNAP_QUALITY);
+      return url.slice(url.indexOf(',') + 1);
+    } finally {
+      frame.close();
+    }
+  }
+
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onSnap(msg), onOpen(), onClose(),
   //         clientId, reconnectMs, setTimeoutFn }
   // 接続が切れた・つながらなかったら reconnectMs 後につなぎ直す (サーバの再起動中に開始を押しても待てば動く)。close() で止める
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError, onSearch, onLinks, onOpen, onClose } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onSearch, onLinks, onSnap, onOpen, onClose } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
     const reconnectMs = opts.reconnectMs || RECONNECT_MS;
     const setTimeoutFn = opts.setTimeoutFn || setTimeout;
@@ -92,6 +117,7 @@
       else if (msg.t === 'error') { if (onError) onError(msg); }
       else if (msg.t === 'search') { if (onSearch) onSearch(msg); }
       else if (msg.t === 'links') { if (onLinks) onLinks(msg); }
+      else if (msg.t === 'snap') { if (onSnap) onSnap(msg); }
       else if (player) player.handleMessage(msg);
     }
 
@@ -120,6 +146,7 @@
   }
 
   // 共有したタブの音 -> worklet (seq に DRAMA_FLAG) -> client.sendFrame。共有が終わったら onEnded。Browser only.
+  // vision (真偽値か Promise。共有の操作を待たせないよう共有の後で待つ) なら映像トラックを残し、snapshot() で今の画面を JPEG の base64 で返す (無ければ null)
   // 失敗した段階をエラーに付ける (ブラウザの例外は "Not supported" のように段階が分からない)
   async function step(name, fn) {
     try {
@@ -129,7 +156,7 @@
     }
   }
 
-  async function startDramaCapture({ getDisplayMedia, AudioContextCtor, workletUrl, client, onEnded }) {
+  async function startDramaCapture({ getDisplayMedia, AudioContextCtor, workletUrl, client, onEnded, vision, createCanvas }) {
     const stream = await step('タブの共有', async () => {
       try {
         return await getDisplayMedia(displayConstraints());
@@ -144,7 +171,9 @@
       for (const t of stream.getVideoTracks()) t.stop();
       throw new Error('音声が共有されていません。共有の画面で「タブの音声も共有する」をオンにしてください');
     }
-    for (const t of stream.getVideoTracks()) t.stop();
+    const keep = Boolean(await vision);
+    const video = keep ? stream.getVideoTracks() : [];
+    if (!keep) for (const t of stream.getVideoTracks()) t.stop();
     const ctx = await step('音声の準備', () => new AudioContextCtor());
     await step('音声処理の読み込み', () => ctx.audioWorklet.addModule(workletUrl));
     const node = await step('音声処理の作成', () => new AudioWorkletNode(ctx, 'capture-processor', {
@@ -156,17 +185,26 @@
     const stop = () => {
       if (stopped) return;
       stopped = true;
-      for (const t of audio) t.stop();
+      for (const t of [...audio, ...video]) t.stop();
       ctx.close();
       if (onEnded) onEnded();
     };
     audio[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
-    return { ctx, stream, node, stop };
+    const canvas = createCanvas || ((w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h }));
+    const snapshot = async () => {
+      if (stopped || !video.length) return null;
+      try {
+        return await grabJpeg(video[0], canvas);
+      } catch (_e) {
+        return null; // 描けなければ画像なしで一言を言わせる
+      }
+    };
+    return { ctx, stream, node, stop, snapshot };
   }
 
   const api = {
-    PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, W, P,
-    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, createClient,
+    PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, SNAP_W, SNAP_H, W, P,
+    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, createClient,
     startCapture, startDramaCapture,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

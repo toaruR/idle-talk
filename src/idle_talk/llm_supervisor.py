@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import subprocess
 import time
 import urllib.request
@@ -24,10 +26,22 @@ def build_llama_command(model_path: str, port: int = 8080, ngl: int = 99) -> str
 
 
 def build_llama_argv(launch: LlmLaunch, port: int) -> list[str]:
-    """build_llama_command と同じ起動内容を、シェルを介さない Popen 用の引数リストで返す。"""
+    """build_llama_command と同じ起動内容を、シェルを介さない Popen 用の引数リストで返す。
+
+    main_gpu >= 0 なら分割せずその GPU だけに載せる (他の GPU は既存アプリ優先、設計書 1.4)。
+    mmproj があれば画像入力を有効にする (ドラマモードの画面、設計書 6.5)。"""
+    gpu = ["-sm", "none", "-mg", str(launch.main_gpu)] if launch.main_gpu >= 0 else []
+    vision = ["--mmproj", launch.mmproj] if launch.mmproj else []
+    if launch.mmproj and launch.image_max_tokens > 0:
+        vision += ["--image-max-tokens", str(launch.image_max_tokens)]
     return [launch.server, "-m", launch.model, "--host", "127.0.0.1", "--port", str(port),
-            "-ngl", str(launch.ngl), "-c", str(launch.ctx),
+            "-ngl", str(launch.ngl), "-c", str(launch.ctx), *gpu, *vision,
             "--jinja", "--chat-template-kwargs", NO_THINK_KWARGS]
+
+
+def llama_env() -> dict[str, str]:
+    """GPU 番号を nvidia-smi と同じ PCI 順にそろえた環境変数 (CUDA の既定は速い順で食い違いうる)。"""
+    return {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
 
 
 def popen_starter(argv: list[str], log_path: Path) -> Callable[[], subprocess.Popen]:
@@ -36,7 +50,8 @@ def popen_starter(argv: list[str], log_path: Path) -> Callable[[], subprocess.Po
         log.info("starting llama-server: %s", argv)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("ab") as out:
-            return subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            return subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                    env=llama_env())
     return start
 
 
@@ -47,6 +62,16 @@ def is_ready(base_url: str, timeout: float = 1.0) -> bool:
             return r.status == 200
     except OSError:
         return False
+
+
+def has_vision(base_url: str, timeout: float = 2.0) -> bool:
+    """llama-server が画像入力に対応しているか (/props の modalities.vision。mmproj 付きで起動したとき True)。"""
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/props", timeout=timeout) as r:
+            props = json.load(r)
+    except (OSError, ValueError):
+        return False
+    return isinstance(props, dict) and bool((props.get("modalities") or {}).get("vision"))
 
 
 def wait_ready(base_url: str, timeout_s: float, interval_s: float = 0.5,

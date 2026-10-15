@@ -21,7 +21,7 @@ from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_sp
 from .director import IdleTalkDirector
 from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
-from .llm_supervisor import LlmSupervisor, build_llama_argv, is_ready, popen_starter, wait_ready, watch
+from .llm_supervisor import LlmSupervisor, build_llama_argv, has_vision, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
 from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
@@ -196,14 +196,16 @@ def ui_defaults(cfg: Config) -> dict:
 
 
 def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | SpeakerChoices | None = None,
-              root: Path = WEB_DIR, personas: list[dict] | None = None) -> ThreadingHTTPServer:
+              root: Path = WEB_DIR, personas: list[dict] | None = None,
+              vision: Callable[[], bool] = lambda: False) -> ThreadingHTTPServer:
     """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声とペルソナの選択肢をブラウザへ渡す。
 
+    vision はドラマモードで画面も送るか (LLM が画像入力に対応しているか。LLM の起動後に決まるので要求ごとに聞く)。
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
     def config() -> bytes:  # 声の一覧は AivisSpeech が後から起動したときのため要求ごとに取る
         choices = speakers.get() if isinstance(speakers, SpeakerChoices) else speakers or []
         return json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": choices,
-                           "personas": personas or []}).encode("utf-8")
+                           "personas": personas or [], "vision": vision()}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -389,9 +391,12 @@ def main(argv: list[str] | None = None) -> int:
         args.personas = PersonaBook(Path(args.config).with_name(PERSONAS_FILE))
         web = start_web(args.web_port, args.port,
                         ui_defaults(cfg) | {"speaker": args.speaker, "persona": args.personas.current_id},
-                        args.speakers, personas=args.personas.choices())
+                        args.speakers, personas=args.personas.choices(),
+                        vision=lambda: director is not None and director.drama_vision)
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
+        director.drama_vision = has_vision(args.llm_url)  # mmproj 付きなら一言・感想に画面を添える (設計書 6.5)
+        log.info("drama vision: %s", "on" if director.drama_vision else "off")
         asyncio.run(_run(director, args.port, sup, stop_file, load_topics(args.config).interval_min * 60))
     except KeyboardInterrupt:
         pass

@@ -17,6 +17,7 @@
   <label>静音終了 <input type="time" id="quiet_end" value="07:00"></label>
   <label id="persona_label" hidden>ペルソナ <select id="persona"></select></label>
   <label id="speaker_label" hidden>声 <select id="speaker"></select></label>
+  <label>音量 <input type="range" id="volume" min="0" max="200" step="5" value="100"> <span id="volume_text">100%</span></label>
 </fieldset>
 <fieldset id="links_box" hidden>
   <legend>URL</legend>
@@ -33,6 +34,20 @@
   const $ = (id) => document.getElementById(id);
   let client = null;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
+  let sink = null;
+
+  // 音量はブラウザ内だけで掛ける (サーバに送らない)。開始前でも変えられ、localStorage に残す
+  const VOLUME_KEY = 'idle-talk.volume';
+  function volume() { return IdleTalkPlayer.clampVolume(parseInt($('volume').value, 10) / 100); }
+  function showVolume() {
+    $('volume_text').textContent = `${$('volume').value}%`;
+    if (sink) sink.setVolume(volume());
+  }
+  const savedVolume = localStorage.getItem(VOLUME_KEY);
+  if (savedVolume !== null) $('volume').value = savedVolume;
+  showVolume();
+  $('volume').addEventListener('input', showVolume);
+  $('volume').addEventListener('change', () => localStorage.setItem(VOLUME_KEY, $('volume').value));
 
   // 話したニュース・調べたページを URL 欄の先頭に積む (1 回分の並びは保つ)。MAX_LINKS 行を超えたら古い順 (下) から消す。
   // 同じ URL は前の行を消して先頭に付け直す。http(s) 以外は出さず、文字列は textContent で入れる (HTML として解釈しない)
@@ -110,8 +125,9 @@
     try {
       const actx = new AudioContext();
       const port = new URLSearchParams(location.search).get('port') || String((await serverConfig).ws_port);
+      sink = IdleTalkPlayer.createWebAudioSink(actx, undefined, volume());
       const player = IdleTalkPlayer.createPlayer({
-        sink: IdleTalkPlayer.createWebAudioSink(actx),
+        sink,
         send: (m) => { if (client) client.sendJson(m); },
       });
       client = C.createClient({
@@ -120,6 +136,10 @@
         onError: (m) => { $('error').textContent = `[${m.code}] ${m.message}`; },
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
+        onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省く
+          const jpeg = drama && drama.snapshot ? await drama.snapshot() : null;
+          if (client) client.sendJson(jpeg ? { t: 'snap', id: m.id, jpeg } : { t: 'snap', id: m.id });
+        },
         onOpen: () => { $('error').textContent = ''; pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
         onClose: () => { $('state').textContent = '再接続中…'; $('search').textContent = ''; },
       });
@@ -147,6 +167,8 @@
       drama = await C.startDramaCapture({
         getDisplayMedia: (c) => navigator.mediaDevices.getDisplayMedia(c),
         AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
+        // LLM が画像を読めるときだけ映像を残す (LLM の起動後に決まるので、画面を開いた時ではなく共有の開始時に聞く)
+        vision: loadServerConfig().then((c) => Boolean(c.vision), () => false),
         onEnded: () => { drama = null; showDrama(); pushUi(); },
       });
       $('error').textContent = '';

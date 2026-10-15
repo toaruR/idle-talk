@@ -138,6 +138,46 @@ def test_build_llama_argv_matches_command():
     assert argv[argv.index("--port") + 1] == "8091" and argv[argv.index("--host") + 1] == "127.0.0.1"
     assert argv[argv.index("-ngl") + 1] == "10" and argv[argv.index("-c") + 1] == "2048"
     assert "--jinja" in argv and argv[argv.index("--chat-template-kwargs") + 1] == NO_THINK_KWARGS
+    assert argv[argv.index("-sm") + 1] == "none" and argv[argv.index("-mg") + 1] == "0"  # 既定は GPU0 固定
+
+
+def test_build_llama_argv_gpu_choice():
+    argv = build_llama_argv(LlmLaunch(model="m.gguf", main_gpu=1), 8091)
+    assert argv[argv.index("-sm") + 1] == "none" and argv[argv.index("-mg") + 1] == "1"
+    auto = build_llama_argv(LlmLaunch(model="m.gguf", main_gpu=-1), 8091)
+    assert "-sm" not in auto and "-mg" not in auto  # 自動配置は llama-server に任せる
+
+
+def test_build_llama_argv_vision():
+    argv = build_llama_argv(LlmLaunch(model="m.gguf", mmproj="p.gguf", image_max_tokens=256), 8091)
+    assert argv[argv.index("--mmproj") + 1] == "p.gguf" and argv[argv.index("--image-max-tokens") + 1] == "256"
+    plain = build_llama_argv(LlmLaunch(model="m.gguf", image_max_tokens=256), 8091)
+    assert "--mmproj" not in plain and "--image-max-tokens" not in plain  # mmproj 無しなら画像の指定もしない
+    assert "--image-max-tokens" not in build_llama_argv(LlmLaunch(model="m.gguf", mmproj="p.gguf"), 8091)
+
+
+def test_has_vision_reads_props(monkeypatch):
+    import io
+    import json as json_mod
+
+    from idle_talk import llm_supervisor as sup_mod
+    bodies = {"on": {"modalities": {"vision": True}}, "off": {"modalities": {"vision": False}}, "old": {}}
+
+    def fake_open(url, timeout):
+        assert url.endswith("/props")
+        key = url.split("//")[1].split("/")[0]
+        if key == "down":
+            raise OSError("refused")
+        return io.BytesIO(json_mod.dumps(bodies[key]).encode()) if key in bodies else io.BytesIO(b"<html>")
+    monkeypatch.setattr(sup_mod.urllib.request, "urlopen", fake_open)
+    assert sup_mod.has_vision("http://on/")
+    assert not any(sup_mod.has_vision(f"http://{k}") for k in ("off", "old", "down", "bad"))
+
+
+def test_llama_env_orders_gpus_by_pci_bus():
+    from idle_talk.llm_supervisor import llama_env
+    env = llama_env()
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID" and "PATH" in {k.upper() for k in env}
 
 
 def test_wait_ready_polls_until_ready_or_timeout():

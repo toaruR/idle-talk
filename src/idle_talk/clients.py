@@ -16,7 +16,7 @@ from .config import DEFAULT_SPEAKER, Config
 from .errors import ERR_ASR_FAILED, ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 
 LLM_MAX_TOKENS = 300  # 応答 1 回の生成上限 (日本語で 2〜5 文程度)
-LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":True},"max_tokens":{"const":LLM_MAX_TOKENS}}}
+LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"anyOf":[{"type":"string"},{"type":"array","minItems":1,"items":{"oneOf":[{"type":"object","required":["type","text"],"properties":{"type":{"const":"text"},"text":{"type":"string"}}},{"type":"object","required":["type","image_url"],"properties":{"type":{"const":"image_url"},"image_url":{"type":"object","required":["url"],"properties":{"url":{"type":"string","pattern":"^data:image/"}}}}}]}}]}}}},"stream":{"const":True},"max_tokens":{"const":LLM_MAX_TOKENS}}}
 LLM_CHUNK_SCHEMA = {"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}
 
 log = logging.getLogger("idle_talk.clients")

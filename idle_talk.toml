@@ -29,7 +29,7 @@ speed = 1.0          # 話速 0.5〜2.0 (既定 1.0。大きいほど速い)
 intonation = 1.0      # スタイルの感情表現の強さ 0.0〜2.0 (既定 1.0。上げすぎると発声が崩れることがある)
 tempo_dynamics = 0.0  # テンポの緩急 0.0〜2.0 (既定 1.0。大きいほど早口で生っぽい)
 pitch = 0.0           # 音高 -0.15〜0.15 (既定 0.0。0 以外は音質が劣化する)
-volume = 0.2          # 音量 0.0〜2.0 (既定 1.0)
+volume = 0.5          # 音量 0.0〜2.0 (既定 1.0)
 pause = 1.0           # 句読点の無音の倍率 0 以上 (既定 1.0。小さいほど間が短い)
 pre_silence = 0.1     # 音声の前の無音 (秒、既定 0.1)
 post_silence = 0.1    # 音声の後の無音 (秒、既定 0.1)
@@ -60,6 +60,9 @@ server = "D:/tools/llama.cpp/llama-server.exe"
 model = "D:/models/gemma-4-12b-it-qat-q4_0.gguf"  # 方言に強い 12B。思考は enable_thinking=false で無効
 ngl = 99
 ctx = 4096
+main_gpu = -1          # 載せる GPU の番号 (nvidia-smi と同じ順)。分割せずこの 1 枚に載せる。-1 で自動配置 (複数 GPU に分割)
+mmproj = "D:/models/mmproj-gemma-4-12b-it-qat-q4_0.gguf"  # 画像エンコーダ。指定するとドラマモードの一言・感想で画面も見る (空なら音だけ)
+# image_max_tokens = 0  # 画像 1 枚のトークン上限 (0 = llama-server の既定)。画面は 640x360 で送るので約 106 トークン
 
 [aivis]
 # engine を指定すると idle-talk.cmd start / restart が AivisSpeech Engine (声) を先に起動し、stop で止める。

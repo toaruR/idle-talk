@@ -72,3 +72,56 @@ test('createClient: close() stops reconnecting', () => {
   assert.equal(timers.length, 0);
   assert.equal(made.length, 1);
 });
+
+test('snapSize: fits 640x360 keeping aspect, never enlarges', () => {
+  assert.deepEqual(C.snapSize(1920, 1080), [640, 360]);
+  assert.deepEqual(C.snapSize(1080, 1920), [203, 360]); // 縦長
+  assert.deepEqual(C.snapSize(1280, 1024), [450, 360]);
+  assert.deepEqual(C.snapSize(320, 180), [320, 180]);
+});
+
+test('createClient: snap request goes to onSnap', () => {
+  const { WS, made } = fakeWs();
+  const seen = [];
+  C.createClient({ port: 8765, WebSocketCtor: WS, player: null, onSnap: (m) => seen.push(m), setTimeoutFn: () => {} });
+  made[0].onmessage({ data: JSON.stringify({ t: 'snap', id: 3 }) });
+  assert.deepEqual(seen, [{ t: 'snap', id: 3 }]);
+});
+
+// AudioContext 等を差し替えて、映像トラックを残すか (vision) と止め方を見る
+function fakeDrama() {
+  const stops = { audio: 0, video: 0 };
+  const listeners = {};
+  const audio = { stop: () => { stops.audio += 1; }, addEventListener: (ev, fn) => { listeners[ev] = fn; } };
+  const video = { stop: () => { stops.video += 1; }, readyState: 'live' };
+  const stream = { getVideoTracks: () => [video], getAudioTracks: () => [audio] };
+  class Ctx {
+    constructor() { this.sampleRate = 48000; this.audioWorklet = { addModule: async () => {} }; }
+    createMediaStreamSource() { return { connect: () => {} }; }
+    close() {}
+  }
+  globalThis.AudioWorkletNode = class { constructor() { this.port = {}; } };
+  globalThis.MediaStream = class { constructor(t) { this.tracks = t; } };
+  return { stops, stream, Ctx };
+}
+
+test('startDramaCapture: without vision stops video at once and snapshot is null', async () => {
+  const f = fakeDrama();
+  const d = await C.startDramaCapture({ getDisplayMedia: async () => f.stream, AudioContextCtor: f.Ctx, workletUrl: '', client: {} });
+  assert.equal(f.stops.video, 1);
+  assert.equal(await d.snapshot(), null);
+  d.stop();
+  assert.deepEqual(f.stops, { audio: 1, video: 1 });
+});
+
+test('startDramaCapture: vision keeps video until stop', async () => {
+  const f = fakeDrama();
+  const d = await C.startDramaCapture({
+    getDisplayMedia: async () => f.stream, AudioContextCtor: f.Ctx, workletUrl: '', client: {}, vision: Promise.resolve(true),
+  });
+  assert.equal(f.stops.video, 0);
+  assert.equal(await d.snapshot(), null); // ImageCapture の無い環境: 描けないので画像なし
+  d.stop();
+  assert.deepEqual(f.stops, { audio: 1, video: 1 });
+  assert.equal(await d.snapshot(), null); // 止めた後は求めない
+});

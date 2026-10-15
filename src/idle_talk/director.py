@@ -84,6 +84,8 @@ DRAMA_PROMPT = ("一緒にドラマを見ています。今の場面の台詞 (�
 DIGEST_PROMPT = ("次はドラマの台詞の音声認識結果です (誤りを含みます):\n{lines}\n\n"
                  "この場面で起きた出来事を 60 字以内の 1〜2 文で要約してください。台詞に無いことは補わないでください。"
                  "意味が分からなければ『なし』とだけ出力してください。")
+DRAMA_VISION_NOTE = "\n\n今の画面の画像も添えます。映っている様子 (人物・表情・場所) も踏まえてください。"
+SNAP_TIMEOUT_S = 2.0  # 画面の返事を待つ上限。来なければ画像なしで言う (待ちすぎると場面がずれる)
 DRAMA_FINALE_PROMPT = ("一緒にドラマを見ていて、台詞がしばらく途切れました (見終わったか一時停止したところです)。\n"
                        "ここまでのあらすじメモ (自動要約なので誤りを含みます):\n{notes}\n\n"
                        "最後のあたりの台詞 (音声認識なので誤りを含みます):\n{rest}\n\n"
@@ -157,7 +159,8 @@ class IdleTalkDirector:
         self._ic_start_ms = 0  # INTERRUPT_CHECK 突入時刻 (clock 基準 ms)
         self.path_calls: list[tuple[str, str]] = []  # (route, 関数名): 不変条件 3 の記録
         self.core = WsCore(self.cfg, self.epoch, clock, on_audio=self._on_up_audio,
-                           on_playback=self._on_playback, on_ui=self._on_ui, on_hello=self._on_hello)
+                           on_playback=self._on_playback, on_ui=self._on_ui, on_hello=self._on_hello,
+                           on_snap=self._on_snap)
         self.fsm = StateDirector(self.cfg, self.epoch, on_actions=self._run_actions, on_state=self._send_state)
         self.history = PlaybackHistory(store, self.cfg)
         self._llm = llm_stream
@@ -212,6 +215,10 @@ class IdleTalkDirector:
         self._drama_uid = 0
         self._digest_task: asyncio.Task | None = None  # 台詞をあらすじメモに要約する裏の LLM 呼び出し
         self._digest_stop = threading.Event()
+        # 一言・感想に画面 1 枚を添える (mmproj ありのときだけ main が True にする)
+        self.drama_vision = False
+        self._snap_id = 0
+        self._snap_wait: tuple[int, asyncio.Future] | None = None  # 返事待ちの (id, 結果)
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -767,13 +774,57 @@ class IdleTalkDirector:
         self._spont_task = asyncio.get_running_loop().create_task(self._drama_respond(scene))
         return "drama"
 
+    # ---- 画面 (設計書 6.5): 一言・感想の直前に 1 枚だけ求め、使ったら捨てる ----
+    def _on_snap(self, msg: dict) -> None:
+        if self._snap_wait is not None and self._snap_wait[0] == msg["id"] and not self._snap_wait[1].done():
+            self._snap_wait[1].set_result(msg.get("jpeg") or None)
+
+    async def _snapshot(self) -> str | None:
+        """ブラウザに今の画面を求め、JPEG の base64 を返す。無効・未接続・時間切れ・映像なしは None。"""
+        if not (self.drama_vision and self.core.conn is not None and self.core.hello_done):
+            return None
+        self._snap_id = (self._snap_id + 1) % (1 << 31)
+        fut = asyncio.get_running_loop().create_future()
+        self._snap_wait = (self._snap_id, fut)
+        self._emit({"t": "snap", "id": self._snap_id})
+        try:
+            jpeg = await asyncio.wait_for(fut, SNAP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.info("drama snapshot timed out")
+            return None
+        finally:
+            self._snap_wait = None
+        if jpeg:
+            log.info("drama snapshot: %d KB", len(jpeg) * 3 // 4 // 1024)  # 画像そのものは残さない (設計書 7)
+        return jpeg
+
+    @staticmethod
+    def _with_image(prompt: str, jpeg: str | None) -> str | list[dict]:
+        """画面があれば user の content を文章 + 画像の部品にする。"""
+        if not jpeg:
+            return prompt
+        return [{"type": "text", "text": prompt + DRAMA_VISION_NOTE},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + jpeg}}]
+
+    def _collect_vision(self, messages: list[dict], stop: threading.Event) -> str | None:
+        """画像つきで失敗したら (mmproj 無しの llama-server が先に動いていた等) 画像なしで 1 回だけ呼び直す。"""
+        try:
+            return self._collect(messages, stop)
+        except Exception as e:  # noqa: BLE001
+            if not isinstance(messages[-1]["content"], list):
+                raise
+            log.warning("drama llm with image failed, retrying without image: %s", e)
+            text = messages[-1]["content"][0]["text"].removesuffix(DRAMA_VISION_NOTE)
+            return self._collect(messages[:-1] + [{"role": "user", "content": text}], stop)
+
     async def _drama_respond(self, scene: str) -> None:
         me = asyncio.current_task()
+        jpeg = await self._snapshot()
         messages = [{"role": "system", "content": self.personas.system_prompt()},
-                    {"role": "user", "content": DRAMA_PROMPT.format(scene=scene)}]
+                    {"role": "user", "content": self._with_image(DRAMA_PROMPT.format(scene=scene), jpeg)}]
         stop = threading.Event()
         try:
-            text = await asyncio.to_thread(self._collect, messages, stop)
+            text = await asyncio.to_thread(self._collect_vision, messages, stop)
         except asyncio.CancelledError:
             stop.set()  # 取消 (利用者が話し始めた): llama-server を応答に譲る
             raise
@@ -801,10 +852,14 @@ class IdleTalkDirector:
         self._check_done()
 
     async def _drama_finale(self, notes: str, rest: str) -> None:
-        messages = [{"role": "system", "content": self.personas.system_prompt()},
-                    {"role": "user", "content": DRAMA_FINALE_PROMPT.format(notes=notes or "(なし)", rest=rest or "(なし)")}]
-        self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
         me = asyncio.current_task()
+        jpeg = await self._snapshot()
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        prompt = DRAMA_FINALE_PROMPT.format(notes=notes or "(なし)", rest=rest or "(なし)")
+        messages = [{"role": "system", "content": self.personas.system_prompt()},
+                    {"role": "user", "content": self._with_image(prompt, jpeg)}]
+        self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
         await self.pipeline.respond(messages)
         if self._spont_task is not me or not self.spontaneous.pending:
             return

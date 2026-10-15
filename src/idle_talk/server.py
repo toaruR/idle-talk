@@ -61,7 +61,8 @@ class WsCore:
                  on_audio: Callable[[int, bytes], None] | None = None,
                  on_playback: Callable[[dict], None] | None = None,
                  on_ui: Callable[[dict], None] | None = None,
-                 on_hello: Callable[[], None] | None = None) -> None:
+                 on_hello: Callable[[], None] | None = None,
+                 on_snap: Callable[[dict], None] | None = None) -> None:
         self.host = check_bind_host(host)
         self.cfg = cfg or Config()
         self.epoch = epoch or Epoch()
@@ -70,6 +71,7 @@ class WsCore:
         self.on_playback = on_playback
         self.on_ui = on_ui
         self.on_hello = on_hello
+        self.on_snap = on_snap
         self.settings: dict = {"mute": False, "on": self.cfg.spontaneous_enabled, "radio": self.cfg.radio,
                                "interval_s": self.cfg.spont_interval_s,
                                "quiet_start": self.cfg.quiet_start,
@@ -178,6 +180,9 @@ class WsCore:
                 return
             if self.on_playback:
                 self.on_playback(msg)
+        elif t == "snap":  # ドラマモードの画面 1 枚 (設計書 6.5)
+            if self.on_snap:
+                self.on_snap(msg)
         else:
             log.warning("unexpected message type from browser: %s", t)
 
