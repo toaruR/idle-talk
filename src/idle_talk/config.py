@@ -354,11 +354,12 @@ class Drama(NamedTuple):
     finale_min_chars: int = 600  # 前の感想 (または開始) から聞いた台詞がこれ未満なら感想は言わない
     digest_chars: int = 800  # 台詞がこれだけ溜まったら裏であらすじメモに要約する (window_s を過ぎても話を覚えておく)
     log_prompt: bool = False  # 一言・感想・要約に LLM へ渡した台詞とメモを talk.log に残す (既定は保存しない)
+    keep_snaps: int = 0     # 一言・感想に使った画面を data/snaps に新しい順でこの枚数だけ残す (0 なら保存しない)
 
 
 _DRAMA_RANGES = {"interval_s": (10, 3600), "gap_ms": (500, 30000), "window_s": (30, 1800),
                  "min_chars": (0, 2000), "ctx_chars": (100, 4000), "max_seg_s": (3, 60),
-                 "finale_gap_s": (10, 1800), "finale_min_chars": (0, 20000), "digest_chars": (100, 2000)}
+                 "finale_gap_s": (10, 1800), "finale_min_chars": (0, 20000), "digest_chars": (100, 2000), "keep_snaps": (0, 20)}
 
 
 def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:

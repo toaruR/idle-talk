@@ -109,7 +109,7 @@ test('startDramaCapture: without vision stops video at once and snapshot is null
   const f = fakeDrama();
   const d = await C.startDramaCapture({ getDisplayMedia: async () => f.stream, AudioContextCtor: f.Ctx, workletUrl: '', client: {} });
   assert.equal(f.stops.video, 1);
-  assert.equal(await d.snapshot(), null);
+  assert.deepEqual(await d.snapshot(), { reason: 'vision off at share start' });
   d.stop();
   assert.deepEqual(f.stops, { audio: 1, video: 1 });
 });
@@ -120,10 +120,11 @@ test('startDramaCapture: vision keeps video until stop', async () => {
     getDisplayMedia: async () => f.stream, AudioContextCtor: f.Ctx, workletUrl: '', client: {}, vision: Promise.resolve(true),
   });
   assert.equal(f.stops.video, 0);
-  assert.equal(await d.snapshot(), null); // ImageCapture の無い環境: 描けないので画像なし
+  assert.equal((await d.snapshot()).jpeg, undefined); // 描けないので画像なし (理由を返す)
+  assert.match((await d.snapshot()).reason, /video track|ImageCapture/);
   d.stop();
   assert.deepEqual(f.stops, { audio: 1, video: 1 });
-  assert.equal(await d.snapshot(), null); // 止めた後は求めない
+  assert.deepEqual(await d.snapshot(), { reason: 'capture stopped' }); // 止めた後は求めない
 });
 
 test('errorResolved: transient errors clear when playback starts', () => {

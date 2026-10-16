@@ -65,10 +65,17 @@
     return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
   }
 
-  // 映像トラックの今の 1 コマを JPEG の base64 にする。描けなければ null。Browser only (ImageCapture / canvas)
+  // 映像トラックの今の 1 コマを JPEG の base64 にする。描けなければ理由つきで投げる。Browser only (ImageCapture / canvas)
   async function grabJpeg(track, createCanvas) {
-    if (!track || track.readyState !== 'live' || typeof ImageCapture === 'undefined') return null;
-    const frame = await new ImageCapture(track).grabFrame();
+    if (!track) throw new Error('no video track');
+    if (track.readyState !== 'live') throw new Error(`video track ${track.readyState}`);
+    if (typeof ImageCapture === 'undefined') throw new Error('ImageCapture unsupported');
+    let frame;
+    try {
+      frame = await new ImageCapture(track).grabFrame();
+    } catch (e) {
+      throw new Error(`grabFrame${track.muted ? ' (track muted)' : ''}: ${e && e.name ? `${e.name}: ${e.message}` : e}`);
+    }
     try {
       const [w, h] = snapSize(frame.width, frame.height);
       const canvas = createCanvas(w, h);
@@ -152,7 +159,8 @@
   }
 
   // 共有したタブの音 -> worklet (seq に DRAMA_FLAG) -> client.sendFrame。共有が終わったら onEnded。Browser only.
-  // vision (真偽値か Promise。共有の操作を待たせないよう共有の後で待つ) なら映像トラックを残し、snapshot() で今の画面を JPEG の base64 で返す (無ければ null)
+  // vision (真偽値か Promise。共有の操作を待たせないよう共有の後で待つ) なら映像トラックを残し、snapshot() で今の画面を
+  // { jpeg } (JPEG の base64) で返す。描けなければ { reason } (サーバのログで原因を見るため)
   // 失敗した段階をエラーに付ける (ブラウザの例外は "Not supported" のように段階が分からない)
   async function step(name, fn) {
     try {
@@ -198,11 +206,13 @@
     audio[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
     const canvas = createCanvas || ((w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h }));
     const snapshot = async () => {
-      if (stopped || !video.length) return null;
+      if (stopped) return { reason: 'capture stopped' };
+      if (!video.length) return { reason: keep ? 'no video track' : 'vision off at share start' };
       try {
-        return await grabJpeg(video[0], canvas);
-      } catch (_e) {
-        return null; // 描けなければ画像なしで一言を言わせる
+        return { jpeg: await grabJpeg(video[0], canvas) };
+      } catch (e) {
+        // 描けなければ画像なしで一言を言わせる
+        return { reason: String((e && e.message) || e).slice(0, 200) };
       }
     };
     return { ctx, stream, node, stop, snapshot };

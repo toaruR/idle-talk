@@ -7,6 +7,7 @@ fsm.Director を継承した StateDirector が遷移ごとに state メッセー
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -18,6 +19,7 @@ from collections import Counter, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
 from .config import Config, Drama
@@ -223,6 +225,7 @@ class IdleTalkDirector:
         self.drama_vision = False
         self._snap_id = 0
         self._snap_wait: tuple[int, asyncio.Future] | None = None  # 返事待ちの (id, 結果)
+        self.snap_dir: Path | None = None  # [drama].keep_snaps の保存先 (main が data/snaps にする)
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -804,11 +807,15 @@ class IdleTalkDirector:
     # ---- 画面 (設計書 6.5): 一言・感想の直前に 1 枚だけ求め、使ったら捨てる ----
     def _on_snap(self, msg: dict) -> None:
         if self._snap_wait is not None and self._snap_wait[0] == msg["id"] and not self._snap_wait[1].done():
+            if not msg.get("jpeg"):  # 映像が無い・描けない: ブラウザが送った理由を残す (無言で画像なしになると原因が追えない)
+                log.info("drama snapshot: no image (%s)", msg.get("reason") or "no reason")
             self._snap_wait[1].set_result(msg.get("jpeg") or None)
 
     async def _snapshot(self) -> str | None:
         """ブラウザに今の画面を求め、JPEG の base64 を返す。無効・未接続・時間切れ・映像なしは None。"""
         if not (self.drama_vision and self.core.conn is not None and self.core.hello_done):
+            if self.drama_vision:
+                log.info("drama snapshot: skipped (not connected)")
             return None
         self._snap_id = (self._snap_id + 1) % (1 << 31)
         fut = asyncio.get_running_loop().create_future()
@@ -822,8 +829,25 @@ class IdleTalkDirector:
         finally:
             self._snap_wait = None
         if jpeg:
-            log.info("drama snapshot: %d KB", len(jpeg) * 3 // 4 // 1024)  # 画像そのものは残さない (設計書 7)
+            log.info("drama snapshot: %d KB", len(jpeg) * 3 // 4 // 1024)  # 画像そのものは keep_snaps のときだけ残す
+            self._keep_snap(jpeg)
         return jpeg
+
+    def _keep_snap(self, jpeg: str) -> None:
+        """[drama].keep_snaps 枚まで画面を snap_dir に残す (確認用)。古いものから消す。失敗はログのみ。"""
+        keep = self.drama.s.keep_snaps
+        if keep <= 0 or self.snap_dir is None:
+            return
+        try:
+            self.snap_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.now_ms() / 1000))
+            path = self.snap_dir / f"snap-{stamp}-{self._snap_id:010d}.jpg"
+            path.write_bytes(base64.b64decode(jpeg))
+            for old in sorted(self.snap_dir.glob("snap-*.jpg"))[:-keep]:
+                old.unlink(missing_ok=True)
+            log.info("drama snapshot saved: %s", path.name)
+        except (OSError, ValueError) as e:
+            log.warning("drama snapshot save failed: %s", e)
 
     @staticmethod
     def _with_image(prompt: str, jpeg: str | None) -> str | list[dict]:

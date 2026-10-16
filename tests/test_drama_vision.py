@@ -16,6 +16,8 @@ JPEG = "QUJD"  # base64 の中身は見ない
 def test_snap_and_image_content_schemas():
     assert validate_message({"t": "snap", "id": 1, "jpeg": JPEG})
     assert validate_message({"t": "snap", "id": 1})  # 映像が無いときは jpeg を省く
+    assert validate_message({"t": "snap", "id": 1, "reason": "video track ended"})  # 画像が無い理由 (ログ用)
+    assert not validate_message({"t": "snap", "id": 1, "reason": "x" * 201})
     assert not validate_message({"t": "snap", "jpeg": JPEG})
     assert not validate_message({"t": "snap", "id": 1, "jpeg": "x" * (1048576 + 1)})
     parts = [{"type": "text", "text": "見て"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}}]

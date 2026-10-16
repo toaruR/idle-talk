@@ -40,6 +40,7 @@ STOP_POLL_S = 0.5  # 停止ファイル (ctl stop) の確認周期
 PID_FILE = "idle_talk.pid"  # data_dir 直下。二重起動検査と ctl の停止対象
 STOP_FILE = "idle_talk.stop"  # data_dir 直下。置かれたら正常終了する (ctl stop)
 DB_FILE = "idle_talk.db"  # data_dir 直下。ctl memories も読む
+SNAP_DIR = "snaps"  # data_dir 直下。[drama].keep_snaps でドラマの画面を残す
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"  # src レイアウト前提 (リポジトリ直下の web/)
 
 
@@ -160,6 +161,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                                                       onset_frames=vad.onset_ms // FRAME_MS,
                                                                       min_threshold=vad.min_threshold),
                                    cfg.MIN_SEG)
+    director.snap_dir = data_dir / SNAP_DIR
     asr_settings = load_asr(args.config)
     director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)

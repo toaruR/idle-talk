@@ -1,5 +1,6 @@
 """[drama].log_prompt: 一言・感想・要約に LLM へ渡した台詞とメモを talk.log に残す (既定は残さない)。"""
 import asyncio
+import base64
 import json
 import logging
 
@@ -89,4 +90,41 @@ def test_digest_and_finale_logged(tmp_path, talk_lines):
         await until(lambda: not d.spontaneous.pending)
         assert "DRAMA(感想・メモ): 兄が弟を疑った。" in talk_lines
         assert "DRAMA(感想・台詞): 違う、俺じゃない。 [画像あり 3 KB]" in talk_lines  # 画像そのものは残さない
+    asyncio.run(run())
+
+
+def test_keep_snaps(tmp_path):
+    """[drama].keep_snaps: 画面を data/snaps に新しい方から指定枚数だけ残す。0 なら残さない。"""
+    p = tmp_path / "s.toml"
+    p.write_text("[drama]\nkeep_snaps = 21\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_drama(p)
+    d, _, _ = make(tmp_path, [], [])
+    d.snap_dir = tmp_path / "snaps"
+    d._keep_snap(base64.b64encode(b"jpeg").decode())
+    assert not d.snap_dir.exists()  # 既定 0
+    d.drama = DramaListener(SETTINGS._replace(keep_snaps=3), EnergyVad(), 200, d.clock_)
+    for i in range(1, 6):
+        d._snap_id = i
+        d._keep_snap(base64.b64encode(b"jpeg%d" % i).decode())
+    files = sorted(d.snap_dir.glob("snap-*.jpg"))
+    assert [f.read_bytes() for f in files] == [b"jpeg3", b"jpeg4", b"jpeg5"]
+
+
+def test_snapshot_saved_on_reaction(tmp_path):
+    async def run():
+        d, b, _ = make(tmp_path, ["まさか！"], ["犯人はお前だ。", "違う、俺じゃない。"])
+        d.drama = DramaListener(SETTINGS._replace(keep_snaps=3), EnergyVad(), 200, d.clock_)
+        d.drama_vision, d.snap_dir = True, tmp_path / "snaps"
+        drama_on(d, b)
+        drama_speak(b)
+        drama_speak(b)
+        await until(lambda: len(d.drama.lines) == 2)
+        d.clock_.advance(60)
+        assert d.spontaneous_tick() == "drama"
+        await until(lambda: any(m["t"] == "snap" for m in b.texts))
+        snap = next(m for m in b.texts if m["t"] == "snap")
+        d.core.on_text(b, json.dumps({"t": "snap", "id": snap["id"], "jpeg": base64.b64encode(b"frame").decode()}))
+        await until(lambda: not d.spontaneous.pending)
+        assert [f.read_bytes() for f in d.snap_dir.glob("snap-*.jpg")] == [b"frame"]
     asyncio.run(run())

@@ -141,9 +141,9 @@
         onError: (m) => showError(`[${m.code}] ${m.message}`, m.code),
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
-        onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省く
-          const jpeg = drama && drama.snapshot ? await drama.snapshot() : null;
-          if (client) client.sendJson(jpeg ? { t: 'snap', id: m.id, jpeg } : { t: 'snap', id: m.id });
+        onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
+          const r = drama && drama.snapshot ? await drama.snapshot() : { reason: 'not sharing' };
+          if (client) client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg } : { t: 'snap', id: m.id, reason: r.reason });
         },
         onOpen: () => { showError('', null); pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
         onClose: () => { $('state').textContent = '再接続中…'; $('search').textContent = ''; },
