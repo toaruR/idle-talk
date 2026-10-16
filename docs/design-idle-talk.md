@@ -15,6 +15,14 @@
 - 2026-10-14：ドラマモードに総合的な感想を追加（§6.5）。台詞が長く途切れたら、裏で要約したあらすじメモをもとにそれまでの感想を話す。
 - 2026-10-14：ペルソナを追加（§6.6）。人物設定を `personas.toml` に書き、画面で切り替える（`ui.persona`）。
 - 2026-10-14：ASR を faster-whisper small（GPU0）から ReazonSpeech（sherpa-onnx、CPU）に変更（§2.2、§8.1）。放送字幕を正解にした 80 クリップで CER 29.1% → 10.8%、遅延 p50 334 → 212ms（`tools/asr_bench.py`）。`no_speech_prob` は出ないので幻聴除外は `compression_ratio`（本文から計算）と語なし判定に頼る。`[asr].engine = "whisper"` で戻せる。
+- 2026-10-15：`[drama].log_prompt` を追加（§7）。オンなら一言・感想・要約に使った台詞とメモを talk.log に残す（何を見て一言を言ったかを後で確かめるため）。既定オフで、オフなら従来どおり台詞を保存しない。
+- 2026-10-16：`[drama].keep_snaps` を追加（§7）。1 以上なら一言・感想に使った画面を `data/snaps` に新しい方からその枚数だけ残す（LLM が何を見たかを確かめるため）。既定 0 で、0 なら従来どおり画面を保存しない。
+- 2026-10-15：文脈の無い短い認識結果を捨てる（§5.1）。食器・咳を「はい」「誰」「ハハ」と聞き違えて応答・取消が続いた。
+- 2026-10-15：ドラマの音の回り込みでマイクの閾値を上げる（§5.1）。スピーカーで見ていると、タブの笑い声・BGM がマイクに入り「はい」「誰」「ハハ」と認識されて応答・取消が続いた。
+- 2026-10-15：`HTTP_TIMEOUT` の TTS 1 文を 3s → 6s に変更（§8.1）。ドラマ視聴中は台詞の認識（CPU）と合成（CPU）が重なり、長めの 1 文が 4.4 秒かかって飛ばされた（12 時台の平均 1.9 秒、普段は 1.1 秒）。
+- 2026-10-15：ドラマモードで画面も見る（§3.1、§6.5、§7、§12.1）。`[llm].mmproj` を指定して llama-server が画像入力に対応しているとき（`/props` の `modalities.vision`）、一言・感想の直前にブラウザへ画面 1 枚（640×360 の JPEG、約 106 トークン）を求めて LLM に添える。LLM 要求の `content` を文字列または text / image_url の部品の配列に広げる。
+- 2026-10-16：画面モードを追加（§3.1、§6.7、§7）。共有した画面を `[screen].interval_s` ごとに 1 枚求め、前に LLM に見せた画面との差（縮小画像の明るさの平均差）が `min_diff` 以上のときだけ一言話しかける。`snap` に縮小画像 `thumb` を足し、`ui` に `screen` を足す。
+- 2026-10-16：画面モードに `[screen].follow_window`（既定オフ）を追加（§6.7）。オンならブラウザで共有せず、Director が前面のウィンドウを自動で撮り、タイトルも LLM に渡す。
 - 2026-10-12：llama-server（b11564）はストリーム最初のチャンクで `delta.content` が `null` のため、SSE data 行スキーマの `content` を string または null に変更（§12.1）。
 
 ---
@@ -64,7 +72,7 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |B→D|`hello`|§12.1|接続直後。version 不一致なら close 4002|
 |B→D|`playback`|§12.1|実再生位置の通知|
 | 共通 | `ping`/`pong` | §12.1 | `PING_INTERVAL` ごと。欠落 2 回で切断扱い |
-|B→D|`ui`|§12.1|設定変更（`drama`: ドラマモードの on/off、§6.5）|
+|B→D|`ui`|§12.1|設定変更（`drama`: ドラマモードの on/off、§6.5。`screen`: 画面モードの on/off、§6.7）|
 |D→B|binary|16byte ヘッダ + PCM（§12.1）|先読みは1チャンクまで|
 |D→B|`duck`|§12.1|音量を下げる|
 |D→B|`cancel`|§12.1|new_epoch 未満のキューを全破棄|
@@ -72,6 +80,8 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |D→B|`state`|§12.1|UI 表示用|
 |D→B|`search`|`{"t":"search","query":str,"active":bool}`|Web 検索の開始/終了（§6.3。UI 表示用、§12.1 のスキーマ外）|
 |D→B|`links`|`{"t":"links","items":[{"title":str,"url":str}]}`|調べたページの URL を画面の URL 欄に出す（§6.3。§12.1 のスキーマ外）|
+|D→B|`snap`|`{"t":"snap","id":u32}`|今の画面を 1 枚求める（§6.5）|
+|B→D|`snap`|`{"t":"snap","id":u32,"jpeg"?:base64,"thumb"?:base64,"reason"?:str}`|求められた画面（640×360 に収めた JPEG、base64 で最大 1MiB）。`thumb` は 32×18 の明るさ 1 バイトずつの縮小画像（§6.7 の変化の判定用）。映像が無い・描けなければ `jpeg` を省き、理由（200 字まで）を `reason` に入れる（Director がログに残す）|
 |共通|`error`|§12.1||
 
 
@@ -146,9 +156,10 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 相槌：短い発話で「うん」「へえ」等。割り込み：`STOP_WORDS`（§8.1）または `STRONG_UTT`（§8.1）を満たす発話。
 - 「うん？」は疑問、「いや」は訂正になりうるため、短い発話を一律に相槌とみなさない。
 - 認識結果が出るまでは `duck` のまま待ち、時間切れでは止めない。語が出なかった（物音・ASR 失敗・幻聴）なら再生を続け、語が出て相槌でなければ停止する。
+- 文脈の無い短い認識結果：`[asr].short_chars`（2）字以下の結果は、AI の声の最中に始まった発話か、AI の声を最後に再生してから `[asr].short_reply_s`（20 秒）以内のときだけ使い、それ以外は語なしとして捨てる（events に `short_discarded` を 1 行）。ReazonSpeech は食器・咳を「はい」「誰」「ハハ」と聞き違え、Silero VAD の声らしさも ASR の確信度も本物の短い返事と重なって見分けられなかった（2026-10-15）。何もないところに 2 字だけ話しかけても応答しない。
 - 自声除外：AI 再生中（自発発話を含む）に始まった発話の認識結果が、直近の AI 発話本文に句読点・空白を除いた部分文字列として含まれれば、スピーカーからの回り込みとして捨てる（応答も停止もしない。events に `echo_suppressed` を 1 行）。言い換えや部分的な誤認識は検出できない。
 - VAD は RMS が閾値以上のフレームが `[vad].onset_ms` 続いたら発話開始とし、一瞬の物音を無視する。開始判定までの音は区間の頭に含める。閾値と onset は設定ファイルの `[vad]`。
-- 閾値の自動校正（`[vad].adaptive`、既定オン）：非再生中のフレームから周囲の雑音を推定し（静かな方へ速く、うるさい方へ毎秒 0.5dB でゆっくり追う）、閾値を「雑音 × `ratio`」（下限 `min_threshold`）とする。AI 再生中は回り込みの平均を別に測り、閾値を「回り込み × `ratio`」以上に上げる。ブラウザの AGC は推定を乱すので切る（`autoGainControl: false`）。
+- 閾値の自動校正（`[vad].adaptive`、既定オン）：非再生中のフレームから周囲の雑音を推定し（静かな方へ速く、うるさい方へ毎秒 0.5dB でゆっくり追う）、閾値を「雑音 × `ratio`」（下限 `min_threshold`）とする。AI 再生中は回り込みの平均を別に測り、閾値を「回り込み × `ratio`」以上に上げる。ドラマモードでタブの音が鳴っている間（ドラマ側の閾値を超えてから 0.3 秒 `BLEED_HOLD_S`）も、その回り込みを AI とは別に測って同様に上げる（タブの音はブラウザの AEC で消えないため、スピーカーだと笑い声・BGM を「はい」「ハハ」等と認識した）。ブラウザの AGC は推定を乱すので切る（`autoGainControl: false`）。
 - 既定はダッキング優先（強い発話・`STOP_WORDS` は即停止）。見直しは M1 で誤停止率と相槌頻度を見て行う。停止の確認窓は `T_confirm`（§8.1）。
 
 ### 5.2 履歴確定ルール
@@ -188,14 +199,15 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 限界：声の似た人（家族など）は取り違えうる。同時に複数人が話す会話は扱わない。
 
 ### 6.5 ドラマモード
-- 画面の「ドラマを一緒に見る」で `getDisplayMedia` によりタブ（画面）を共有し、その音声だけを別の AudioWorklet で 16kHz に落として同じ WS で送る（seq に `DRAMA_FLAG`）。映像トラックは即停止。共有中は `ui.drama=true`。
+- 画面の「ドラマを一緒に見る」で `getDisplayMedia` によりタブ（画面）を共有し、その音声だけを別の AudioWorklet で 16kHz に落として同じ WS で送る（seq に `DRAMA_FLAG`）。映像トラックは即停止する（画面を見るとき（下記）は残す）。共有中は `ui.drama=true`。
 - ドラマの音は専用の VAD で区間化し（`[drama].max_seg_s` で強制分割）、別の単一ワーカーで ASR にかける（利用者の認識を待たせない）。認識結果は直近 `window_s` 秒だけメモリに置く。FSM・相槌・E6 には入れない（台詞は利用者の発話ではない）。
 - 一言：IDLE で、台詞が `gap_ms` 以上途切れ、前の一言から `interval_s` 以上経ち、新しい台詞が `min_chars` 字以上溜まったら、自発発話と同じ経路（pending・保留・取消・再生完了）で LLM に一言（25 字以内）を求める。全文を受け取ってから、「なし」なら黙る。生成中に台詞が再開していたら、かぶせずに次の切れ目を `DRAMA_HOLD_S`（8 秒）まで待って言い、来なければ黙る（1 行目だけを読む）。「聞こえない・分からない」系の一言も黙る。ドラマモードをオフにしたら作りかけ・再生中の一言も取消す。黙った場合も間隔は空ける。
 - 総合的な感想：台詞が `finale_gap_s`（60 秒）聞こえず（見終わった・一時停止）、前の感想から `finale_min_chars` 字以上聞いていたら、それまでの感想を 2〜4 文で話す（一言と同じ経路。一言より優先）。`window_s` を過ぎた台詞は捨てるので、台詞が `digest_chars` 字溜まるたびに裏で LLM に 60 字以内のあらすじメモへ要約させて覚えておく（メモは計 `NOTES_MAX_CHARS`=1200 字まで、古い方から捨てる。要約は利用者の発話で取消し、台詞を残して再試行）。感想にはメモとまだ要約していない最後の台詞を渡し、話したらメモを捨てる。メモもメモリにだけ置く。
 - 通常応答の system には直近の台詞（`ctx_chars` 字まで、古い方から捨てる）を添える。一言には会話履歴も前の一言も渡さず、前の一言以降の台詞（今の場面）だけを見せる（履歴や古い台詞を見せると 4B が同じ語を繰り返した）。
 - 回り込み：マイクの認識結果の 6 割以上（4 字以上）が直近の台詞と連続一致したら、スピーカーから拾ったドラマの台詞として捨てる（events に `drama_echo_suppressed`）。ドラマ側の認識が後に届いた場合は検出できない。
 - ドラマモード中は普段の自発発話と `IDLE_TIMEOUT` 休止を止める。共有停止で台詞を捨てて元に戻る。
-- 限界：音だけで映像は分からない。BGM・効果音は幻聴フィルタと語なし判定に頼る。
+- 画面：`[llm].mmproj` を指定し、llama-server が画像入力に対応しているとき（起動後の `/props` の `modalities.vision`。`/config.json` の `vision` でブラウザに伝える）だけ使う。ブラウザは映像トラックを残し、一言・感想の直前に `snap` で求められたら今の 1 コマを 640×360 に収めた JPEG（品質 0.7）で返す。Director は `SNAP_TIMEOUT_S`（2 秒）だけ待ち、届けば user の `content` を文章 + 画像にして「映っている様子も踏まえて」と足す。来なければ画像なしで言う。画像つきの呼び出しが失敗したら画像なしで 1 回だけ呼び直す。あらすじメモの要約と通常応答には使わない（G1 に足さない）。画像はメモリにだけ置き、使ったら捨てる（ログは大きさだけ。確認用に `[drama].keep_snaps` 枚だけ `data/snaps` に残せる、§7）。
+- 限界：画面は一言・感想の時点の 1 コマだけで、場面の流れ（動き）は分からない。画面を使わないときは音だけで映像は分からない。BGM・効果音は幻聴フィルタと語なし判定に頼る。
 
 ### 6.6 ペルソナ
 - 設定ファイル（`idle_talk.toml`）と同じフォルダの `personas.toml` に、id ごとの表で `name`（画面の表示名）・`prompt`（名前・性格・口調・一人称）を書く。声は持たせず、画面の「声」（`ui.speaker`）で別に選ぶ。トップレベルの `default` が起動時のペルソナ（省略時は先頭）。ファイルが無ければ組み込みの 1 人（気さくな雑談相手）だけで動く。
@@ -203,13 +215,22 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 画面の「ペルソナ」で `ui.persona` を送り、次の応答から切り替わる（一覧に無い id は 5006）。履歴は残すので、前のペルソナの口調を真似ないよう共通の決まりに「口調は人物設定に従い、これまでの会話に合わせない」を入れる。
 - `personas.toml` は更新時刻が変わったら読み直す（不正なら warn して前の内容を使う）。選択肢の増減は `/config.json` に載るので再起動後に反映。
 
+### 6.7 画面モード
+- 画面の「画面を一緒に見る」で `getDisplayMedia`（映像のみ）により画面を共有し、`ui.screen=true` を送る。LLM が画像を読めないとき（`/config.json` の `vision` が偽）は共有を止めてエラーを出す。ドラマモードとは同時に使わない（画面で片方を無効にする。Director はドラマモードを優先）。
+- 一言：IDLE で、前に画面を見に行ってから `[screen].interval_s`（既定 60 秒）経ったら、§6.5 と同じ `snap` で 1 枚求める。ブラウザは JPEG に加えて 32×18 の明るさの縮小画像 `thumb` を返す。
+- 変化の判定：前に LLM に見せた画面の `thumb` との平均差（0〜100 %）が `[screen].min_diff`（既定 3）未満なら LLM を呼ばずに黙る（events に `screen_skip`、ログに差を出して調整に使う）。比べる相手は「前に LLM に見せた画面」なので、少しずつのスクロールも溜まれば話す。初回・`thumb` なしは変わったとみなす。画像が取れなければ黙る。
+- 変わっていれば、ペルソナの system と画像つきの user（`SCREEN_PROMPT`：40 字以内、1〜2 文、説明・読み上げはしない、分からなければ「なし」）だけで LLM を呼ぶ（会話履歴は渡さない。§6.5 と同じ理由）。1 行目を自発発話と同じ経路（pending・保留・取消・再生完了）で読む。「なし」なら黙るが、その画面は見せたものとして次の比較の相手にする。
+- 画面モード中は普段の自発発話と `IDLE_TIMEOUT` 休止を止める。共有停止で作りかけ・再生中の一言を取消す。
+- 前面のウィンドウ（`[screen].follow_window`、既定オフ、Windows のみ）：ブラウザで共有せず、Director が一言の直前に前面のウィンドウを撮る（`wincap.WindowCapture`。ctypes の `GetForegroundWindow` と画面 DC からの `StretchBlt` で `[screen].width`（既定 1280）×16:9 の枠に縮め、各色を `color_bits`（既定 5）ビットに減らしてから標準の zlib で PNG にする。DPI は per-monitor v2）。1280×720 は約 370〜410 トークンで llama-server の 1 枚の上限（`n_ubatch` 既定 512）に収まるので `width` の上限は 1280。llama-server は WebP を読めず（stb_image）、JPEG は標準ライブラリで作れないため PNG にし、文字を保ったまま小さくする手段として色数を減らす（実測 2026-10-16：1280×720 で 128KB → 5 ビット 66KB、処理 35ms で変わらず。左の一覧の小さい文字を 8 ビットと同じく読めた。行フィルタ Sub/Up はかえって 15〜20% 大きくなった）。ウィンドウのタイトル（100 字まで）も LLM に渡し、タイトルが替われば画面の差に関係なく変わったとみなす。共有画面での確認が無く何でも撮るため既定はオフにし、タイトルが空（デスクトップ）・idle-talk 自身（タイトルが `idle-talk` で始まる。VS Code 等はフォルダ名を含むので部分一致にしない）・`exclude` の語を含むウィンドウと最小化中は撮らない（ログにもタイトルを残さない）。画面の DC から切り抜くので、DRM 付きの動画などは黒く写る。ブラウザの画面ボタンは共有せずオン・オフだけを送る（`/config.json` の `follow_window`）。
+- 限界：ブラウザの共有は 640×360 の 1 コマなので小さい文字は読めない（前面のウィンドウは 1280×720 で読める）。差は明るさの平均なので、配色の似たページ間の移動は小さく出る。通常応答には画面を添えない（G1 に足さない）。
+
 ---
 
 ## 7. エッジケースと障害モード
 
 E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 
-セキュリティ/プライバシー：音声と書き起こしは外部送信しない。ニュース取得（M4。`[search].on` なら話題カードの補充に Bing ニュース検索も使う）と Web 検索（§6.3、`[search].on` のときのみ。送るのは LLM が作った検索語と読むページの URL だけ）以外のネットワークアクセスなし。ドラマモード（§6.5）の音声・台詞は外部に送らず、保存もしない（メモリの直近 `window_s` 秒のみ）。保存データは SQLite のみで利用者が全削除できる。声の特徴（§6.4）も SQLite にだけ保存し、外部に送らない（ctl の `speakers` で確認・削除）。localhost バインドと Origin 検証で他サイトからのアクセスを遮断する。
+セキュリティ/プライバシー：音声と書き起こしは外部送信しない。ニュース取得（M4。`[search].on` なら話題カードの補充に Bing ニュース検索も使う）と Web 検索（§6.3、`[search].on` のときのみ。送るのは LLM が作った検索語と読むページの URL だけ）以外のネットワークアクセスなし。ドラマモード（§6.5）の音声・台詞・画面は外部に送らず、保存もしない（台詞はメモリの直近 `window_s` 秒のみ、画面は一言・感想に使う 1 枚だけで使ったら捨てる。画面はローカルの llama-server にだけ渡す）。ただし `[drama].log_prompt`（既定オフ）がオンのときは、一言・感想・要約で LLM に渡した台詞とあらすじメモを `data/talk.log` に `DRAMA(...)` 行で残す（画像は大きさだけ）。`[drama].keep_snaps`（既定 0）が 1 以上なら、一言・感想に使った画面を `data/snaps/snap-<日時>-<id>.jpg` に新しい方からその枚数だけ残す（古いものは消す）。画面モード（§6.7）の画面も同じ扱い（ローカルの llama-server にだけ渡し、縮小画像は比較用にメモリに 1 枚だけ置く。`keep_snaps` は共通）。保存データは SQLite のみで利用者が全削除できる。声の特徴（§6.4）も SQLite にだけ保存し、外部に送らない（ctl の `speakers` で確認・削除）。localhost バインドと Origin 検証で他サイトからのアクセスを遮断する。
 
 ---
 
@@ -250,7 +271,7 @@ E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 | `IDLE_TIMEOUT` | 30 分無操作で `休止` | 長時間無操作の定義 | M3 |
 | `STRONG_UTT` | 音量が直近 1s 平均の 2 倍以上、または発話が `T_confirm` 窓の終端まで継続 | 「強い発話」の定義。窓内で評価可能な条件のみ | M1 |
 |`OVERLAP_MAX`|+300ms|E11 の許容遅延|M0|
-|`HTTP_TIMEOUT`|LLM 最初のトークン 5s / 全体 20s、TTS 1 文 3s、ASR 区間長x2+2s|§3.3 の唯一の定義|M1|
+|`HTTP_TIMEOUT`|LLM 最初のトークン 5s / 全体 20s、TTS 1 文 6s、ASR 区間長x2+2s|§3.3 の唯一の定義|M1|
 |`DUCK_GAIN`|0.2|聞こえるが邪魔でない音量|M1|
 |`VAR_SUM`|750（ASR 200 + LLM 300 + TTS 250 の p50 配分）|可変段の合計。§8 はこの名前で参照|M0|
 |`G2_SUM`|130ms（VAD 40 + 送出 60 + ブラウザ 30 の予算上限）|G2 の内訳の唯一の定義|M1|
@@ -329,7 +350,7 @@ E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 
 外部サービス（JSON Schema draft-07。req=要求、res=応答。エラー応答は共通 `err`）：
 - `err`（HTTP 4xx/5xx）：`{"type":"object","required":["error"],"properties":{"error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"integer"},"message":{"type":"string"}}}}}`
-- llama-server req：`{"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":false,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"type":"string"}}}},"stream":{"const":true},"max_tokens":{"const":120}}}`。res は SSE 各 data 行：`{"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}`、終端は `[DONE]`。エラー：`err` または `HTTP_TIMEOUT` 超過→定型句 + `LLM_RETRY`。
+- llama-server req：`{"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":false,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"anyOf":[{"type":"string"},{"type":"array","minItems":1,"items":{"oneOf":[{"type":"object","required":["type","text"],"properties":{"type":{"const":"text"},"text":{"type":"string"}}},{"type":"object","required":["type","image_url"],"properties":{"type":{"const":"image_url"},"image_url":{"type":"object","required":["url"],"properties":{"url":{"type":"string","pattern":"^data:image/"}}}}}]}}]}}}},"stream":{"const":true},"max_tokens":{"const":120}}}`。res は SSE 各 data 行：`{"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}`、終端は `[DONE]`。エラー：`err` または `HTTP_TIMEOUT` 超過→定型句 + `LLM_RETRY`。
 - AivisSpeech：`POST /audio_query?text=..&speaker=<id>` → JSON(AudioQuery)、続けて `POST /synthesis?speaker=<id>`（body=AudioQuery）→ WAV。`/synthesis` はキャンセル不可のため、中止は epoch 不一致での破棄で代替する（`/cancellable_synthesis` は AivisSpeech Engine 1.2.0 で 501）。エラー：`err` または `HTTP_TIMEOUT` 超過→該当文を飛ばす。
 - ASR ワーカー req：`{"type":"object","required":["utterance_id","pcm_ref","lang"],"additionalProperties":false,"properties":{"utterance_id":{"type":"integer","minimum":0,"maximum":4294967295},"pcm_ref":{"type":"string","minLength":1},"lang":{"const":"ja"}}}`（pcm_ref は共有メモリ名）。res：`{"type":"object","required":["utterance_id","text","no_speech_prob","compression_ratio"],"additionalProperties":false,"properties":{"utterance_id":{"type":"integer","minimum":0},"text":{"type":"string"},"no_speech_prob":{"type":"number","minimum":0,"maximum":1},"compression_ratio":{"type":"number","minimum":0}}}`。エラー：不正 req→HTTP 400 + `err`、`HTTP_TIMEOUT` 超過→発話を破棄しログ。
 

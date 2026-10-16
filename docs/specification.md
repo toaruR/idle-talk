@@ -1,4 +1,4 @@
-<!-- spec-doc:last-reviewed-commit=cbd2205d15f348d48577405d9bcfe624dc582bf3 reviewed-at=2026-10-14 -->
+<!-- spec-doc:last-reviewed-commit=8a393b6c39f9ca4dddbd1f73544e79f7fa4420b4 reviewed-at=2026-10-16 -->
 
 # 仕様書
 
@@ -27,7 +27,8 @@ idle-talk は、PC に常駐する日本語の音声雑談アプリである。�
 - AI は返事を求めずに話し続けることもできる (ラジオモード)。
 - AI は調べないと分からない質問に、Web を検索して答える。
 - AI は声で話し相手を見分け、名前で呼ぶ。
-- AI は利用者と一緒にドラマを聞き、ときどき感想を言う (ドラマモード)。
+- AI は利用者と一緒にドラマを聞き、ときどき感想を言う (ドラマモード)。LLM が画像を読めれば、画面も見る。
+- AI は利用者の画面をときどき見て、変化があれば一言話しかける (画面モード)。
 - AI の人物設定 (ペルソナ) と声は、画面で切り替えられる。
 
 ## 全体構成
@@ -49,7 +50,8 @@ flowchart LR
   - RSS Topic Worker
   - `[search].on` のときの Web 検索とニュース検索 (「Web 検索」節)
 - 他の通信はすべて 127.0.0.1 で閉じる。
-- 音声・書き起こし・ドラマの台詞・声の特徴は、外部に送らない。
+- 音声・書き起こし・ドラマの台詞・声の特徴・画面は、外部に送らない。
+- 画面はローカルの llama-server にだけ渡す。
 - 利用者はヘッドホンとスピーカーのどちらでも使える。
 - スピーカーからの回り込みは、2 つの仕組みで抑える。
   - ブラウザの AEC (`echoCancellation: true`)
@@ -71,7 +73,7 @@ flowchart LR
 | Director | `python -m idle_talk.main` | WS 8765 / Web 8000 | 引数は下記 |
 | ASR ワーカー | `python -m idle_talk.asr_worker` | 8090 (`--port`) | 127.0.0.1 固定。詳細は下記 |
 | llama-server | `[llm].model` があれば Director が起動・監督する。無ければ手動 | 8080 | 起動引数は `llm_supervisor.build_llama_argv` |
-| AivisSpeech | 手動 | 10101 | 話者 ID の既定は 888753760 |
+| AivisSpeech | `[aivis].engine` があれば `ctl start` が起動する。無ければ手動 | 10101 | 話者 ID の既定は 888753760 |
 
 - Director の主な引数: `--web-port`、`--data-dir` (既定 `data`)、`--pid-file`、`--llm-url` / `--tts-url` / `--asr-url`。
 - llama-server の起動引数は `--jinja` と `enable_thinking=false` を含む。これで思考を無効にする。
@@ -99,6 +101,7 @@ flowchart LR
   - 起動に失敗しても、待ち切れなくても、Director は起動する (声が出ないだけ)。
   - 既に `[ports].tts` で応答していれば起動しない (AivisSpeech アプリを先に起動した場合など)。
   - PID を `data/aivisspeech.pid` に書く (エンジン自身は書かない)。`ctl stop` は、この PID のプロセスだけを子プロセスごと止める。
+  - `ctl status` は、`/version` が応答するかで AivisSpeech の稼働も表示する。
 - 二重起動は pid ロックで検出し、exit 4 で拒否する。
   - `ctl` は PID ファイル (`data/idle_talk.pid` / `data/asr_worker.pid`) の生存を確認する。
   - `asr_worker` も、`--pid-file` があれば同じ検査をする。
@@ -159,7 +162,7 @@ flowchart LR
 | セクション | 読み直し |
 |---|---|
 | `[tts]` | 合成のたびに更新時刻を見て、変わっていれば読み直す |
-| `[ports]` / `[asr]` / `[vad]` / `[spontaneous]` / `[llm]` / `[topics]` / `[search]` / `[voice_id]` / `[drama]` | 起動時だけ読む |
+| `[ports]` / `[asr]` / `[vad]` / `[spontaneous]` / `[llm]` / `[aivis]` / `[topics]` / `[search]` / `[voice_id]` / `[drama]` / `[screen]` | 起動時だけ読む (`[aivis]` は `ctl start` が読む) |
 | `personas.toml` (別ファイル) | system プロンプトを作るたびに更新時刻を見て、読み直す |
 
 ### ポート (`[ports]`)
@@ -172,7 +175,7 @@ flowchart LR
 - 値は 0〜65535 の整数でなければならない。
 - 優先順位は、CLI 引数 (`--port` / `--web-port` / `--*-url`) → 設定ファイル → 既定値 の順である。
 - M0 計測では、環境変数 `LLAMA_URL` / `AIVIS_URL` が設定ファイルより優先する。
-- AivisSpeech と、監督しない llama-server は手動で起動する。`llm` / `tts` を変えたら、各サーバの待受ポートも合わせる。
+- `[aivis].engine` が空のときの AivisSpeech と、監督しない llama-server は手動で起動する。`llm` / `tts` を変えたら、各サーバの待受ポートも合わせる。
 - Director が起動する llama-server には、`[ports].llm` (または `--llm-url` のポート) を渡す。
 
 ### 画面の配信と `/config.json`
@@ -183,6 +186,11 @@ flowchart LR
   - `ui`: 設定欄の初期値。`speaker` と `persona` を含む
   - `speakers`: 声の選択肢
   - `personas`: ペルソナの選択肢 (`[{id, name}]`)
+  - `vision`: LLM が画像を読めるか (`director.drama_vision`)
+  - `follow_window`: 画面モードで前面のウィンドウを撮るか (`[screen].follow_window` かつ Windows)
+- `/config.json` の中身は、要求のたびに作る。
+  - `vision` は LLM の起動後に決まる。そのため、ブラウザは共有の開始時に読み直す。
+  - `speakers` は、AivisSpeech が後から起動しても取れるようにするためである。
 - `index.html` はポート番号を持たない。`/config.json` を読んで接続する。
 - URL に `?port=` があれば、`index.html` はそのポートを使う。
 - 画面は http://127.0.0.1:8000/ で開く。
@@ -275,21 +283,28 @@ flowchart LR
   - 回り込みの値は再生をまたいで保つ。
   - 最初の再生の数秒は、閾値が低めになり得る。自声除外と雑音判定で補う。
   - 再生中の利用者の声も、平均に入る。
+- ドラマの音の回り込みの推定 (`vad.bleed`):
+  - ドラマモードでタブの音が鳴っている間、`EnergyVad` はマイクの RMS を回り込みとして別に平均する。時定数は `ECHO_TAU_MS` と同じである。
+  - その間の閾値は「タブの音の回り込み × `ratio`」以上に上げる。
+  - タブの音はブラウザの AEC で消えない。スピーカーだと、笑い声・BGM を「はい」「ハハ」等と認識していた。
+  - この間のフレームは、雑音の推定に混ぜない。静かな場面で閾値が高くなりすぎるためである。
+  - 「鳴っている」は、タブの音がドラマ用 VAD の閾値を最後に超えてから `drama.BLEED_HOLD_S`=0.3 秒以内を指す (`DramaListener.sounding`)。笑い声・音楽も含む。
 - 「再生中」の定義:
   - 現行 epoch の送出済みチャンクが、`finished` / `dropped` の報告待ちである間を指す。
   - Director は、上り音声を受けるたびに `vad.playing` を設定する。
 
-### 機能別の設定 (`[asr]` / `[search]` / `[voice_id]` / `[drama]`)
+### 機能別の設定 (`[asr]` / `[search]` / `[voice_id]` / `[drama]` / `[screen]`)
 
 - いずれも `config.load_*` が読む。
 - セクションが無ければ既定値で動く。
 
 | セクション | キー (既定値、範囲) | 備考 |
 |---|---|---|
-| `[asr]` | `engine` (`reazon`) / `model_dir` (`data/models/reazonspeech`) / `threads` (2、1〜32) | `engine` は `reazon` か `whisper`。変えたら再起動する |
+| `[asr]` | `engine` (`reazon`) / `model_dir` (`data/models/reazonspeech`) / `threads` (2、1〜32) / `short_chars` (2、0〜10) / `short_reply_s` (20、0〜3600) | `engine` は `reazon` か `whisper`。変えたら再起動する。`short_*` は「割り込み判定」節の短い認識結果。`short_chars`=0 で無効 |
 | `[search]` | `on` (false) / `engines` (`["duckduckgo","bing"]`) / `read_page` (true) | `engines` は空でなく、既知のエンジンだけを並べる。`on` が false なら外部に出ない |
 | `[voice_id]` | `on` (false) / `model` (`data/models/voxceleb_resnet34_LM.onnx`) / `threshold` (0.6、0 と 1 を含まない) | モデルや onnxruntime が無ければ warn し、識別なしで動く |
-| `[drama]` | 下表 | すべて整数 |
+| `[drama]` | 下表 | `log_prompt` は bool、他は整数 |
+| `[screen]` | 下表 | 「画面モード」節 |
 
 `[drama]` のキー:
 
@@ -304,8 +319,23 @@ flowchart LR
 | `finale_gap_s` | 60 | 10〜1800 | 台詞がこれだけ聞こえなければ感想を話す (秒) |
 | `finale_min_chars` | 600 | 0〜20000 | 前の感想から聞いた台詞がこれ未満なら感想は言わない |
 | `digest_chars` | 800 | 100〜2000 | 台詞がこれだけ溜まったらあらすじメモに要約する |
+| `log_prompt` | false | bool | 一言・感想・要約で LLM に渡した台詞とメモを `talk.log` に残す |
+| `keep_snaps` | 0 | 0〜20 | 一言・感想に使った画面を `data/snaps` に残す枚数。0 なら残さない。画面モードと共通 |
 
-- 同梱の `idle_talk.toml` は `interval_s`=15、`gap_ms`=800 で上書きしている。
+- 同梱の `idle_talk.toml` は `interval_s`=15、`gap_ms`=800、`log_prompt`=true、`keep_snaps`=3 で上書きしている。
+
+`[screen]` のキー:
+
+| キー | 既定値 | 範囲 | 意味 |
+|---|---|---|---|
+| `interval_s` | 60 | 10〜3600 | 画面を見に行く間隔 (秒)。前に見に行った時刻から数える |
+| `min_diff` | 3 | 0〜100 | 前に LLM に見せた画面との差 (%) がこれ未満なら話さない |
+| `follow_window` | false | bool | ブラウザで共有せず、前面のウィンドウを撮る (Windows のみ) |
+| `exclude` | 空 | 空でない文字列の配列 | `follow_window` で、タイトルにこの語を含むウィンドウは撮らない |
+| `width` | 1280 | 320〜1280 | `follow_window` で撮る画像の幅の上限。高さは 16:9 |
+| `color_bits` | 5 | 4〜8 | `follow_window` の PNG の各色のビット数。8 なら減らさない |
+
+- 同梱の `idle_talk.toml` は `interval_s`=15、`follow_window`=true、`exclude`=`["1Password", "Bitwarden", "KeePass"]` で上書きしている。
 
 ### ペルソナ (`personas.toml`)
 
@@ -327,7 +357,7 @@ flowchart LR
 プロンプトへの使い方:
 
 - system プロンプトは「選んだペルソナの `prompt`」+「共通の話し方の決まり `persona.STYLE_RULES`」である。
-- この system プロンプトを、通常応答・自発発話・ドラマの一言に使う。
+- この system プロンプトを、通常応答・自発発話・ドラマの一言と感想・画面モードの一言に使う。
 - 記憶の抽出と名前の抜き出しには使わない。
 - `STYLE_RULES` の中身:
   - 2〜4 文で話す。
@@ -369,7 +399,9 @@ flowchart LR
 |---|---|---|
 | `hello` | B→S | `version`(=1), `sample_rate`(=16000), `client_id`(1〜64 文字) |
 | `playback` | B→S | `epoch`, `utterance_id`, `chunk_id`, `position_ms`(0〜600000), `state`(started/finished/dropped) |
-| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM), `speaker`(話者 ID), `drama`(タブ共有中か), `persona`(ペルソナ id、1〜64 文字) |
+| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM), `speaker`(話者 ID), `drama`(タブ共有中か), `screen`(画面モード中か), `persona`(ペルソナ id、1〜64 文字) |
+| `snap` | S→B | `id`(u32)。今の画面を 1 枚求める |
+| `snap` | B→S | `id`, `jpeg`(base64、1MiB まで), `thumb`(base64、1024 字まで), `reason`(200 字まで)。映像が無い・描けなければ `jpeg` を省き、理由を `reason` に入れる |
 | `ping` / `pong` | 双方向 | `ts` |
 | `duck` | S→B | `epoch`, `gain`(0〜1) |
 | `cancel` | S→B | `new_epoch` |
@@ -477,7 +509,7 @@ stateDiagram-v2
   - 語が認識され、確認窓内の相槌なら、`resume` して `ai_playing` へ戻る。
   - 停止語・普通の発話・確認窓を過ぎた相槌なら、cancel して `user_speaking` へ進む。
 - `DISCARDED` (認識結果を捨てた):
-  - 捨てる理由は、ASR 失敗・幻聴・語なし・自声のいずれかである。
+  - 捨てる理由は、ASR 失敗・幻聴・語なし・自声・ドラマの台詞の回り込み・文脈の無い短い認識結果のいずれかである。
   - 最新の区間で発話が終わっているときだけ発生する。
   - `user_speaking` / `eot_check` なら、区間を破棄して `idle` へ進む。
   - `interrupt_check` なら、`resume` して `ai_playing` へ戻る。
@@ -533,6 +565,17 @@ flowchart TD
 - 語が無い認識結果 (英数字・かな漢字を含まない) は捨て、再生を続ける。
 - ASR の失敗と幻聴も、同じく捨てて再生を続ける。雑音で止めないためである。
 
+文脈の無い短い認識結果 (`director._out_of_context`):
+
+- 対象は、句読点・空白を除いて `[asr].short_chars` (2) 字以下の認識結果である。
+- 次のどちらかなら使う。
+  - AI の声の最中に始まった発話である。
+  - AI の声を最後に再生してから `[asr].short_reply_s` (20 秒) 以内である。
+- それ以外は語なしとして捨てる。`events` に `short_discarded` を記録する。
+- 「AI の声を再生した時刻」は、`playback` を受けるたびに更新する。応答・自発発話・一言・相槌のすべてを含む。
+- 理由: ReazonSpeech は食器・咳を「はい」「誰」「ハハ」と聞き違える。Silero VAD の声らしさと ASR の確信度では、本物の短い返事と見分けられなかった。
+- そのため、何もないところに 2 字だけ話しかけても応答しない。
+
 自声除外:
 
 - 対象は、AI 再生中 (自発発話を含む) に始まった発話である。
@@ -567,15 +610,19 @@ LLM と TTS:
 - TTS は 1 文ずつ直列に合成する。
 - 応答の生成上限は `clients.LLM_MAX_TOKENS`=300 である。2〜4 文程度にあたる。
 - LLM の SSE チャンクは、`delta.content` が null でも受け付けて読み飛ばす。llama-server は最初のチャンクで null を送るためである。
+- LLM 要求の `content` は、文字列か部品の配列である (`clients.LLM_REQ_SCHEMA`)。
+  - 部品は `{type: "text", text}` か `{type: "image_url", image_url: {url}}` である。
+  - `url` は `data:image/` で始まらなければならない。
 
 タイムアウト `HTTP_TIMEOUT`:
 
 | 相手 | 時間 | 超えたとき |
 |---|---|---|
 | LLM | 最初のトークン 5s、全体 20s | 5001 |
-| TTS | 1 文 3s | 5002。その文を飛ばし、次の文へ続ける |
+| TTS | 1 文 6s | 5002。その文を飛ばし、次の文へ続ける |
 | ASR | 区間長 ×2 + 2s | 5003。その発話を破棄する |
 
+- TTS の 1 文は以前 3s だった。ドラマ視聴中は台詞の認識と合成が CPU を取り合い、長めの 1 文が 4.4 秒かかって飛ばされたため 6s に延ばした。
 - ASR のソケットのタイムアウトと接続断も、`AsrTimeout` / `AsrFailed` に変換する。
 - Ingress は、ASR のどの失敗も握り、その発話だけを捨てる。WS の接続は保つ。
 
@@ -608,7 +655,17 @@ LLM の停止と再起動:
   - 600s の窓の中で最大 3 回まで再起動する。
   - 4 回目は再起動しない。Director を休止 (`rest`) に移し、警告ログを出す。
 - 再起動が働くのは、Director が llama-server を起動した場合だけである。
-- `idle_talk.toml` の `[llm]` のキー: `server` (実行ファイル)、`model` (gguf パス)、`ngl`、`ctx`。
+- `idle_talk.toml` の `[llm]` のキー: `server` (実行ファイル)、`model` (gguf パス)、`ngl`、`ctx`、`main_gpu`、`mmproj`、`image_max_tokens`。
+  - `main_gpu` (既定 0、-1 以上): 0 以上なら `-sm none -mg <番号>` を付け、その GPU 1 枚だけに載せる。-1 なら llama-server の自動配置 (複数 GPU に分割) である。GPU1 は既存アプリ優先のためである (設計書 §1.4)。
+  - `mmproj` (既定 空): 画像エンコーダ。指定すると `--mmproj` を付け、画像入力を有効にする。
+  - `image_max_tokens` (既定 0): `mmproj` があり 1 以上なら `--image-max-tokens` を付ける。0 なら llama-server の既定である。
+  - 同梱の `idle_talk.toml` は `main_gpu`=-1 で、`mmproj` に Gemma 4 12B の mmproj を指定している。
+  - GPU を指定しないと、llama-server は 12B を GPU0 / GPU1 に分けて載せる (GPU1 に約 +4.4GiB)。`main_gpu`=0 なら GPU0 だけで約 8.0GiB である (mmproj なし、実測 2026-10-15)。
+  - Gemma 4 12B の画像トークンは、約 48px 角で 1 トークンである (実測 2026-10-15: 480×272=86、640×360=106、768×432=146、1280×720=407)。1 枚の上限は `n_ubatch` (既定 512) で頭打ちになる (`-ub` で上げる)。
+- llama-server は環境変数 `CUDA_DEVICE_ORDER=PCI_BUS_ID` で起動する。GPU 番号を nvidia-smi の順にそろえるためである。
+- 起動後、`main` は `/props` の `modalities.vision` を見る (`llm_supervisor.has_vision`)。真なら `director.drama_vision` を真にする。
+  - 取得に失敗したら偽である。
+  - 監督しない llama-server でも同じく判定する。
 - `model` を指定すると、`main` が起動時に llama-server を起動する。
 - `main` は `/health` が 200 になるまで待つ。上限は `LLM_READY_TIMEOUT_S` (120s) である。
 - llama-server の出力は `<data-dir>/llama-server.log` に追記する。
@@ -938,7 +995,8 @@ flowchart LR
 - 画面の「ドラマを一緒に見る」で、`getDisplayMedia` によりタブを共有する。
 - ブラウザは、音声だけを別の AudioWorklet で 16kHz に落とす。
 - ブラウザは、その音声を `DRAMA_FLAG` 付きで送る。
-- 映像トラックは、すぐに停止する。
+- 映像トラックは、すぐに停止する。ただし、LLM が画像を読めるとき (`/config.json` の `vision`) は残す (下記「画面」)。
+  - `vision` は共有の操作の後で待つ。共有ダイアログを待たせないためである。
 - 音声が共有されていなければ、「タブの音声も共有する」をオンにするよう画面に出す。
 - 共有中は `ui.drama=true` である。
 - ブラウザの「共有を停止」でも、ドラマモードは終わる。
@@ -1007,13 +1065,153 @@ flowchart TD
   - 一致は `ECHO_MIN_CHARS`=4 字以上でなければならない。
   - 捨てたときは `drama_echo_suppressed` を記録する。
 - ドラマ側の認識が後に届いた場合は、検出できない。
+- タブの音が鳴っている間は、マイクの VAD の閾値も上げる (「発話検出」節の `vad.bleed`)。
+
+画面:
+
+```mermaid
+flowchart TD
+  A["一言・感想の直前"] --> B{"drama_vision かつ<br/>接続中?"}
+  B -- いいえ --> N["画像なしで言う"]
+  B -- はい --> C["snap を送り<br/>2 秒待つ"]
+  C -- "時間切れ・jpeg なし" --> N
+  C -- "jpeg あり" --> D["文章 + 画像で<br/>LLM を呼ぶ"]
+  D -- 失敗 --> N
+  D -- 成功 --> E["言う"]
+```
+
+- 画面を使うのは、`director.drama_vision` が真のときだけである (「LLM の停止と再起動」の `has_vision`)。
+- Director は、一言・感想の直前に `snap` を送る。返事を `SNAP_TIMEOUT_S`=2 秒待つ。
+- ブラウザは、映像トラックの今の 1 コマを返す。
+  - 縦横比を保って 640×360 (`SNAP_W` / `SNAP_H`) に収める。拡大はしない。
+  - 形式は JPEG (品質 `SNAP_QUALITY`=0.7) の base64 である。
+  - 32×18 の縮小画像 `thumb` も添える (画面モードで使う)。
+  - 描けなければ `jpeg` を省き、理由を `reason` に入れる。例は「no video track」「capture stopped」「video track ended」である。
+- 画像が届けば、user の `content` を「文章 + `DRAMA_VISION_NOTE`」と画像にする。`DRAMA_VISION_NOTE` は「映っている様子 (人物・表情・場所) も踏まえて」という指示である。
+- 次のときは、画像なしで言う。
+  - `drama_vision` が偽、または未接続 (ログに `skipped (not connected)`)
+  - 時間切れ (ログに `timed out`)
+  - `jpeg` が無い (ログに `reason`)
+- 画像つきの呼び出しが失敗したら、画像なしで 1 回だけ呼び直す (`director._collect_vision`)。mmproj の無い llama-server が先に動いていた場合などである。
+- 感想では、画像を待つ間に取り消されていたら LLM を呼ばない。
+- あらすじメモの要約と通常応答には、画像を使わない (G1 に足さない)。
+- ログには画像の大きさ (KB) だけを残す。
+- `[drama].keep_snaps` が 1 以上なら、使った画面を `data/snaps/snap-<日時>-<id>.jpg` に保存する。
+  - 新しい方から `keep_snaps` 枚だけ残し、古いものを消す。
+  - 保存に失敗しても、ログだけ残して続ける。
+
+プロンプトの記録 (`[drama].log_prompt`):
+
+- `log_prompt` が真なら、LLM に渡した台詞とメモを `data/talk.log` に `DRAMA(<種類>): …` 行で残す (`director._log_drama`)。
+- 種類は「一言」「感想・メモ」「感想・台詞」「要約・台詞」「要約・メモ」である。
+  - 「要約・メモ」は、要約の結果のメモである。
+- 複数行は「 / 」でつなぐ。空なら「(なし)」と書く。
+- 画像は「[画像あり N KB]」と大きさだけを書く。
+- 何を見て一言を言ったかを、後で確かめるためにある。
+- `log_prompt` が偽なら、台詞を保存しない。
 
 モードの切り替え:
 
 - ドラマモード中は、普段の自発発話と `IDLE_TIMEOUT` 休止を止める。
 - オフにしたら、作りかけ・再生中の一言と感想を取り消す。
 - オフにしたら、台詞とメモを捨てる。
-- 台詞とメモは、保存も外部送信もしない。
+- 台詞・メモ・画面は、外部に送らない。
+- 台詞とメモは、`log_prompt` が偽なら保存しない。画面は、`keep_snaps` が 0 なら保存しない。
+
+## 画面モード (設計書 §6.7)
+
+```mermaid
+flowchart TD
+  A{"IDLE・接続中で<br/>interval_s 経った?"} -- はい --> B["画面を 1 枚取る"]
+  B --> C{"画像が取れた かつ<br/>差 ≥ min_diff?"}
+  C -- いいえ --> Z["黙る<br/>(screen_skip)"]
+  C -- はい --> D["LLM に一言を求める<br/>(履歴なし)"]
+  D --> E{"「なし」・空?"}
+  E -- はい --> Z
+  E -- いいえ --> F["1 行目を言う"]
+```
+
+開始と終了:
+
+- 画面の「画面を一緒に見る」で始める。押すと `ui.screen=true` を送る。
+- 使えるのは、LLM が画像を読めるとき (`/config.json` の `vision`) だけである。
+  - 読めなければ、共有を止めて「LLM が画像を読めないため使えません」と出す。
+- `follow_window` が偽なら、`getDisplayMedia({video: true, audio: false})` で画面を共有する (`startScreenCapture`)。音声トラックは止める。
+- `follow_window` が真なら、ブラウザは共有しない。オン・オフだけを送る (`startWindowWatch`)。
+- ドラマモードとは同時に使わない。画面は、片方の使用中にもう片方のボタンを無効にする。
+- Director は、両方がオンならドラマモードを優先する。
+- 画面モード中は、普段の自発発話と `IDLE_TIMEOUT` 休止を止める。
+- オフにしたら、作りかけ・再生中の一言を取り消す。比較の基準も捨てる。
+- オン・オフで、`events` に `screen_mode` (`{on}`) を記録する。
+
+いつ見るか (`screen.ScreenWatcher`):
+
+- 次のすべてを満たしたら、画面を見に行く。
+  - WS が接続済みで、hello を受けている。
+  - 状態が IDLE で、自発発話の準備中・再生中でない。
+  - 前に見に行ってから `[screen].interval_s` 経っている。開始時刻からも数える。
+- 見に行った時刻は、話さなかった場合も更新する。
+- 一言は、自発発話と同じ経路 (pending・保留・取消・再生完了) を通る。
+
+画面の取り方:
+
+- `follow_window` が偽なら、ドラマモードと同じ `snap` で 1 枚求める。JPEG と縮小画像 `thumb` を受け取る。
+- `follow_window` が真なら、Director が前面のウィンドウを撮る (下記)。
+- 撮った画面は、`[drama].keep_snaps` に従って `data/snaps` に残す (前面のウィンドウは `.png`)。
+
+変化の判定:
+
+- 差は、前に LLM に見せた画面の `thumb` との明るさの平均差 (0〜100%) である (`screen.thumb_diff`)。
+- 縮小画像は 32×18 (`THUMB_W` / `THUMB_H`) の明るさ 1 バイトずつである。大きさが違う・壊れていれば無いものとする。
+- 次のときは、差を 100 とする。
+  - 初回 (比べる相手が無い)
+  - `thumb` が無い
+  - ウィンドウのタイトルが前と違う (`follow_window` のとき)
+- 差が `[screen].min_diff` 未満なら、LLM を呼ばずに黙る。
+- 画像が取れなければ、黙る。
+- 黙ったときは、`events` に `screen_skip` を記録する。ログには `screen skipped: diff N%` を出す。調整に使うためである。
+- 比べる相手は「前に LLM に見せた画面」である。そのため、少しずつのスクロールも溜まれば話す。
+
+一言:
+
+- LLM には、ペルソナの system と、画像つきの user (`SCREEN_PROMPT`) だけを渡す。会話履歴は渡さない。
+- `SCREEN_PROMPT` の指示:
+  - 40 字以内、1〜2 文で感想を言う。
+  - 画面の説明や文字の読み上げはしない。
+  - 何が映っているのか分からないときだけ「なし」と出力する。
+- `follow_window` なら、ウィンドウのタイトルも添える (`SCREEN_TITLE_NOTE`)。
+- LLM に渡した画面は、「なし」で黙った場合も次の比較の相手にする。
+- 返答の 1 行目を、括弧を外して言う。「なし」・空なら黙る (`screen_skip`)。
+- LLM の呼び出しに失敗したら、黙る。ログに warn を出す。
+- 生成中に利用者が話し始めたら、LLM の受信を打ち切る。
+
+前面のウィンドウ (`wincap.WindowCapture`、Windows のみ):
+
+- ctypes で `GetForegroundWindow` を呼び、前面のウィンドウを撮る。
+- 画面の DC から `StretchBlt` (HALFTONE) で切り抜く。DRM 付きの動画などは黒く写る。
+- 範囲は、影を除いたウィンドウの枠を仮想画面に収めたものである。
+- DPI は per-monitor v2 で扱う。拡大表示でも実際の画素で撮る。
+- `[screen].width` × 16:9 の枠に、縦横比を保って縮める。拡大はしない。
+- 各色を `color_bits` ビットに減らし、標準の zlib で PNG にする。
+  - 1280×720 の 5 ビットで、約 128KB が約 66KB になる。文字は読めたままである。
+  - llama-server は WebP を読めない。JPEG は標準ライブラリで作れない。そのため PNG にする。
+- `width` の上限 1280 は、1280×720 が約 370〜410 トークンで、llama-server の 1 枚の上限 (`n_ubatch` 既定 512) に収まるためである。
+- ウィンドウのタイトル (100 字まで) も返す。
+- 次のウィンドウは撮らない。
+  - 最小化中のウィンドウ
+  - タイトルが空 (デスクトップなど)
+  - タイトルが `idle-talk` で始まる (idle-talk 自身の画面)。VS Code 等はフォルダ名を含むので、部分一致にしない
+  - タイトルに `exclude` の語を含む (大文字小文字を区別しない)
+- 除外したときは、ログにタイトルを残さない。
+- 撮影に失敗したら、黙る。
+- Windows 以外で `follow_window` を指定すると、warn してブラウザの共有に戻る。
+- 既定はオフである。共有画面での確認が無く、何でも撮るためである。
+
+限界:
+
+- ブラウザの共有は 640×360 の 1 コマなので、小さい文字は読めない。前面のウィンドウは 1280×720 なら読める。
+- 差は明るさの平均なので、配色の似たページ間の移動は小さく出る。
+- 通常応答には画面を添えない (G1 に足さない)。
 
 ## データモデル (SQLite, 設計書 §3.4)
 
@@ -1092,6 +1290,9 @@ flowchart LR
 | `drama_react` / `drama_finale` | `{}` / `{notes, rest}` | 一言 / 総合的な感想の発火 |
 | `drama_skip` | `{text, held_s}` | 生成した一言を、台詞の再開で言わずに捨てた |
 | `drama_echo_suppressed` | — | マイクが拾ったドラマの台詞を捨てた 1 回につき 1 行 |
+| `short_discarded` | `{utterance_id, text}` | 文脈の無い短い認識結果を捨てた 1 回につき 1 行 |
+| `screen_mode` | `{on}` | 画面モードのオン / オフ |
+| `screen_skip` | `{diff, image}` / `{diff, text}` | 画面モードで話さなかった (変化が小さい・画像なし / LLM が「なし」) |
 | `run_meta` | `{host, started_at, ended_at, app_commit, sample_count}` | 終了時に 1 行。記録の出所を検証するのに使う |
 
 - 以前は、自声の認識を `echo_chain` として記録するだけで応答していた。
@@ -1136,14 +1337,19 @@ flowchart LR
 画面 (`index.html` + `client.js`):
 
 - 画面は WS の接続・再接続を行い、state と error を表示する。
-- 設定欄の項目: ミュート・自発発話・ラジオ・間隔・休止時間帯・声・ペルソナ。
+- 設定欄の項目: ミュート・自発発話・ラジオ・間隔・休止時間帯・声・ペルソナ・音量。
 - 接続先ポートは `?port=` で決める。無ければ配信元の `/config.json` の `ws_port` を使う。
 - 「開始」ボタンは、押したら無効にする。押し直すと、マイク取り込みと接続が二重になるためである。
 - 接続までに失敗したときだけ、作りかけの WS を閉じ、「開始」を押せる状態に戻す。
-- 接続後に、「ドラマを一緒に見る」が押せるようになる。
+- 接続後に、「ドラマを一緒に見る」と「画面を一緒に見る」が押せるようになる。片方の使用中は、もう片方を押せない。
+- 状態欄の下に、「ドラマ視聴中」「画面を見ています」「前面のウィンドウを見ています」を出す。
+- `snap` を受けたら、共有中のドラマか画面から 1 枚を返す。どちらも無ければ `reason`「not sharing」を返す。
 - WS が切れた・つながらなかったときは、状態を「再接続中…」にし、2 秒 (`RECONNECT_MS`) ごとにつなぎ直す。マイクと共有中のタブの音はそのまま使い続ける。
 - 切断中と hello 前は、マイクのフレームも JSON も送らない。
 - 切断時に、再生キューを報告なしで捨て、epoch を 0 から受け直す (`player.reset`)。サーバを再起動すると epoch が 0 に戻るため、前の接続の epoch を覚えていると新しい音声をすべて旧世代として捨ててしまう。
+- エラー表示:
+  - 一時的な失敗 (5001 LLM・5002 TTS・5003 ASR) の表示は、次に再生が始まった (`playback` の `started` を送った) ときに消す (`errorResolved`)。
+  - 接続できたとき・共有を始めたときも、エラー表示を消す。
 - ミュート中は、状態表示に「(休止)」と添える。状態が `rest` になったら重ねて書かない。
 - 検索中は、状態欄に検索語を出す (`search`)。
 
@@ -1173,6 +1379,12 @@ URL 欄:
 - 旧 epoch のチャンクは再生しない。
 - PCM は 24kHz として再生する (`DEFAULT_PCM_RATE`)。`clients.TTS_RATE` と一致させる。
 - 再生中 1 + 先読み `MAX_LOOKAHEAD`=1 チャンクを超えて届いたチャンクは、`dropped` で捨てる。
+- 音量:
+  - 画面の音量欄 (0〜200%、5% 刻み) は、ブラウザ内だけで掛ける。サーバには送らない。
+  - duck 用の gain とは別の GainNode で掛ける (`createWebAudioSink` の `setVolume`)。
+  - 値は 0〜`MAX_VOLUME`=2 に収める。数値でなければ 1 とする (`clampVolume`)。
+  - 開始前でも変えられる。`localStorage` の `idle-talk.volume` に残す。
+  - `[tts].volume` (AivisSpeech の `volumeScale`) とは別である。
 
 下りのフロー制御:
 
@@ -1233,3 +1445,8 @@ flowchart LR
 | 一言 | ドラマの場面の切れ目に AI が言う 25 字以内の短い感想 |
 | 総合的な感想 | ドラマの台詞が長く途切れたときに話す、2〜4 文の感想 |
 | あらすじメモ | ドラマの台詞を裏で要約した 60 字以内のメモ。感想の材料にする |
+| 画面モード | 共有した画面か前面のウィンドウをときどき見て、変化があれば一言話しかけるモード |
+| 画面 1 枚 (`snap`) | 一言・感想の直前に Director がブラウザに求める、今の 1 コマの JPEG |
+| 縮小画像 (`thumb`) | 画面を 32×18 の明るさ 1 バイトずつに縮めたもの。画面モードの変化の判定に使う |
+| タブの音の回り込み | ドラマモードで、スピーカーから出たタブの音をマイクが拾うこと。AEC で消えないので、閾値を上げて抑える |
+| 文脈の無い短い認識結果 | AI の声と関係の無い時点の、`short_chars` 字以下の認識結果。物音の聞き違いとして捨てる |
