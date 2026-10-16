@@ -16,6 +16,9 @@
   const SNAP_W = 640;
   const SNAP_H = 360;
   const SNAP_QUALITY = 0.7;
+  // 画面モード (設計書 6.7): サーバが前の画面との差を測るための縮小画像 (明るさ 1 バイトずつ)。src/idle_talk/screen.py と一致させる
+  const THUMB_W = 32;
+  const THUMB_H = 18;
 
   function wsUrl(port) {
     return `ws://127.0.0.1:${port}/ws`;
@@ -41,7 +44,7 @@
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'persona']) {
+    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'screen', 'persona']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;
@@ -65,8 +68,18 @@
     return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
   }
 
-  // 映像トラックの今の 1 コマを JPEG の base64 にする。描けなければ理由つきで投げる。Browser only (ImageCapture / canvas)
-  async function grabJpeg(track, createCanvas) {
+  // RGBA の画素 (THUMB_W x THUMB_H) を明るさ 1 バイトずつにして base64 にする
+  function grayThumb(rgba) {
+    let bin = '';
+    for (let i = 0; i < rgba.length; i += 4) {
+      bin += String.fromCharCode(Math.round(0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2]));
+    }
+    return btoa(bin);
+  }
+
+  // 映像トラックの今の 1 コマを { jpeg, thumb } (どちらも base64) にする。描けなければ理由つきで投げる。
+  // Browser only (ImageCapture / canvas)
+  async function grabSnap(track, createCanvas) {
     if (!track) throw new Error('no video track');
     if (track.readyState !== 'live') throw new Error(`video track ${track.readyState}`);
     if (typeof ImageCapture === 'undefined') throw new Error('ImageCapture unsupported');
@@ -81,7 +94,10 @@
       const canvas = createCanvas(w, h);
       canvas.getContext('2d').drawImage(frame, 0, 0, w, h);
       const url = canvas.toDataURL('image/jpeg', SNAP_QUALITY);
-      return url.slice(url.indexOf(',') + 1);
+      const small = createCanvas(THUMB_W, THUMB_H).getContext('2d');
+      small.drawImage(frame, 0, 0, THUMB_W, THUMB_H);
+      const thumb = grayThumb(small.getImageData(0, 0, THUMB_W, THUMB_H).data);
+      return { jpeg: url.slice(url.indexOf(',') + 1), thumb };
     } finally {
       frame.close();
     }
@@ -204,24 +220,65 @@
       if (onEnded) onEnded();
     };
     audio[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
+    const snapshot = snapshotter(video, () => stopped, keep ? 'no video track' : 'vision off at share start', createCanvas);
+    return { ctx, stream, node, stop, snapshot };
+  }
+
+  // snapshot(): 今の画面を { jpeg, thumb } で返す。止めた後・映像なし・描けなければ { reason }
+  function snapshotter(video, isStopped, noVideo, createCanvas) {
     const canvas = createCanvas || ((w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h }));
-    const snapshot = async () => {
-      if (stopped) return { reason: 'capture stopped' };
-      if (!video.length) return { reason: keep ? 'no video track' : 'vision off at share start' };
+    return async () => {
+      if (isStopped()) return { reason: 'capture stopped' };
+      if (!video.length) return { reason: noVideo };
       try {
-        return { jpeg: await grabJpeg(video[0], canvas) };
+        return await grabSnap(video[0], canvas);
       } catch (e) {
         // 描けなければ画像なしで一言を言わせる
         return { reason: String((e && e.message) || e).slice(0, 200) };
       }
     };
-    return { ctx, stream, node, stop, snapshot };
+  }
+
+  // 画面モード (設計書 6.7): 共有した画面 (映像だけ) を残し、求められたら snapshot() で返す。共有が終わったら onEnded。
+  // vision (真偽値か Promise) が偽なら LLM が画像を読めないので共有を止めてエラーにする。Browser only.
+  async function startScreenCapture({ getDisplayMedia, onEnded, vision, createCanvas }) {
+    const stream = await step('画面の共有', () => getDisplayMedia({ video: true, audio: false }));
+    const video = stream.getVideoTracks();
+    for (const t of stream.getAudioTracks()) t.stop();
+    if (!(await vision)) {
+      for (const t of video) t.stop();
+      throw new Error('LLM が画像を読めないため使えません (idle_talk.toml の [llm].mmproj を指定してください)');
+    }
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      for (const t of video) t.stop();
+      if (onEnded) onEnded();
+    };
+    if (video.length) video[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
+    return { stream, stop, snapshot: snapshotter(video, () => stopped, 'no video track', createCanvas) };
+  }
+
+  // 画面モードの [screen].follow_window: サーバが前面のウィンドウを撮るので共有はせず、オン・オフだけ持つ。
+  // 戻り値は startScreenCapture と同じ形 (snapshot は求められない)
+  async function startWindowWatch({ onEnded, vision }) {
+    if (!(await vision)) {
+      throw new Error('LLM が画像を読めないため使えません (idle_talk.toml の [llm].mmproj を指定してください)');
+    }
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (onEnded) onEnded();
+    };
+    return { stop, snapshot: async () => ({ reason: 'follow_window: captured by the server' }) };
   }
 
   const api = {
-    PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, SNAP_W, SNAP_H, W, P,
-    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, errorResolved, createClient,
-    startCapture, startDramaCapture,
+    PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, SNAP_W, SNAP_H, THUMB_W, THUMB_H, W, P,
+    wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, grayThumb, errorResolved,
+    createClient, startCapture, startDramaCapture, startScreenCapture, startWindowWatch,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else if (typeof globalThis !== 'undefined') globalThis.IdleTalkClient = api;

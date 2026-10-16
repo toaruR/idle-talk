@@ -22,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
-from .config import Config, Drama
+from .config import Config, Drama, Screen
 from .drama import DramaListener
 from .echo_chain import CANCEL_KIND
 from .epoch import Epoch
@@ -37,6 +37,7 @@ from .metrics import MetricsRecorder
 from .persona import PersonaBook
 from .pipeline import ResponsePipeline
 from .protocol import is_drama, pack_down_chunk
+from .screen import ScreenWatcher, decode_thumb
 from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
@@ -95,6 +96,12 @@ DRAMA_FINALE_PROMPT = ("一緒にドラマを見ていて、台詞がしばら�
                        "一緒に見ていた友人として、ここまでの総合的な感想を 2〜4 文で話してください。"
                        "印象に残った場面や登場人物への気持ちを素直に。あらすじの説明や台詞の繰り返しはせず、"
                        "最後に利用者の感想を軽く尋ねてください。")
+# 画面モード (設計書 6.7)。一言と同じく会話履歴は渡さない (前の一言の語を繰り返すため)
+SCREEN_PROMPT = ("利用者のパソコンの画面を横で一緒に見ています。添えた画像が今の画面です。\n"
+                 "友人として、画面に映っているものへの感想を一言 (40 字以内、1〜2 文) で話しかけてください。"
+                 "画面の説明や文字の読み上げはせず、気になったこと・思ったことを素直に。"
+                 "何が映っているのか分からないときだけ『なし』とだけ出力してください。")
+SCREEN_TITLE_NOTE = "\nウィンドウのタイトル: {title}"  # 画像の文字は小さくて読めないことが多いので、何の画面かの手がかりにする
 
 
 def _alnum(text: str) -> str:
@@ -226,6 +233,11 @@ class IdleTalkDirector:
         self._snap_id = 0
         self._snap_wait: tuple[int, asyncio.Future] | None = None  # 返事待ちの (id, 結果)
         self.snap_dir: Path | None = None  # [drama].keep_snaps の保存先 (main が data/snaps にする)
+        # 画面モード (設計書 6.7)。画面で画面共有を始めると ui.screen で on。main が [screen] の設定で差し替える
+        self.screen = ScreenWatcher(Screen(), clock)
+        self.screen_on = False
+        # [screen].follow_window なら前面のウィンドウを撮る (wincap.WindowCapture.grab。main が結線)。None ならブラウザの共有
+        self.screen_capture: Callable[[], object] | None = None
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -423,6 +435,8 @@ class IdleTalkDirector:
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
         if bool(settings.get("drama")) != self.drama_on:
             self._set_drama(bool(settings.get("drama")))
+        if bool(settings.get("screen")) != self.screen_on:
+            self._set_screen(bool(settings.get("screen")))
         self._last_op = self.clock()
         muted = bool(settings.get("mute"))
         if muted and not self.fsm.ctx.muted:
@@ -682,6 +696,8 @@ class IdleTalkDirector:
         idle = self.fsm.ctx.state is State.IDLE
         if self.drama_on:  # 見ている間は黙って長く過ごすので、無操作休止と普段の自発発話の代わりに一言の判定だけ
             return self._drama_tick(idle)
+        if self.screen_on:  # 画面を見ている間も同じく、無操作休止と普段の自発発話の代わりに画面の一言だけ
+            return self._screen_tick(idle)
         if idle and not self.spontaneous.radio and now - self._last_op >= self.cfg.IDLE_TIMEOUT:  # ラジオは聞き流し前提
             self.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
             self._pump()
@@ -809,31 +825,36 @@ class IdleTalkDirector:
         if self._snap_wait is not None and self._snap_wait[0] == msg["id"] and not self._snap_wait[1].done():
             if not msg.get("jpeg"):  # 映像が無い・描けない: ブラウザが送った理由を残す (無言で画像なしになると原因が追えない)
                 log.info("drama snapshot: no image (%s)", msg.get("reason") or "no reason")
-            self._snap_wait[1].set_result(msg.get("jpeg") or None)
+            self._snap_wait[1].set_result(msg)
 
     async def _snapshot(self) -> str | None:
         """ブラウザに今の画面を求め、JPEG の base64 を返す。無効・未接続・時間切れ・映像なしは None。"""
+        return (await self._snap())[0]
+
+    async def _snap(self) -> tuple[str | None, bytes | None]:
+        """ブラウザに今の画面を求め、(JPEG の base64, 縮小画像) を返す。取れなかったものは None。"""
         if not (self.drama_vision and self.core.conn is not None and self.core.hello_done):
             if self.drama_vision:
                 log.info("drama snapshot: skipped (not connected)")
-            return None
+            return None, None
         self._snap_id = (self._snap_id + 1) % (1 << 31)
         fut = asyncio.get_running_loop().create_future()
         self._snap_wait = (self._snap_id, fut)
         self._emit({"t": "snap", "id": self._snap_id})
         try:
-            jpeg = await asyncio.wait_for(fut, SNAP_TIMEOUT_S)
+            msg = await asyncio.wait_for(fut, SNAP_TIMEOUT_S)
         except asyncio.TimeoutError:
             log.info("drama snapshot timed out")
-            return None
+            return None, None
         finally:
             self._snap_wait = None
+        jpeg = msg.get("jpeg") or None
         if jpeg:
             log.info("drama snapshot: %d KB", len(jpeg) * 3 // 4 // 1024)  # 画像そのものは keep_snaps のときだけ残す
             self._keep_snap(jpeg)
-        return jpeg
+        return jpeg, decode_thumb(msg.get("thumb"))
 
-    def _keep_snap(self, jpeg: str) -> None:
+    def _keep_snap(self, image: str, ext: str = "jpg") -> None:
         """[drama].keep_snaps 枚まで画面を snap_dir に残す (確認用)。古いものから消す。失敗はログのみ。"""
         keep = self.drama.s.keep_snaps
         if keep <= 0 or self.snap_dir is None:
@@ -841,9 +862,9 @@ class IdleTalkDirector:
         try:
             self.snap_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.now_ms() / 1000))
-            path = self.snap_dir / f"snap-{stamp}-{self._snap_id:010d}.jpg"
-            path.write_bytes(base64.b64decode(jpeg))
-            for old in sorted(self.snap_dir.glob("snap-*.jpg"))[:-keep]:
+            path = self.snap_dir / f"snap-{stamp}-{self._snap_id:010d}.{ext}"
+            path.write_bytes(base64.b64decode(image))
+            for old in sorted(self.snap_dir.glob("snap-*.*"))[:-keep]:
                 old.unlink(missing_ok=True)
             log.info("drama snapshot saved: %s", path.name)
         except (OSError, ValueError) as e:
@@ -941,6 +962,87 @@ class IdleTalkDirector:
         self._digest_stop.set()
         if self._digest_task is not None and not self._digest_task.done():
             self._digest_task.cancel()
+
+    # ---- 画面モード (設計書 6.7): 一言は自発発話と同じ pending / 保留 / 取消 / 再生完了の経路を通る ----
+    def _set_screen(self, on: bool) -> None:
+        self.screen_on = on
+        if on:
+            self.screen.start()
+        else:
+            self.screen.stop()
+            if self.spontaneous.pending and self._spont_task is not None:  # 作りかけ・再生中の一言も取消す
+                self._cancel_spontaneous()
+        log.info("screen mode %s", "on" if on else "off")
+        self._bc_record("screen_mode", {"on": on})
+
+    def _screen_tick(self, idle: bool) -> str | None:
+        listening = self.core.conn is not None and self.core.hello_done
+        if not (listening and idle and not self.spontaneous.pending and self.screen.due()):
+            return None
+        self.screen.mark_checked()
+        self.spontaneous.pending = True
+        self._gen_done = False
+        self._spont_task = asyncio.get_running_loop().create_task(self._screen_respond())
+        return "screen"
+
+    async def _screen_shot(self) -> tuple[str | None, bytes | None, str | None]:
+        """(画像の data URL, 縮小画像, ウィンドウタイトル)。follow_window なら前面のウィンドウ、でなければブラウザの共有から。"""
+        if self.screen_capture is None:
+            jpeg, thumb = await self._snap()
+            return ("data:image/jpeg;base64," + jpeg if jpeg else None), thumb, None
+        if not self.drama_vision:  # LLM が画像を読めない
+            return None, None, None
+        try:
+            shot = await asyncio.to_thread(self.screen_capture)
+        except Exception as e:  # noqa: BLE001  撮れなければ黙るだけ
+            log.warning("screen capture failed: %s", e)
+            return None, None, None
+        if shot is None:  # 除外・最小化
+            return None, None, None
+        self._snap_id = (self._snap_id + 1) % (1 << 31)
+        self._keep_snap(shot.png, "png")
+        return "data:image/png;base64," + shot.png, shot.thumb, shot.title
+
+    async def _screen_respond(self) -> None:
+        me = asyncio.current_task()
+        url, thumb, title = await self._screen_shot()
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        diff = self.screen.diff(thumb, title)
+        if not url or diff < self.screen.s.min_diff:  # 画面が取れない / 前に話したときからあまり変わっていない: 黙る
+            self._bc_record("screen_skip", {"diff": round(diff, 1), "image": bool(url)})
+            log.info("screen skipped: diff %.1f%% (image %s)", diff, bool(url))
+            self.spontaneous.done()
+            return
+        self.screen.mark_shown(thumb, title)
+        prompt = SCREEN_PROMPT + (SCREEN_TITLE_NOTE.format(title=title) if title else "")
+        messages = [{"role": "system", "content": self.personas.system_prompt()},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": url}}]}]
+        stop = threading.Event()
+        try:
+            text = await asyncio.to_thread(self._collect, messages, stop)
+        except asyncio.CancelledError:
+            stop.set()  # 取消 (利用者が話し始めた): llama-server を応答に譲る
+            raise
+        except Exception as e:  # noqa: BLE001  一言は言わなくても困らない
+            log.warning("screen reaction failed: %s", e)
+            text = None
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        line = (text or "").strip().strip("「」『』\"").split("\n")[0].strip()
+        if not _alnum(line) or _alnum(line).startswith("なし"):
+            self._bc_record("screen_skip", {"diff": round(diff, 1), "text": line[:50]})
+            self.spontaneous.done()
+            return
+        log.info("screen reaction: diff %.1f%%", diff)
+        self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
+        await self.pipeline.play_utterance(iter([line]))
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        self._gen_done = True
+        self._check_done()
 
     def _pick_topic(self) -> tuple[str, dict | None]:
         """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""

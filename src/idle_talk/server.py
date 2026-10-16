@@ -31,7 +31,7 @@ PROTOCOL_VERSION = 1
 ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 BIND_HOST = "127.0.0.1"
 MISSED_PINGS_LIMIT = 2
-UI_FIELDS = ("mute", "on", "radio", "interval_s", "quiet_start", "quiet_end", "speaker", "drama", "persona")
+UI_FIELDS = ("mute", "on", "radio", "interval_s", "quiet_start", "quiet_end", "speaker", "drama", "screen", "persona")
 
 
 class Conn(Protocol):

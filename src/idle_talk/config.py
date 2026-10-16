@@ -374,3 +374,34 @@ def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:
         if type(v) is not int or not lo <= v <= hi:
             raise ValueError(f"[drama].{k} must be an int in [{lo}, {hi}]: {v!r}")
     return Drama(**raw)
+
+
+class Screen(NamedTuple):
+    """[screen]: 画面モード (共有した画面を interval_s ごとに見て、前に話したときから変わっていれば一言)。画面は保存しない。"""
+    interval_s: int = 60  # 画面を見に行く間隔 (前の一言・見送りから)
+    min_diff: int = 3     # 前に話した画面との差 (縮小した明るさの平均差、%) がこれ未満なら話さない
+    follow_window: bool = False  # ブラウザの共有の代わりに前面のウィンドウを自動で撮る (Windows のみ)
+    exclude: tuple[str, ...] = ()  # follow_window でタイトルにこの語を含むウィンドウは撮らない
+    width: int = 1280     # follow_window で撮る画像の幅の上限 (高さは 16:9)。1280x720 で約 400 トークン (llama-server の 1 枚の上限 512 に収める)
+    color_bits: int = 5   # follow_window の PNG の色数 (各色のビット数)。下げるほど小さくなる (8 で減らさない)
+
+
+_SCREEN_RANGES = {"interval_s": (10, 3600), "min_diff": (0, 100), "width": (320, 1280), "color_bits": (4, 8)}
+
+
+def load_screen(path: str | Path = SETTINGS_FILE) -> Screen:
+    """[screen] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "screen", Screen._fields)
+    for k, v in raw.items():
+        if k == "follow_window":
+            if type(v) is not bool:
+                raise ValueError(f"[screen].follow_window must be bool: {v!r}")
+        elif k == "exclude":
+            if type(v) is not list or not all(type(s) is str and s for s in v):
+                raise ValueError(f"[screen].exclude must be a list of non-empty strings: {v!r}")
+            raw[k] = tuple(v)
+        else:
+            lo, hi = _SCREEN_RANGES[k]
+            if type(v) is not int or not lo <= v <= hi:
+                raise ValueError(f"[screen].{k} must be an int in [{lo}, {hi}]: {v!r}")
+    return Screen(**raw)

@@ -116,3 +116,17 @@ finale_min_chars = 600  # 前の感想 (または開始) から聞いた台詞�
 digest_chars = 800    # 台詞がこれだけ溜まったら裏であらすじメモに要約し、感想の材料にする (100〜2000)
 log_prompt = true     # 一言・感想・要約で LLM に渡した台詞とメモを data/talk.log に DRAMA(...) 行で残す (false なら台詞を保存しない)
 keep_snaps = 3        # 一言・感想で LLM に見せた画面を data/snaps に新しい方からこの枚数だけ残す (0〜20、0 なら保存しない)
+
+[screen]
+# 画面モード: 画面の「画面を一緒に見る」で共有した画面 (タブ・ウィンドウ) を interval_s ごとに AI も見て、一言話しかける。
+# 前に話したときの画面からあまり変わっていなければ (min_diff 未満) 話さない。差は data/idle_talk.log の
+# "screen skipped: diff" / "screen reaction: diff" で確かめて調整する。画面は保存も外部送信もしない。
+# LLM が画像を読めるとき ([llm].mmproj を指定) だけ使える。音は聞かないので、ドラマにはドラマモードを使う。
+interval_s = 15       # 画面を見に行く間隔 (10〜3600 秒)。前の一言・見送りから数える
+min_diff = 3          # 前に話した画面との差 (縮小した画面の明るさの平均差、0〜100 %) がこれ未満なら話さない
+# true ならブラウザで共有せず、そのとき前面にあるウィンドウを自動で撮る (Windows のみ。ウィンドウが替われば必ず話す候補になる)。
+# 共有画面での確認が無く何でも撮るので既定はオフ。idle-talk 自身の画面は撮らない。タイトルも LLM に渡す。
+follow_window = true
+exclude = ["1Password", "Bitwarden", "KeePass"]  # follow_window でタイトルにこの語を含むウィンドウは撮らない
+width = 1280          # follow_window で撮る画像の幅の上限 (320〜1280、高さは 16:9)。1280x720 で約 400 トークン・応答 3 秒前後
+color_bits = 5        # follow_window の PNG の色数 (各色 4〜8 ビット)。5 で文字は読めたままサイズ約半分、8 で減らさない

@@ -7,6 +7,7 @@ import json
 import logging
 import sqlite3
 import subprocess
+import sys
 import threading
 import tomllib
 import urllib.parse
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_asr, load_drama, load_search, load_topics, load_vad, load_voice, load_voice_id)
+                     load_asr, load_drama, load_screen, load_search, load_topics, load_vad, load_voice, load_voice_id)
 from .director import IdleTalkDirector
 from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
@@ -26,10 +27,12 @@ from .metrics import MetricsRecorder
 from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
+from .screen import ScreenWatcher
 from .server import serve
 from .store import Store
 from .topic_worker import TopicWorker
 from .web_search import NEWS_QUERIES, WebSearch, news_search
+from .wincap import WindowCapture
 from .vad import FRAME_MS, EnergyVad
 
 log = logging.getLogger("idle_talk.main")
@@ -162,6 +165,13 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                                                       min_threshold=vad.min_threshold),
                                    cfg.MIN_SEG)
     director.snap_dir = data_dir / SNAP_DIR
+    screen = load_screen(args.config)
+    director.screen = ScreenWatcher(screen)
+    if screen.follow_window:  # ブラウザの共有の代わりに前面のウィンドウを撮る (設計書 6.7)
+        try:
+            director.screen_capture = WindowCapture(screen.exclude, screen.width, screen.color_bits).grab
+        except OSError as e:
+            log.warning("[screen].follow_window ignored: %s", e)
     asr_settings = load_asr(args.config)
     director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)
@@ -201,15 +211,17 @@ def ui_defaults(cfg: Config) -> dict:
 
 def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | SpeakerChoices | None = None,
               root: Path = WEB_DIR, personas: list[dict] | None = None,
-              vision: Callable[[], bool] = lambda: False) -> ThreadingHTTPServer:
+              vision: Callable[[], bool] = lambda: False, follow_window: bool = False) -> ThreadingHTTPServer:
     """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声とペルソナの選択肢をブラウザへ渡す。
 
     vision はドラマモードで画面も送るか (LLM が画像入力に対応しているか。LLM の起動後に決まるので要求ごとに聞く)。
+    follow_window なら画面モードはブラウザで共有せず、サーバが前面のウィンドウを撮る。
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
     def config() -> bytes:  # 声の一覧は AivisSpeech が後から起動したときのため要求ごとに取る
         choices = speakers.get() if isinstance(speakers, SpeakerChoices) else speakers or []
         return json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": choices,
-                           "personas": personas or [], "vision": vision()}).encode("utf-8")
+                           "personas": personas or [], "vision": vision(),
+                           "follow_window": follow_window}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -396,7 +408,8 @@ def main(argv: list[str] | None = None) -> int:
         web = start_web(args.web_port, args.port,
                         ui_defaults(cfg) | {"speaker": args.speaker, "persona": args.personas.current_id},
                         args.speakers, personas=args.personas.choices(),
-                        vision=lambda: director is not None and director.drama_vision)
+                        vision=lambda: director is not None and director.drama_vision,
+                        follow_window=load_screen(args.config).follow_window and sys.platform == "win32")
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
         director.drama_vision = has_vision(args.llm_url)  # mmproj 付きなら一言・感想に画面を添える (設計書 6.5)

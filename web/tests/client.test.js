@@ -135,3 +135,56 @@ test('errorResolved: transient errors clear when playback starts', () => {
   assert.equal(C.errorResolved(5006, started), false); // 設定の範囲外は再生では解消しない
   assert.equal(C.errorResolved(null, started), false);
 });
+
+test('makeUi: screen is passed through', () => {
+  assert.deepEqual(C.makeUi({ screen: true }), { t: 'ui', screen: true });
+});
+
+test('grayThumb: one luminance byte per pixel', () => {
+  const rgba = new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255, 255, 0, 0, 255]);
+  assert.deepEqual([...Buffer.from(C.grayThumb(rgba), 'base64')], [255, 0, 76]);
+  assert.equal(C.THUMB_W * C.THUMB_H, 576); // src/idle_talk/screen.py と一致
+});
+
+function fakeScreen(withAudio) {
+  const stops = { audio: 0, video: 0 };
+  const listeners = {};
+  const video = { stop: () => { stops.video += 1; }, readyState: 'live', addEventListener: (ev, fn) => { listeners[ev] = fn; } };
+  const audio = { stop: () => { stops.audio += 1; } };
+  const stream = { getVideoTracks: () => [video], getAudioTracks: () => (withAudio ? [audio] : []) };
+  return { stops, listeners, stream };
+}
+
+test('startScreenCapture: without vision stops sharing and errors', async () => {
+  const f = fakeScreen(false);
+  await assert.rejects(
+    C.startScreenCapture({ getDisplayMedia: async () => f.stream, vision: Promise.resolve(false) }),
+    /mmproj/,
+  );
+  assert.equal(f.stops.video, 1);
+});
+
+test('startScreenCapture: keeps video only, ends with the browser share', async () => {
+  const f = fakeScreen(true);
+  let asked = null;
+  let ended = 0;
+  const s = await C.startScreenCapture({
+    getDisplayMedia: async (c) => { asked = c; return f.stream; }, vision: true, onEnded: () => { ended += 1; },
+  });
+  assert.deepEqual(asked, { video: true, audio: false });
+  assert.deepEqual(f.stops, { audio: 1, video: 0 });
+  assert.match((await s.snapshot()).reason, /ImageCapture/); // node では描けない: 理由を返す
+  f.listeners.ended(); // ブラウザの「共有を停止」
+  assert.deepEqual([f.stops.video, ended], [1, 1]);
+  assert.deepEqual(await s.snapshot(), { reason: 'capture stopped' });
+});
+
+test('startWindowWatch: no sharing, errors without vision, stop calls onEnded once', async () => {
+  await assert.rejects(C.startWindowWatch({ vision: Promise.resolve(false) }), /mmproj/);
+  let ended = 0;
+  const w = await C.startWindowWatch({ vision: true, onEnded: () => { ended += 1; } });
+  assert.equal(w.stream, undefined);
+  w.stop();
+  w.stop();
+  assert.equal(ended, 1);
+});
