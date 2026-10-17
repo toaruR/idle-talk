@@ -2,7 +2,7 @@
 import asyncio
 
 import pytest
-from test_integration_interrupt import asr_settled, make, state, until
+from test_integration_interrupt import asr_settled, make, make_gated_asr, state, until
 
 from idle_talk.config import Asr, load_asr
 from idle_talk.director import SHORT_KIND
@@ -49,6 +49,34 @@ def test_short_reply_right_after_ai_voice_passes(tmp_path):
         await asr_settled(d)
         assert user_rows(store)[-1] == "うん" and short_events(store) == 1
         store.close()
+    asyncio.run(run())
+
+
+def test_short_always_discarded_when_reply_window_zero(tmp_path):
+    """short_reply_s=0: AI の声の最中の「ハハ」でも止めず、直後の「はい」にも応答しない。3 字以上は通る。"""
+    async def run():
+        d, b, store, gate = make_gated_asr(tmp_path, ["こんにちは", "ハハ", "はい", "それより明日は"])
+        d.short_reply_s = 0
+        try:
+            gate.set()
+            b.speak()
+            await until(lambda: state(d) == "ai_playing" and d._gen_done)
+            b.speak()  # 再生中の物音が「ハハ」に: 割り込みにせず再生に戻る
+            await asr_settled(d)
+            assert state(d) == "ai_playing" and b.of("cancel") == [] and len(b.of("resume")) == 1
+            for ep, utt, cid, _ in b.chunks:
+                b.playback(ep, utt, cid, "started")
+                b.playback(ep, utt, cid, "finished")
+            await until(lambda: state(d) == "idle")
+            b.speak()  # 話し終えた直後でも捨てる
+            await asr_settled(d)
+            assert user_rows(store) == ["こんにちは"] and short_events(store) == 2 and state(d) == "idle"
+            b.speak()
+            await asr_settled(d)
+            assert user_rows(store)[-1] == "それより明日は"
+        finally:
+            gate.set()
+            store.close()
     asyncio.run(run())
 
 

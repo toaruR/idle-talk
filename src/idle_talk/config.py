@@ -270,7 +270,7 @@ class Asr(NamedTuple):
     # short_chars 字以下の認識結果は、AI の声から short_reply_s 秒以内 (返事・相槌) でなければ物音の聞き違いとして捨てる。
     # ReazonSpeech は食器・咳を「はい」「誰」「ハハ」と聞き違えるが、音では本物の返事と見分けられなかった (2026-10-15)
     short_chars: int = 2  # 0 で無効
-    short_reply_s: int = 20
+    short_reply_s: int = 20  # 0 なら AI の声の最中も含めて常に捨てる
 
 
 ASR_ENGINES = ("reazon", "whisper")

@@ -14,9 +14,10 @@ engine = "reazon"
 model_dir = "data/models/reazonspeech"  # reazon のモデル (sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01, Apache-2.0)
 threads = 2           # reazon の CPU スレッド数 (1〜32)。AivisSpeech の声が遅れるなら下げる
 # 食器の音・咳などを「はい」「誰」「ハハ」と聞き違える対策: short_chars 字以下の認識結果は、
-# AI の声の最中か、話し終えてから short_reply_s 秒以内 (返事・相槌) のときだけ使う。0 で無効
+# AI の声の最中か、話し終えてから short_reply_s 秒以内 (返事・相槌) のときだけ使う。short_chars=0 で無効。
+# AI が話し続けると文脈の条件が常に成り立つので、short_reply_s=0 なら AI の声の最中も含めて常に捨てる
 short_chars = 2       # 0〜10
-short_reply_s = 20    # 0〜3600 (秒)
+short_reply_s = 0     # 0〜3600 (秒)
 
 [tts]
 # speaker: AivisSpeech の話者 (スタイル) ID。一覧は AivisSpeech の GET /speakers
@@ -46,7 +47,7 @@ adaptive = true       # 閾値を自動で決める (false なら threshold 固�
 ratio = 3.0           # 自動校正の閾値 = 雑音 (再生中は回り込み) の大きさ x ratio (1 より大、既定 3.0)
 min_threshold = 100   # 自動校正の閾値の下限 (既定 100)
 threshold = 500       # 発話とみなす音の大きさ (16bit PCM の RMS、既定 500)。自動校正では測り終えるまで (約 1 秒) の値
-onset_ms = 100        # この長さ音が続いたら発話の開始とみなす (20〜1000、既定 100。短い物音を無視する)
+onset_ms = 200        # この長さ音が続いたら発話の開始とみなす (20〜1000、既定 100。短い物音を無視する)
 
 [spontaneous]
 # 自発発話 (AI からの話しかけ)。起動時の既定値で、画面の設定欄の初期値にもなる (画面で変えた値は保存されない)。

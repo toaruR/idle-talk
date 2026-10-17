@@ -446,8 +446,13 @@ class IdleTalkDirector:
         self._pump()
 
     def _out_of_context(self, in_ai: bool, text: str) -> bool:
-        """short_chars 字以下で、AI の声の最中でも直後 (short_reply_s 秒以内) でもない = 物音の聞き違いとみなす。"""
-        if not 0 < len(_alnum(text)) <= self.short_chars or in_ai:
+        """short_chars 字以下で、AI の声の最中でも直後 (short_reply_s 秒以内) でもない = 物音の聞き違いとみなす。
+        short_reply_s が 0 なら AI の声の最中も含めて常に捨てる (AI が話し続けると文脈の条件が常に成り立つため)。"""
+        if not 0 < len(_alnum(text)) <= self.short_chars:
+            return False
+        if self.short_reply_s == 0:
+            return True
+        if in_ai:
             return False
         return self._ai_heard_at is None or self.clock() - self._ai_heard_at > self.short_reply_s
 
