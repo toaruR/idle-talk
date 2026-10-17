@@ -33,7 +33,8 @@
   function displayConstraints() {
     return {
       video: true,
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      // restrictOwnAudio: 画面全体 + システム音声で共有したとき、このタブが鳴らす AI の声を入れない (Chrome 141+。未対応なら無視される)
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, restrictOwnAudio: true },
       systemAudio: 'include',
     };
   }

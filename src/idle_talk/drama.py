@@ -20,10 +20,22 @@ ECHO_MIN_CHARS = 4
 # タブの音が閾値を超えてからこの間は「鳴っている」とみなす (スピーカーからマイクへの遅れと部屋の残響のぶん)
 BLEED_HOLD_S = 0.3
 NOTES_MAX_CHARS = 1200  # あらすじメモの上限字数。超えたら古いメモから捨てる (ctx 4k に収める)
+# ドラマの台詞のうちこれだけの割合 (SELF_BLOCK 字以上の一致の合計) が直近の AI 発話と一致したら、共有した音に入った AI の声とみなす
+SELF_RATIO = 0.6
+SELF_BLOCK = 3  # これより短い一致は偶然とみなして数えない (AI の本文は長く、1〜2 字はどこかに必ずある)
 
 
 def _alnum(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum())
+
+
+def is_ai_voice(line: str, ai_text: str) -> bool:
+    """ドラマの台詞が AI の声 (画面全体の共有でシステム音声に入った) か。認識の誤りがあるので完全一致は求めない。"""
+    heard, ai = _alnum(line), _alnum(ai_text)
+    if len(heard) < ECHO_MIN_CHARS or not ai:
+        return False
+    blocks = SequenceMatcher(None, heard, ai, autojunk=False).get_matching_blocks()
+    return sum(b.size for b in blocks if b.size >= SELF_BLOCK) >= SELF_RATIO * len(heard)
 
 
 class DramaListener:

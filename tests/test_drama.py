@@ -9,8 +9,8 @@ from mocks_browser import LOUD, QUIET, MockBrowser
 from idle_talk import director as director_mod
 from idle_talk.clients import AsrClient
 from idle_talk.config import Drama, load_drama
-from idle_talk.director import DRAMA_ECHO_KIND, IdleTalkDirector
-from idle_talk.drama import DramaListener
+from idle_talk.director import DRAMA_ECHO_KIND, DRAMA_SELF_KIND, IdleTalkDirector
+from idle_talk.drama import DramaListener, is_ai_voice
 from idle_talk.protocol import DRAMA_FLAG, is_drama, pack_up_frame, validate_message
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
@@ -111,6 +111,16 @@ def test_contains_tolerates_asr_differences():
     assert not dl.contains("お前")  # 短すぎる
 
 
+def test_is_ai_voice_tolerates_asr_errors():
+    """画面全体の共有で入った AI の声 (実機 2026-10-17 の talk.log)。認識の誤りで一致が途切れても合計で見る。"""
+    ai = "えー、急に自信満々なのびっくりしたっちゃけど、よかぞ。うちも宇宙人やけど、あんな風にドヤ顔で言えたら最高やね。"
+    assert is_ai_voice("急に自信満々なのびっくりしたっちゃけどよかぞどっちも宇宙人やけどあんなふうにドヤ顔で言えたら最高やね", ai)
+    assert not is_ai_voice("十二点ということで岡山学芸館高校が日本一です", ai)
+    assert not is_ai_voice("恵まれてる家族友達", ai)  # 1〜2 字の偶然の一致は数えない
+    assert not is_ai_voice("うちも", ai)  # 短すぎる
+    assert not is_ai_voice("急に自信満々", "")
+
+
 def test_stop_clears_lines():
     dl = listener(FakeClock())
     dl.add_line("台詞です")
@@ -193,6 +203,23 @@ def test_reaction_plays_via_spontaneous_path(tmp_path):
         ai = store.query("SELECT text FROM turns WHERE role='ai'")
         assert [r[0] for r in ai] == ["え、まさかの展開！"]
         assert d.spontaneous_tick() is None  # 新しい台詞が無いので続けて言わない
+    asyncio.run(run())
+
+
+def test_ai_voice_in_shared_audio_is_not_a_line(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["え、まさかの展開！"], ["犯人はお前だ、そうだろう。", "まさかの展開", "逃げられないけど"])
+        drama_on(d, b)
+        drama_speak(b)
+        await until(lambda: d.drama.lines)
+        d.clock_.advance(60)
+        assert d.spontaneous_tick() == "drama"
+        await until(lambda: not d.spontaneous.pending)
+        drama_speak(b)  # 共有した音に入った AI の声
+        await until(lambda: store.query(f"SELECT COUNT(*) FROM events WHERE kind='{DRAMA_SELF_KIND}'")[0][0] == 1)
+        drama_speak(b)
+        await until(lambda: len(d.drama.lines) == 2)
+        assert [t for _, t in d.drama.lines] == ["犯人はお前だ、そうだろう。", "逃げられないけど"]
     asyncio.run(run())
 
 

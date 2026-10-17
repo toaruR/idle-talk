@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
 from .config import Config, Drama, Screen
-from .drama import DramaListener
+from .drama import DramaListener, is_ai_voice
 from .echo_chain import CANCEL_KIND
 from .epoch import Epoch
 from .errors import ERR_OUT_OF_RANGE
@@ -72,6 +72,7 @@ MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
 ECHO_SUPPRESSED_KIND = "echo_suppressed"  # AI 再生中に拾った自声の認識結果を捨てた 1 回 = 1 行
 # ドラマモード (設計書 6.5)
 DRAMA_ECHO_KIND = "drama_echo_suppressed"  # マイクが拾ったドラマの台詞を捨てた 1 回 = 1 行
+DRAMA_SELF_KIND = "drama_self_suppressed"  # 共有した音に入った AI の声をドラマの台詞から捨てた 1 回 = 1 行
 DRAMA_CONTEXT_PROMPT = "\n利用者と一緒にドラマを見ています。直近の台詞 (音声認識なので誤りを含みます):\n{lines}\n"
 # 「なし」の代わりに「聞こえなくて分からない」と言うことがある (実機 2026-10-14)。言っても楽しくないので黙る
 DRAMA_UNHEARD = re.compile(r"聞こえ(な|ず)|聞き取れ|分から(な|ず)|わから(な|ず)")
@@ -181,6 +182,7 @@ class IdleTalkDirector:
         self._down_q: deque[tuple[int, int, int, bytes]] = deque()  # 送出待ちの下りチャンク (ep, utt, chunk, pcm)
         self._down_sent: set[tuple[int, int, int]] = set()  # 送出済みで finished/dropped 未報告
         self._ai_text = ""  # 直近の AI 発話 (相槌除く) の送出済み本文。自声の認識結果を捨てる判定に使う
+        self._ai_prev = ""  # その 1 つ前の AI 発話。ドラマの区間は認識が遅れて次の発話と重なるので両方と比べる
         self._speech_in_ai = False  # 現在の利用者発話が AI 再生中 (自発発話を含む) に始まったか
         self._spont_hold = False  # 自発発話の再生中に音を拾い、取消を認識結果まで保留している (duck 中)
         self.backchannel: Backchannel | None = None
@@ -589,6 +591,8 @@ class IdleTalkDirector:
         if self._cur is None or self._cur["utt"] != utt:
             self._cur = {"epoch": ep, "utt": utt, "chunks": set(), "finished": set()}
         self._cur["chunks"].add(chunk)
+        if chunk == 0:
+            self._ai_prev = self._ai_text
         self._ai_text = text if chunk == 0 else self._ai_text + text
         if chunk == 0:
             self._m_mark("tts_first")
@@ -775,6 +779,10 @@ class IdleTalkDirector:
 
         def done(res: object) -> None:
             if isinstance(res, dict) and self.drama_on:
+                if is_ai_voice(res["text"], self._ai_prev + self._ai_text):
+                    log.info("drama line discarded (ai voice): %d chars", len(res["text"]))
+                    self._bc_record(DRAMA_SELF_KIND, {"chars": len(res["text"])})  # 台詞の本文は残さない (設計書 7)
+                    return
                 self.drama.add_line(res["text"])
                 # 台詞の本文は残さない (設計書 7)。聞き取れているかは字数で見る
                 log.info("drama line: %d chars (pending %d)", len(res["text"]), self.drama._new_chars)
