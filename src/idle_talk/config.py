@@ -226,6 +226,7 @@ class Topics(NamedTuple):
     """[topics]: 話題カードを作る RSS / Atom フィード。feeds が空ならネットワークに出ない。"""
     feeds: tuple[str, ...] = ()
     interval_min: int = 30  # 取得間隔 (分)
+    x_trends: bool = False  # 取得のたびに X のトレンド (Yahoo! リアルタイム検索) もカードにする
 
 
 def load_topics(path: str | Path = SETTINGS_FILE) -> Topics:
@@ -237,7 +238,10 @@ def load_topics(path: str | Path = SETTINGS_FILE) -> Topics:
     interval = raw.get("interval_min", Topics._field_defaults["interval_min"])
     if type(interval) is not int or interval < 1:
         raise ValueError(f"[topics].interval_min must be a positive int: {interval!r}")
-    return Topics(tuple(feeds), interval)
+    x_trends = raw.get("x_trends", False)
+    if type(x_trends) is not bool:
+        raise ValueError(f"[topics].x_trends must be bool: {x_trends!r}")
+    return Topics(tuple(feeds), interval, x_trends)
 
 
 class Search(NamedTuple):
@@ -245,6 +249,7 @@ class Search(NamedTuple):
     on: bool = False
     engines: tuple[str, ...] = ("duckduckgo", "bing")  # 先頭から試し、失敗・0 件なら次へ
     read_page: bool = True  # 上位 1 件のページ本文を r.jina.ai で読んで添える
+    realtime: bool = False  # X の投稿 (Yahoo! リアルタイム検索) も添える
 
 
 SEARCH_ENGINES = ("duckduckgo", "bing")
@@ -253,13 +258,13 @@ SEARCH_ENGINES = ("duckduckgo", "bing")
 def load_search(path: str | Path = SETTINGS_FILE) -> Search:
     """[search] を読む。無ければ既定値 (検索しない)。型違い・未知キー・未知のエンジンは ValueError。"""
     raw = _read_section(path, "search", Search._fields)
-    for k in ("on", "read_page"):
+    for k in ("on", "read_page", "realtime"):
         if k in raw and type(raw[k]) is not bool:
             raise ValueError(f"[search].{k} must be bool: {raw[k]!r}")
     engines = raw.get("engines", list(Search._field_defaults["engines"]))
     if type(engines) is not list or not engines or not all(e in SEARCH_ENGINES for e in engines):
         raise ValueError(f"[search].engines must be a non-empty list of {list(SEARCH_ENGINES)}: {engines!r}")
-    return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True))
+    return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True), raw.get("realtime", False))
 
 
 class Asr(NamedTuple):

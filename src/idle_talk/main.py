@@ -31,7 +31,7 @@ from .screen import ScreenWatcher
 from .server import serve
 from .store import Store
 from .topic_worker import TopicWorker
-from .web_search import NEWS_QUERIES, WebSearch, news_search
+from .web_search import NEWS_QUERIES, WebSearch, news_search, x_trends
 from .wincap import WindowCapture
 from .vad import FRAME_MS, EnergyVad
 
@@ -175,13 +175,13 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     asr_settings = load_asr(args.config)
     director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)
-    feeds = load_topics(args.config).feeds
+    topics = load_topics(args.config)
     search = load_search(args.config)
     if search.on:
-        director.web_search = WebSearch(engines=search.engines, read_page=search.read_page)
-    if feeds or search.on:  # 話題カードが尽きたらニュース検索でも補充する ([search].on のとき)
-        director.topic_worker = TopicWorker(store, list(feeds), news=news_search if search.on else None,
-                                            news_queries=NEWS_QUERIES)
+        director.web_search = WebSearch(engines=search.engines, read_page=search.read_page, realtime=search.realtime)
+    if topics.feeds or topics.x_trends or search.on:  # 話題カードが尽きたらニュース検索でも補充する ([search].on のとき)
+        director.topic_worker = TopicWorker(store, list(topics.feeds), news=news_search if search.on else None,
+                                            news_queries=NEWS_QUERIES, trends=x_trends if topics.x_trends else None)
         director.topic_worker.start()
     return director
 

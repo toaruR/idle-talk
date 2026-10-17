@@ -875,6 +875,12 @@ flowchart TD
 - `read_page` なら、上位 1 件の本文を r.jina.ai (テキスト形式) で読む。
 - 本文が読めなければ、抜粋だけで答える。
 - 全エンジンが失敗したら、「調べられなかった」と答える。
+- `realtime` なら、Yahoo! リアルタイム検索 (`search.yahoo.co.jp/realtime/search`) で X の投稿も新しい順に `POSTS_MAX`=3 件取る (`web_search.realtime_search`)。
+  - ログイン不要。結果はページに埋め込まれた `__NEXT_DATA__` の JSON (`pageData.timeline.entry`) から読む。
+  - センシティブ指定・本文なし・同じ本文 (リポスト) は除く。検索語の強調 (タブで囲んだ START / END) と先頭の返信先 @ を除く。
+  - 投稿は Web の結果とは別枠で、`[X の投稿 (新しい順)]` の下に日時つきで計 `POSTS_MAX_CHARS`=400 字まで添える。
+  - 投稿があれば「個人の発言なので『〜という声がある』と伝える」と指示する。
+  - 取得に失敗しても Web の結果だけで答える。X の投稿の本文は r.jina.ai で読まない。
 
 答え直し:
 
@@ -1258,7 +1264,13 @@ flowchart LR
 - `idle_talk.toml` の `[topics]` で設定する (`config.load_topics`)。
   - `feeds`: http(s) URL の配列。既定は空
   - `interval_min`: 取得間隔 (分)。既定 30
-- `feeds` が空で `[search].on` でもなければ、Worker を作らない。
+  - `x_trends`: 取得のたびに X のトレンドもカードにする。既定 false
+- `feeds` が空で、`x_trends` でも `[search].on` でもなければ、Worker を作らない。
+- `x_trends` なら、`poll_once` のフィードの後に Yahoo! リアルタイム検索のトップ (`pageData.buzzTrend`) から上位 `TRENDS_MAX`=3 件のトレンドを取る (`web_search.x_trends`)。
+  - トレンドごとに検索ページを読み、新しい投稿 `TREND_POSTS`=3 件 (各 `TREND_POST_CHARS`=60 字) を概要にする。投稿が取れないトレンドは除く。
+  - 見出しはトレンドの語、URL はその語のリアルタイム検索ページ、`angle` は `x_trend`。
+  - 有効期間は `TREND_TTL_MS`=6 時間。同じ語は URL で照合して 1 回だけ保存する。
+  - 自発発話では「最近見かけたニュース」ではなく「X で話題になっている」として渡す。
 - `main.topic_loop` は、起動直後と `interval_min` ごとに `TopicWorker.poll_once` を別スレッドで呼ぶ。
 - 補充要求 (`worker.wake`) があれば、待たずに補充 (`refill`) する。
 - 見出しを `hook` に、概要を `facts` に保存する。

@@ -16,6 +16,7 @@ from idle_talk.spontaneous import Spontaneous, in_quiet_hours
 from idle_talk.store import Store
 from idle_talk.topic_worker import TopicWorker
 from idle_talk.vad import EnergyVad
+from idle_talk.web_search import X_TREND
 
 
 def sp(minute=12 * 60, **kw):
@@ -360,6 +361,21 @@ def test_spontaneous_uses_topic_card_once(tmp_path):
         assert "「新しい駅が開業」" in prompt and "来春に開業予定。" in prompt and "<p>" not in prompt
         assert store.query("SELECT used_at FROM topic_cards WHERE id=?", (cid,))[0][0] == 1000
         assert topics.select_cards(store, 1000) == []  # 使ったカードは次回選ばれない (SPONT_TOPICS に戻る)
+    asyncio.run(run())
+
+
+def test_spontaneous_x_trend_card_is_not_called_news(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        topics.add_card(store, "裸の勇者", facts="X で話題 (エンタメ)。", expires_at=10_000, angle=X_TREND)
+        seen = []
+        d.pipeline._llm = lambda m: seen.append(m) or iter(["話題みたいだね。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        prompt = seen[0][-1]["content"]
+        assert "X で話題になっている「裸の勇者」" in prompt and "ニュース「裸の勇者」" not in prompt
     asyncio.run(run())
 
 

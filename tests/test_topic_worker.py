@@ -199,6 +199,18 @@ def test_refill_uses_feed_first_then_news_search_rotating_queries(store):
     assert w.refill() == 0 and queries == ["A", "B"]  # 同じ記事は重複保存しない。ジャンルは順に回す
 
 
+def test_poll_stores_x_trends_with_angle_and_short_ttl(store):
+    from idle_talk.topic_worker import TREND_TTL_MS
+    trends = [{"title": "裸の勇者", "snippet": "X で話題 (エンタメ)。投稿: 「公開されるの嬉しすぎます」",
+               "url": "https://search.yahoo.co.jp/realtime/search?p=x", "angle": "x_trend"}]
+    w = TopicWorker(store, ["http://feed.test/rss"], fetch=lambda u: FEED, now_ms=lambda: 1000, trends=lambda: trends)
+    w.start()
+    assert w.poll_once() == 4  # フィード 3 件 + トレンド 1 件
+    row = store.query("SELECT * FROM topic_cards WHERE angle='x_trend'")[0]
+    assert row["hook"] == "裸の勇者" and "嬉しすぎます" in row["facts"] and row["expires_at"] == 1000 + TREND_TTL_MS
+    assert w.poll_once() == 0  # 同じトレンドは重複保存しない
+
+
 def test_refill_without_news_is_poll_only(store):
     w = TopicWorker(store, ["http://feed.test/rss"], fetch=lambda u: FEED)
     w.start()

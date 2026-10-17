@@ -19,6 +19,7 @@ from .store import Store
 from .topics import add_card, has_card
 
 TOPIC_TTL_MS = 24 * 60 * 60 * 1000  # カード有効期間 (published_at から)
+TREND_TTL_MS = 6 * 60 * 60 * 1000  # X のトレンドのカードの有効期間 (トレンドは移り変わりが速い)
 FETCH_TIMEOUT_S = 10.0
 REFILL_MIN_S = 300  # 在庫切れによる取り直しの最短間隔 (秒)。取得先に負荷をかけない
 SUMMARY_MIN_CHARS = 30  # フィードの概要 (タグ除去後) がこれより短ければ記事ページの説明文で補う
@@ -109,8 +110,10 @@ class TopicWorker:
                  generate: Callable[[dict, threading.Event], str | None] | None = None,
                  now_ms: Callable[[], int] | None = None, ttl_ms: int = TOPIC_TTL_MS,
                  news: Callable[[str], list[dict]] | None = None, news_queries: tuple[str, ...] = (),
-                 clock: Callable[[], float] | None = None) -> None:
+                 clock: Callable[[], float] | None = None,
+                 trends: Callable[[], list[dict]] | None = None) -> None:
         import time
+        self._trends = trends  # 取得のたびに X のトレンドもカードにする (() -> [{title, snippet, url, angle}])
         self.store = store
         self._news = news  # 在庫切れでフィードに新着も無いときのニュース検索 (query -> [{title, snippet, url}])
         self.news_queries = news_queries
@@ -151,7 +154,7 @@ class TopicWorker:
 
     # ---- 取得 ----
     def poll_once(self) -> int:
-        """全フィードを 1 回取得してカードを保存。保存件数を返す。停止中は何もしない。"""
+        """全フィード (と X のトレンド) を 1 回取得してカードを保存。保存件数を返す。停止中は何もしない。"""
         if not self.running:
             return 0
         self._cancel.clear()
@@ -168,6 +171,12 @@ class TopicWorker:
                 if not self.running or self._cancel.is_set():
                     break
                 n += self._store_item(item)
+        if self._trends is not None and self.running and not self._cancel.is_set():
+            for r in self._trends():
+                if not self.running or self._cancel.is_set():
+                    break
+                n += self._store_item({"title": r["title"], "summary": r.get("snippet") or "", "url": r.get("url"),
+                                       "published_at": None, "angle": r.get("angle"), "ttl_ms": TREND_TTL_MS})
         return n
 
     # ---- 在庫切れの補充 ----
@@ -218,7 +227,7 @@ class TopicWorker:
             return 0
         published = item["published_at"] if item["published_at"] is not None else self._now()
         add_card(self.store, hook, facts=summary or None, source_url=item.get("url"),
-                 published_at=published, expires_at=published + self.ttl_ms)
+                 published_at=published, expires_at=published + item.get("ttl_ms", self.ttl_ms), angle=item.get("angle"))
         with self._lock:
             self._seen.add(key)
             self.saved += 1

@@ -312,9 +312,12 @@ def test_load_topics(tmp_path):
     assert load_topics(f) == Topics((), 30)
     f.write_text('[topics]\nfeeds = ["https://example.test/rss"]\ninterval_min = 60\n', encoding="utf-8")
     assert load_topics(f) == Topics(("https://example.test/rss",), 60)
+    f.write_text("[topics]\nx_trends = true\n", encoding="utf-8")
+    assert load_topics(f) == Topics((), 30, True)
 
 
 @pytest.mark.parametrize("body", ['[topics]\nfeeds = "https://example.test/rss"\n', '[topics]\nfeeds = ["file:///x"]\n',
+                                  "[topics]\nx_trends = 1\n",
                                   "[topics]\ninterval_min = 0\n", "[topics]\ninterval = 30\n"])
 def test_load_topics_rejects_invalid(tmp_path, body):
     from idle_talk.config import load_topics

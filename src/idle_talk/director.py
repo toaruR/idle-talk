@@ -45,7 +45,7 @@ from .topics import mark_used, select_cards
 from .vad import EnergyVad, Vad
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
                        name_messages, parse_name, speaker_prompt)
-from .web_search import link_items
+from .web_search import X_TREND, link_items
 
 log = logging.getLogger("idle_talk.director")
 
@@ -1059,7 +1059,8 @@ class IdleTalkDirector:
         card = cards[0]
         mark_used(self.store, card["id"], self.now_ms())
         facts = re.sub(r"<[^>]+>", "", card["facts"] or "").strip()[:CARD_FACTS_MAX]
-        return f"最近見かけたニュース「{card['hook']}」" + (f"(概要: {facts})" if facts else ""), card
+        label = "X で話題になっている「{}」" if card["angle"] == X_TREND else "最近見かけたニュース「{}」"
+        return label.format(card["hook"]) + (f"(概要: {facts})" if facts else ""), card
 
     # ---- 記憶 (設計書 3.4): 応答の再生完了後に、溜まった利用者発話から抜き出して保存する ----
     def _chat_messages(self, turns: int | None = None, ask: bool = False) -> list[dict]:

@@ -177,8 +177,8 @@ HTML ファイルを直接（`file://` で）開くと接続できません。
 | `[asr]` | 音声認識のエンジン。短い言葉を聞き流す条件（`short_chars` / `short_reply_s`） |
 | `[vad]` | 声の検出感度。物音に反応しすぎるなら `ratio` を上げ、声を拾わないなら下げます |
 | `[spontaneous]` | 自発発話・ラジオモードの初期値 |
-| `[topics]` | 話題に使うニュースの RSS |
-| `[search]` | Web 検索の有無。on のときは、話題のニュースが尽きたら Bing ニュースで補充もします。`on = false` なら検索も補充もせず、ネットワークにも出ません |
+| `[topics]` | 話題に使うニュースの RSS。`x_trends = true` なら X のトレンドも話題にします（Yahoo! リアルタイム検索、ログイン不要） |
+| `[search]` | Web 検索の有無。`realtime = true` なら X の新しい投稿も添えて答えます。on のときは、話題のニュースが尽きたら Bing ニュースで補充もします。`on = false` なら検索も補充もせず、ネットワークにも出ません |
 | `[voice_id]` | 声で相手を見分ける。取り違えるなら `threshold` を上げ、同じ人を別人扱いするなら下げます |
 | `[drama]` | ドラマモードで一言つぶやく間隔（`interval_s`）、場面の切れ目とみなす無音（`gap_ms`）、確認用の記録（`log_prompt` / `keep_snaps`） |
 | `[screen]` | 画面モードで画面を見る間隔（`interval_s`）と、話すのに要る画面の変化（`min_diff`）。差はログの `screen skipped: diff` で確かめます |
@@ -220,4 +220,4 @@ HTML ファイルを直接（`file://` で）開くと接続できません。
 
 - AivisSpeech と音声モデル（話者ごとに規約が異なり、合成音声の商用利用やクレジット表記に条件があるものがあります）
 - LLM のモデル（Gemma 4・Qwen3.5 など）と llama.cpp、sherpa-onnx・ReazonSpeech（faster-whisper）
-- 外部サービス（DuckDuckGo、Bing、r.jina.ai、ニュースの RSS 配信元）
+- 外部サービス（DuckDuckGo、Bing、r.jina.ai、Yahoo! リアルタイム検索、ニュースの RSS 配信元）

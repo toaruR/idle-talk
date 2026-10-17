@@ -6,9 +6,34 @@ import pytest
 
 from idle_talk import pipeline as pipeline_mod
 from idle_talk.pipeline import ResponsePipeline
-from idle_talk.web_search import (ANSWER_TURNS, BING_NEWS_URL, BING_URL, DDG_URL, LINK_NOTICE, READER_URL, SEARCH_NOTICE, SEARCH_WAIT_NOTICE,
-                                  WebSearch, answer_messages, find_mark, format_results, link_items, page_excerpt, parse_bing,
-                                  news_search, parse_bing_news, parse_duckduckgo, parse_query, with_search_rule)
+from idle_talk.web_search import (
+    ANSWER_TURNS,
+    BING_NEWS_URL,
+    BING_URL,
+    DDG_URL,
+    LINK_NOTICE,
+    READER_URL,
+    REALTIME_TOP_URL,
+    REALTIME_URL,
+    SEARCH_NOTICE,
+    SEARCH_WAIT_NOTICE,
+    X_TREND,
+    WebSearch,
+    answer_messages,
+    find_mark,
+    format_results,
+    link_items,
+    news_search,
+    page_excerpt,
+    parse_bing,
+    parse_bing_news,
+    parse_duckduckgo,
+    parse_query,
+    parse_realtime,
+    parse_trends,
+    with_search_rule,
+    x_trends,
+)
 
 LITE_PAGE = """
 <table>
@@ -177,6 +202,73 @@ def test_web_search_quotes_query_and_limits_without_page():
     assert calls[0][0].endswith("q=%E6%97%A5%E7%B5%8C%20%E5%B9%B3%E5%9D%87")
 
 
+def _next_page(page_data):
+    import json
+    body = json.dumps({"props": {"pageProps": {"pageData": page_data}}}, ensure_ascii=False)
+    return f'<html><script id="__NEXT_DATA__" type="application/json">{body}</script></html>'
+
+
+def _entry(text, url="https://x.com/a/status/1?utm_source=yjrealtime", sensitive=False):
+    return {"displayText": text, "url": url, "createdAt": int(datetime.datetime(2026, 10, 17, 12, 30).timestamp()),
+            "possiblySensitive": sensitive}
+
+
+REALTIME_PAGE = _next_page({"timeline": {"entry": [
+    _entry("@foo @bar \tSTART\t日経平均\tEND\t 大きく下げたね"),
+    _entry("RT 重複", "https://x.com/b/status/2"), _entry("RT 重複", "https://x.com/c/status/3"),
+    _entry("見せられない", sensitive=True), _entry("  "),
+]}})
+TRENDS_PAGE = _next_page({"buzzTrend": {"items": [
+    {"query": "裸の勇者", "genre": "エンタメ"}, {"query": "シュガークン", "genre": ""}, {"query": " "}]}})
+
+
+def test_parse_realtime_posts_strip_markers_and_skip_sensitive_duplicates():
+    assert parse_realtime(REALTIME_PAGE) == [
+        {"title": "X の投稿 10/17 12:30", "snippet": "日経平均 大きく下げたね", "url": "https://x.com/a/status/1", "post": True},
+        {"title": "X の投稿 10/17 12:30", "snippet": "RT 重複", "url": "https://x.com/b/status/2", "post": True},
+    ]
+    with pytest.raises(ValueError):
+        parse_realtime("<html>no data</html>")
+
+
+def test_parse_trends_in_rank_order():
+    assert [(t["query"], t["genre"]) for t in parse_trends(TRENDS_PAGE)] == [("裸の勇者", "エンタメ"), ("シュガークン", "")]
+    assert parse_trends(TRENDS_PAGE)[0]["url"] == REALTIME_URL + "%E8%A3%B8%E3%81%AE%E5%8B%87%E8%80%85"
+
+
+def test_x_trends_cards_from_posts_and_skip_trends_without_posts():
+    calls = []
+    empty = _next_page({"timeline": {"entry": []}})
+
+    def fetch(url, headers=None):
+        calls.append(url)
+        if url == REALTIME_TOP_URL:
+            return TRENDS_PAGE.encode()
+        return (REALTIME_PAGE if "%E8%A3%B8" in url else empty).encode()
+    ts = x_trends(fetch, limit=2)
+    assert len(calls) == 3 and [t["title"] for t in ts] == ["裸の勇者"]
+    assert ts[0]["angle"] == X_TREND and ts[0]["snippet"].startswith("X で話題 (エンタメ)。投稿: 「日経平均 大きく下げたね」")
+    assert x_trends(lambda u, h=None: (_ for _ in ()).throw(OSError("down"))) == []
+
+
+def test_web_search_realtime_adds_posts_after_results():
+    calls = []
+    ws = WebSearch(fake_fetch({DDG_URL: LITE_PAGE, REALTIME_URL: REALTIME_PAGE}, calls), read_page=False, realtime=True)
+    rs = ws("日経平均")
+    assert len(rs) == 4 and rs[2]["post"] and rs[3]["post"] and not rs[0].get("post")
+    body = format_results(rs)
+    assert body.index("1. 日経平均株価") < body.index("[X の投稿 (新しい順)]") < body.index("- (10/17 12:30) 日経平均 大きく下げたね")
+    ref = answer_messages(MSGS, "日経平均", rs, TODAY)[-1]["content"]
+    assert "という声がある" in ref
+    assert "という声がある" not in answer_messages(MSGS, "日経平均", rs[:2], TODAY)[-1]["content"]
+
+
+def test_web_search_realtime_failure_keeps_web_results():
+    calls = []
+    ws = WebSearch(fake_fetch({DDG_URL: LITE_PAGE, REALTIME_URL: OSError("x")}, calls), read_page=False, realtime=True)
+    assert len(ws("日経平均")) == 2
+
+
 def test_web_search_rejects_unknown_engine():
     with pytest.raises(ValueError):
         WebSearch(engines=("google",))
@@ -310,10 +402,12 @@ def test_load_search(tmp_path):
     assert load_search(f) == Search(True, ("duckduckgo", "bing"), True)
     f.write_text('[search]\non = true\nengines = ["bing"]\nread_page = false\n', encoding="utf-8")
     assert load_search(f) == Search(True, ("bing",), False)
+    f.write_text("[search]\non = true\nrealtime = true\n", encoding="utf-8")
+    assert load_search(f).realtime is True
 
 
 @pytest.mark.parametrize("body", ['[search]\non = "yes"\n', '[search]\nengines = ["google"]\n',
-                                  "[search]\nengines = []\n", '[search]\nread_page = 1\n', "[search]\nurl = 1\n"])
+                                  "[search]\nengines = []\n", '[search]\nread_page = 1\n', '[search]\nrealtime = "on"\n', "[search]\nurl = 1\n"])
 def test_load_search_rejects_invalid(tmp_path, body):
     from idle_talk.config import load_search
     f = tmp_path / "s.toml"
