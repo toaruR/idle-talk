@@ -1,30 +1,142 @@
 <!doctype html>
 <html lang="ja">
-<head><meta charset="utf-8"><title>idle-talk</title></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>idle-talk</title>
+<style>
+  :root {
+    --bg: #f4f5f9; --card: #ffffff; --text: #1d2130; --muted: #6b7185; --line: #e3e6ef;
+    --accent: #6366f1; --accent-2: #8b5cf6; --accent-soft: rgba(99, 102, 241, .12);
+    --ok: #10b981; --warn: #f59e0b; --busy: #3b82f6; --danger: #ef4444;
+    --radius: 16px; --shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 8px 24px rgba(16, 24, 40, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1117; --card: #181b24; --text: #e7e9f0; --muted: #8a90a6; --line: #262a37;
+      --accent-soft: rgba(129, 140, 248, .16); --shadow: 0 8px 24px rgba(0, 0, 0, .35);
+    }
+  }
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 28px 20px 48px; display: grid; gap: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 {
+    margin: 0; font-size: 26px; letter-spacing: -.02em; font-weight: 750;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .status { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--line); font-size: 13px; font-weight: 600;
+  }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--muted)); }
+  #state[data-state="idle"] { --c: var(--ok); }
+  #state[data-state="user_speaking"], #state[data-state="eot_check"], #state[data-state="interrupt_check"] { --c: var(--warn); }
+  #state[data-state="preparing"] { --c: var(--busy); }
+  #state[data-state="ai_playing"] { --c: var(--accent); }
+  #state[data-state="ai_playing"]::before, #state[data-state="user_speaking"]::before { animation: pulse 1.2s ease-in-out infinite; }
+  #state[data-state="rest"] { --c: var(--muted); }
+  #state[data-state="offline"] { --c: var(--danger); }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 5px transparent; transform: scale(1.25); } 0%, 100% { box-shadow: 0 0 0 0 var(--c); } }
+  .tag { padding: 5px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; }
+  .tag:empty { display: none; }
+  .notice { margin: 0; padding: 10px 14px; border-radius: 12px; font-size: 14px; }
+  .notice:empty { display: none; }
+  #search { background: var(--accent-soft); color: var(--text); }
+  #error { background: rgba(239, 68, 68, .1); color: var(--danger); border: 1px solid rgba(239, 68, 68, .25); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 20px; }
+  .card h2 { margin: 0 0 14px; font-size: 13px; font-weight: 700; color: var(--muted); letter-spacing: .06em; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 12px; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    padding: 12px 16px; font-weight: 600; transition: transform .08s, background .15s, border-color .15s, box-shadow .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  button:active:not(:disabled) { transform: scale(.98); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #start {
+    width: 100%; padding: 16px; font-size: 17px; border: 0; color: #fff;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 6px 20px rgba(99, 102, 241, .35);
+  }
+  #start:disabled { opacity: .35; box-shadow: none; }
+  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }
+  .modes button { display: flex; align-items: center; gap: 10px; text-align: left; }
+  .modes button::before { font-size: 20px; }
+  #drama::before { content: "🎬"; }
+  #screen::before { content: "🖥️"; }
+  #pc::before { content: "💬"; }
+  .modes button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 16px; }
+  .field { display: grid; gap: 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .field input, .field select {
+    font: inherit; font-size: 15px; font-weight: 400; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; width: 100%;
+  }
+  .field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .switches { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-bottom: 16px; }
+  .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+  .switch input {
+    appearance: none; margin: 0; width: 40px; height: 22px; border-radius: 999px; background: var(--line);
+    position: relative; cursor: pointer; transition: background .2s;
+  }
+  .switch input::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: transform .2s;
+  }
+  .switch input:checked { background: var(--accent); }
+  .switch input:checked::after { transform: translateX(18px); }
+  .switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .volume { display: flex; align-items: center; gap: 12px; margin-top: 16px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .volume input { flex: 1; accent-color: var(--accent); }
+  #volume_text { min-width: 3.5em; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  #links { list-style: none; margin: 0; padding: 0; max-height: 20em; overflow-y: auto; display: grid; gap: 6px; }
+  #links li { padding: 8px 12px; border-radius: 10px; background: var(--bg); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  #links a { display: block; color: var(--accent); text-decoration: none; font-weight: 600; }
+  #links a:hover { text-decoration: underline; }
+</style>
+</head>
 <body>
-<h1>idle-talk</h1>
-<p>状態: <span id="state">未接続</span> <span id="drama_state"></span> <span id="search"></span></p>
-<p id="error" role="alert"></p>
-<button id="start">開始</button>
-<button id="drama" disabled>ドラマを一緒に見る</button>
-<button id="screen" disabled>画面を一緒に見る</button>
-<button id="pc" disabled>PC と話す</button>
-<fieldset>
-  <legend>設定</legend>
-  <label><input type="checkbox" id="mute"> 休止</label>
-  <label><input type="checkbox" id="on" checked> 自発発話 ON</label>
-  <label><input type="checkbox" id="radio"> ラジオ</label>
-  <label>沈黙秒数 <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
-  <label>静音開始 <input type="time" id="quiet_start" value="23:00"></label>
-  <label>静音終了 <input type="time" id="quiet_end" value="07:00"></label>
-  <label id="persona_label" hidden>ペルソナ <select id="persona"></select></label>
-  <label id="speaker_label" hidden>声 <select id="speaker"></select></label>
-  <label>音量 <input type="range" id="volume" min="0" max="200" step="5" value="100"> <span id="volume_text">100%</span></label>
-</fieldset>
-<fieldset id="links_box" hidden>
-  <legend>URL</legend>
-  <ul id="links" style="max-height: 20em; overflow-y: auto;"></ul>
-</fieldset>
+<main class="wrap">
+<header>
+  <h1>idle-talk</h1>
+  <div class="status"><span id="state" class="pill" data-state="offline">未接続</span><span id="drama_state" class="tag"></span></div>
+</header>
+<p id="search" class="notice"></p>
+<p id="error" class="notice" role="alert"></p>
+<section class="card">
+  <button id="start">▶ 開始</button>
+  <div class="modes">
+    <button id="drama" disabled aria-pressed="false">ドラマを一緒に見る</button>
+    <button id="screen" disabled aria-pressed="false">画面を一緒に見る</button>
+    <button id="pc" disabled aria-pressed="false">PC と話す</button>
+  </div>
+</section>
+<section class="card">
+  <h2>設定</h2>
+  <div class="switches">
+    <label class="switch"><input type="checkbox" id="mute"> 休止</label>
+    <label class="switch"><input type="checkbox" id="on" checked> 自発発話</label>
+    <label class="switch"><input type="checkbox" id="radio"> ラジオ</label>
+  </div>
+  <div class="grid">
+    <label class="field">沈黙秒数 <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
+    <label class="field">静音開始 <input type="time" id="quiet_start" value="23:00"></label>
+    <label class="field">静音終了 <input type="time" id="quiet_end" value="07:00"></label>
+    <label class="field" id="persona_label" hidden>ペルソナ <select id="persona"></select></label>
+    <label class="field" id="speaker_label" hidden>声 <select id="speaker"></select></label>
+  </div>
+  <label class="volume">音量 <input type="range" id="volume" min="0" max="200" step="5" value="100"> <span id="volume_text">100%</span></label>
+</section>
+<section class="card" id="links_box" hidden>
+  <h2>URL</h2>
+  <ul id="links"></ul>
+</section>
+</main>
 <script src="worklet.js"></script>
 <script src="player.js"></script>
 <script src="client.js"></script>
@@ -143,7 +255,7 @@
       });
       client = C.createClient({
         port, WebSocketCtor: WebSocket, player,
-        onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); },
+        onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); $('state').dataset.state = m.state; },
         onError: (m) => showError(`[${m.code}] ${m.message}`, m.code),
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
@@ -153,7 +265,7 @@
           if (client) client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg, thumb: r.thumb } : { t: 'snap', id: m.id, reason: r.reason });
         },
         onOpen: () => { showError('', null); pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
-        onClose: () => { $('state').textContent = '再接続中…'; $('search').textContent = ''; },
+        onClose: () => { $('state').textContent = '再接続中…'; $('state').dataset.state = 'offline'; $('search').textContent = ''; },
       });
       await C.startCapture({
         getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
@@ -174,6 +286,9 @@
     $('screen').textContent = screen ? '画面を見るのをやめる' : '画面を一緒に見る';
     $('pc').textContent = pc ? 'PC と話すのをやめる' : 'PC と話す';
     $('pc').disabled = !client;
+    $('drama').setAttribute('aria-pressed', String(drama !== null)); // 使用中のモードのボタンを強調する (CSS)
+    $('screen').setAttribute('aria-pressed', String(screen !== null));
+    $('pc').setAttribute('aria-pressed', String(pc));
     $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています')
       : pc ? 'PC と会話中 (スピーカーで)' : '';
     $('drama').disabled = !client || screen !== null; // 共有は 1 つずつ
