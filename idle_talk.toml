@@ -133,3 +133,9 @@ follow_window = true
 exclude = ["1Password", "Bitwarden", "KeePass"]  # follow_window でタイトルにこの語を含むウィンドウは撮らない
 width = 1280          # follow_window で撮る画像の幅の上限 (320〜1280、高さは 16:9)。1280x720 で約 400 トークン・応答 3 秒前後
 color_bits = 5        # follow_window の PNG の色数 (各色 4〜8 ビット)。5 で文字は読めたままサイズ約半分、8 で減らさない
+
+[pc]
+# PC と話すモード: 画面の「PC と話す」で、スピーカーで鳴る別の音声 AI (ChatGPT など) とマイクとスピーカーで話す。
+# AI の声はブラウザではなく idle-talk がスピーカーに鳴らす (ブラウザが鳴らすと、ブラウザの ChatGPT のエコー除去に消されるため)。
+# 鳴らすのに Python の sounddevice を使う (pip install sounddevice)。無ければモードは始まらない。マイクで聞いた発言は talk.log に PC: で残す
+monitor = ""        # AI の声を鳴らす出力機器の名前 (部分一致。空なら Windows の既定の再生機器)

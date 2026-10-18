@@ -410,3 +410,17 @@ def load_screen(path: str | Path = SETTINGS_FILE) -> Screen:
             if type(v) is not int or not lo <= v <= hi:
                 raise ValueError(f"[screen].{k} must be an int in [{lo}, {hi}]: {v!r}")
     return Screen(**raw)
+
+
+class Pc(NamedTuple):
+    """[pc]: PC と話すモード (スピーカーで鳴る別の音声 AI と、マイクとスピーカーで話す)。AI の声は Director が鳴らす。"""
+    monitor: str = ""  # AI の声を鳴らす出力機器の名前 (部分一致)。空なら Windows の既定の再生機器
+
+
+def load_pc(path: str | Path = SETTINGS_FILE) -> Pc:
+    """[pc] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "pc", Pc._fields)
+    v = raw.get("monitor", "")
+    if type(v) is not str or len(v) > 100:
+        raise ValueError(f"[pc].monitor must be a string of up to 100 chars: {v!r}")
+    return Pc(**raw)

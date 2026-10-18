@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>partner probe (相手モードの確認)</title>
+<style>
+body { font-family: sans-serif; max-width: 760px; margin: 1em auto; }
+textarea { width: 100%; height: 4em; }
+.meter { font-family: monospace; }
+</style>
+</head>
+<body>
+<h1>相手モードの確認: VB-CABLE に声を流す</h1>
+<p>http://127.0.0.1:8000/partner_probe.html で開く。AivisSpeech が動いている必要がある。</p>
+<ol>
+  <li>「機器を探す」で CABLE Input と CABLE Output を探す (マイクの許可を求められたら許可する)。</li>
+  <li>「CABLE に流す」で文章を合成して CABLE Input に流す。下のメーターで、CABLE Output に届いた音の大きさを見る。
+    <ul>
+      <li>素: エコー除去なしで CABLE Output を録った大きさ。</li>
+      <li>AEC: エコー除去ありで録った大きさ (ChatGPT のタブのマイクに近い)。素より大きく下がれば、Chrome のエコー除去が idle-talk の声を消している。</li>
+    </ul>
+  </li>
+  <li>ChatGPT の音声会話のマイクを CABLE Output にして同じ操作をし、ChatGPT が答えるかを見る。</li>
+</ol>
+<p><button id="find">機器を探す</button> <span id="devs"></span></p>
+<p>声: <select id="speaker"></select> スピーカーへ: <select id="local"><option value="none">流さない</option><option value="default" selected>既定 (ctx.destination)</option><option value="explicit">機器を指定 (setSinkId)</option></select> <select id="spk"></select></p>
+<textarea id="text">こんにちは。はじめまして。今日はどんな一日でしたか？あなたの好きな食べ物も教えてください。</textarea>
+<p><button id="play" disabled>CABLE に流す</button></p>
+<p class="meter">素 : <span id="raw">-</span><br>AEC: <span id="aec">-</span></p>
+<pre id="out"></pre>
+<script>
+(() => {
+  const TTS = 'http://127.0.0.1:10101';
+  const $ = (id) => document.getElementById(id);
+  const log = (s) => { $('out').textContent += s + '\n'; };
+  let cableIn = null, cableOut = null, ctx = null;
+  const peaks = { raw: 0, aec: 0 };
+
+  async function loadSpeakers() {
+    try {
+      const list = await (await fetch(TTS + '/speakers')).json();
+      for (const sp of list) for (const st of sp.styles) {
+        const o = document.createElement('option');
+        o.value = st.id; o.textContent = `${sp.name} (${st.name})`;
+        $('speaker').appendChild(o);
+      }
+    } catch (e) { log('AivisSpeech に繋がらない: ' + e); }
+  }
+
+  // CABLE Output を録り、RMS を dBFS で出し続ける (区間の最大値も覚える)
+  async function meter(key, aec) {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      deviceId: { exact: cableOut.deviceId },
+      echoCancellation: aec, noiseSuppression: aec, autoGainControl: false } });
+    const src = ctx.createMediaStreamSource(stream);
+    const an = ctx.createAnalyser(); an.fftSize = 2048;
+    src.connect(an);
+    const buf = new Float32Array(an.fftSize);
+    setInterval(() => {
+      an.getFloatTimeDomainData(buf);
+      let s = 0; for (const v of buf) s += v * v;
+      const db = 10 * Math.log10(s / buf.length + 1e-12);
+      peaks[key] = Math.max(peaks[key], db);
+      $(key).textContent = `${db.toFixed(1)} dBFS (流した間の最大 ${peaks[key].toFixed(1)})`;
+    }, 100);
+  }
+
+  $('find').onclick = async () => {
+    try {
+      const tmp = await navigator.mediaDevices.getUserMedia({ audio: true }); // 機器名を読むための許可
+      tmp.getTracks().forEach((t) => t.stop());
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      cableIn = devs.find((d) => d.kind === 'audiooutput' && d.label.includes('CABLE Input'));
+      cableOut = devs.find((d) => d.kind === 'audioinput' && d.label.includes('CABLE Output'));
+      for (const d of devs.filter((d) => d.kind === 'audiooutput' && !d.label.includes('CABLE') && d.deviceId !== 'default' && d.deviceId !== 'communications')) {
+        const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label; $('spk').appendChild(o);
+      }
+      $('devs').textContent = `出力: ${cableIn ? cableIn.label : 'なし'} / 入力: ${cableOut ? cableOut.label : 'なし'}`;
+      if (!cableIn || !cableOut) { log('CABLE が見つからない'); return; }
+      if (!('setSinkId' in HTMLMediaElement.prototype)) { log('このブラウザは setSinkId に未対応'); return; }
+      ctx = new AudioContext();
+      await meter('raw', false);
+      await meter('aec', true);
+      $('play').disabled = false;
+      log('準備完了');
+    } catch (e) { log('error: ' + e); }
+  };
+
+  $('play').onclick = async () => {
+    try {
+      const sp = $('speaker').value, text = $('text').value;
+      const q = await (await fetch(`${TTS}/audio_query?text=${encodeURIComponent(text)}&speaker=${sp}`, { method: 'POST' })).json();
+      const wav = await (await fetch(`${TTS}/synthesis?speaker=${sp}`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(q) })).arrayBuffer();
+      const audioBuf = await ctx.decodeAudioData(wav);
+      // 相手モードと同じ経路: AudioContext → MediaStreamDestination → <audio>.setSinkId(CABLE Input)
+      const dest = ctx.createMediaStreamDestination();
+      const el = new Audio();
+      el.srcObject = dest.stream;
+      await el.setSinkId(cableIn.deviceId);
+      await el.play();
+      const s = ctx.createBufferSource();
+      s.buffer = audioBuf;
+      s.connect(dest);
+      const mode = $('local').value;
+      let el2 = null;
+      if (mode === 'default') s.connect(ctx.destination);
+      if (mode === 'explicit') { // 別の <audio> で、既定ではなく機器 ID を指定してスピーカーに流す
+        const d2 = ctx.createMediaStreamDestination();
+        el2 = new Audio(); el2.srcObject = d2.stream;
+        await el2.setSinkId($('spk').value); await el2.play();
+        s.connect(d2);
+      }
+      peaks.raw = -120; peaks.aec = -120;
+      s.onended = () => {
+        if (el2) setTimeout(() => el2.pause(), 300);
+        log(`[${mode}] 流し終えた ${audioBuf.duration.toFixed(1)}s: 素の最大 ${peaks.raw.toFixed(1)} dBFS / AEC の最大 ${peaks.aec.toFixed(1)} dBFS`);
+        setTimeout(() => el.pause(), 300);
+      };
+      s.start();
+      log('流している…');
+    } catch (e) { log('error: ' + e); }
+  };
+
+  loadSpeakers();
+})();
+</script>
+</body>
+</html>

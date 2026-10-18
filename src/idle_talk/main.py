@@ -18,12 +18,13 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_asr, load_drama, load_screen, load_search, load_topics, load_vad, load_voice, load_voice_id)
+                     load_asr, load_drama, load_pc, load_screen, load_search, load_topics, load_vad, load_voice, load_voice_id)
 from .director import IdleTalkDirector
 from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, has_vision, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
+from .monitor import open_device
 from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
@@ -165,6 +166,8 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                                                       min_threshold=vad.min_threshold),
                                    cfg.MIN_SEG)
     director.snap_dir = data_dir / SNAP_DIR
+    pc = load_pc(args.config)  # PC と話すモード: AI の声はモニターが [pc].monitor の機器に鳴らす
+    director.open_monitor = lambda: open_device(pc.monitor)
     screen = load_screen(args.config)
     director.screen = ScreenWatcher(screen)
     if screen.follow_window:  # ブラウザの共有の代わりに前面のウィンドウを撮る (設計書 6.7)

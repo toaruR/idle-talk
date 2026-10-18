@@ -34,6 +34,7 @@ from .ingress import Ingress
 from .interrupt import judge
 from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, parse_extracted, remember
 from .metrics import MetricsRecorder
+from .monitor import Monitor
 from .persona import PersonaBook
 from .pipeline import ResponsePipeline
 from .protocol import is_drama, pack_down_chunk
@@ -240,6 +241,11 @@ class IdleTalkDirector:
         self.screen_on = False
         # [screen].follow_window なら前面のウィンドウを撮る (wincap.WindowCapture.grab。main が結線)。None ならブラウザの共有
         self.screen_capture: Callable[[], object] | None = None
+        # PC と話すモード。画面の「PC と話す」で ui.pc が on。AI の声はブラウザではなくモニターが鳴らす
+        self.pc_on = False
+        self.open_monitor: Callable[[], object] | None = None  # モニターの出力機器を開く (main が結線)
+        self.monitor: Monitor | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -323,6 +329,14 @@ class IdleTalkDirector:
 
     # ---- 送信 ----
     def _emit(self, msg: dict) -> None:
+        if self.monitor is not None:  # PC と話すモード: AI の声はモニターが鳴らすので、止める・音量の指示もモニターへ
+            t = msg.get("t")
+            if t == "cancel":
+                self.monitor.cancel()
+            elif t == "duck":
+                self.monitor.duck(msg["gain"])
+            elif t == "resume":
+                self.monitor.resume()
         if self.core.conn is not None:
             self.core.conn.send_text(json.dumps(msg, ensure_ascii=False))
 
@@ -334,12 +348,16 @@ class IdleTalkDirector:
         """再生中 1 + 先読み DOWN_LOOKAHEAD を超えないよう、再生終了の報告を待って次を送る。旧世代は捨てる。"""
         cur = self.epoch.current
         self._down_sent = {k for k in self._down_sent if k[0] == cur}  # 旧世代の報告はサーバで捨てられ届かない
+        monitor = self.monitor  # PC と話すモードではブラウザではなくモニターに渡す
         while self._down_q and len(self._down_sent) <= DOWN_LOOKAHEAD:
             ep, utt, chunk, pcm = self._down_q.popleft()
-            if ep != cur or self.core.conn is None:
+            if ep != cur or (monitor is None and self.core.conn is None):
                 continue
             self._down_sent.add((ep, utt, chunk))  # 送出前に登録 (送出中に再生終了の報告が来ても取りこぼさない)
-            self.core.conn.send_bytes(pack_down_chunk(ep, utt, chunk, pcm))
+            if monitor is not None:
+                monitor.play(ep, utt, chunk, pcm)
+            else:
+                self.core.conn.send_bytes(pack_down_chunk(ep, utt, chunk, pcm))
 
     def _on_hello(self) -> None:
         ctx = self.fsm.ctx
@@ -417,7 +435,7 @@ class IdleTalkDirector:
             if not was_speaking and self.ingress._buf is not None:
                 spont_playing = self.spontaneous.pending and self._cur is not None
                 self._speech_in_ai = before in (State.AI_PLAYING, State.INTERRUPT_CHECK) or spont_playing
-            if self.backchannel is not None:
+            if self.backchannel is not None and not self.pc_on:  # PC と話すモード: 相槌は相手に届いて答えさせてしまう
                 self._bc_track(1)
 
     def _on_ui(self, settings: dict) -> None:
@@ -435,6 +453,8 @@ class IdleTalkDirector:
                 self.personas.select(settings["persona"])
             except ValueError as e:
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
+        if bool(settings.get("pc")) != self.pc_on:
+            self._set_pc(bool(settings.get("pc")))
         if bool(settings.get("drama")) != self.drama_on:
             self._set_drama(bool(settings.get("drama")))
         if bool(settings.get("screen")) != self.screen_on:
@@ -486,6 +506,10 @@ class IdleTalkDirector:
         if self.fsm.ctx.state is State.USER_SPEAKING and self.ingress._buf is None:
             # T_confirm 超過で割り込み扱いになった後に届いた認識結果: 発話は終わっているので終話確認へ進める
             self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=self.cfg.MIN_SEG))
+        if self.pc_on:  # PC と話すモード: マイクで聞いた相手は PC の音声 AI。名前の質問と記憶の抽出はしない
+            talk_log.info("PC: %s", text)
+            self.store.add_turn(self.now_ms(), "pc", text, 0, None, uid)
+            return True
         talk_log.info("USER: %s", text)
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
         if self._ask_sid is not None and self._speaker == self._ask_sid:  # 名前を尋ねた相手の返事
@@ -707,6 +731,8 @@ class IdleTalkDirector:
             return self._drama_tick(idle)
         if self.screen_on:  # 画面を見ている間も同じく、無操作休止と普段の自発発話の代わりに画面の一言だけ
             return self._screen_tick(idle)
+        if self.pc_on:  # PC と話すモード: 会話は PC の音声 AI と続くので、無操作休止も普段の自発発話もしない
+            return None
         if idle and not self.spontaneous.radio and now - self._last_op >= self.cfg.IDLE_TIMEOUT:  # ラジオは聞き流し前提
             self.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
             self._pump()
@@ -1057,6 +1083,58 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
+    # ---- PC と話すモード: AI の声を Chrome の外 (モニター) から鳴らし、スピーカーとマイクで PC の音声 AI と話す ----
+    def _set_pc(self, on: bool) -> None:
+        """AI の声の出口をモニターに切り替える。相手 (ブラウザの ChatGPT 等) のエコー除去は、Chrome が鳴らした声を
+        別のタブの音でも消したが、Chrome の外から鳴らした声は消さなかった (実測 2026-10-18)。"""
+        if on:
+            if self.open_monitor is None:
+                self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": "pc: モニターの出力機器が設定されていません"})
+                return
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._loop = None
+            monitor = Monitor(self._monitor_report, self.epoch.is_current, self.open_monitor)
+            try:
+                monitor.start()
+            except OSError as e:  # 機器が開けない・sounddevice が無い: モードを始めない
+                log.warning("pc mode not started: %s", e)
+                self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": f"pc: {e}"[:200]})
+                return
+            self._switch_output()
+            self.monitor = monitor
+        else:
+            self._switch_output()
+            if self.monitor is not None:
+                self.monitor.stop()
+                self.monitor = None
+        self.pc_on = on
+        self._cancel_memory()
+        log.info("pc mode %s", "on" if on else "off")
+        self._bc_record("pc_mode", {"on": on})
+
+    def _switch_output(self) -> None:
+        """出口を切り替える前に、鳴っている途中の声を止める (切り替えると前の出口の再生の報告が来ない)。"""
+        if self.spontaneous.pending:
+            self._cancel_spontaneous()
+        if self.fsm.ctx.state in (State.PREPARING, State.AI_PLAYING, State.INTERRUPT_CHECK):
+            self._act_cancel_generation(None)
+            self._cancel_path("interrupt")
+            self.fsm.ctx = replace(self.fsm.ctx, state=State.IDLE, epoch=self.epoch.current)
+            self._send_state(self.fsm.ctx)
+
+    def _monitor_report(self, msg: dict) -> None:
+        """モニターの再生スレッドから: イベントループに渡す。ブラウザの playback と同じく旧世代は捨てる。"""
+        def deliver() -> None:
+            if self.epoch.is_current(msg["epoch"]):
+                self._on_playback(msg)
+                self._pump()
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(deliver)
+        else:
+            deliver()
+
     def _pick_topic(self) -> tuple[str, dict | None]:
         """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
         cards = select_cards(self.store, self.now_ms(), limit=2)
@@ -1084,6 +1162,8 @@ class IdleTalkDirector:
 
     def _start_memory(self) -> None:
         """応答と LLM を取り合わないよう、再生完了 (IDLE) 後にだけ走らせる。利用者発話で取消し、次回まとめて再試行する。"""
+        if self.pc_on:  # PC と話すモード: PC の発言は利用者の事実ではないので抜き出さない
+            return
         if not (self._mem_pending or self._name_pending) or (self._mem_task is not None and not self._mem_task.done()):
             return
         self._mem_stop = threading.Event()
@@ -1127,7 +1207,7 @@ class IdleTalkDirector:
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:
-        messages = self._chat_messages(ask=True)
+        messages = self._chat_messages(ask=not self.pc_on)  # PC と話すモード: 名前の質問は相手に答えさせてしまう
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current

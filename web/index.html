@@ -8,6 +8,7 @@
 <button id="start">開始</button>
 <button id="drama" disabled>ドラマを一緒に見る</button>
 <button id="screen" disabled>画面を一緒に見る</button>
+<button id="pc" disabled>PC と話す</button>
 <fieldset>
   <legend>設定</legend>
   <label><input type="checkbox" id="mute"> 休止</label>
@@ -36,6 +37,7 @@
   let client = null;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
+  let pc = false; // PC と話すモード (共有はしない。AI の声はサーバがスピーカーに鳴らす)
   let sink = null;
   let errorCode = null; // 表示中のサーバのエラーコード (一時的なものは再生が始まったら消す)
   function showError(text, code) { $('error').textContent = text; errorCode = code; }
@@ -89,6 +91,7 @@
       quiet_end: $('quiet_end').value,
       drama: drama !== null,
       screen: screen !== null,
+      pc,
     };
     if ($('speaker').options.length) ui.speaker = parseInt($('speaker').value, 10);
     if ($('persona').options.length) ui.persona = $('persona').value;
@@ -156,8 +159,7 @@
         getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
         AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
       });
-      $('drama').disabled = false;
-      $('screen').disabled = false;
+      showDrama();
     } catch (e) {
       showError(String(e), null);
       if (client) client.close();
@@ -170,7 +172,10 @@
   function showDrama() {
     $('drama').textContent = drama ? 'ドラマを見るのをやめる' : 'ドラマを一緒に見る';
     $('screen').textContent = screen ? '画面を見るのをやめる' : '画面を一緒に見る';
-    $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています') : '';
+    $('pc').textContent = pc ? 'PC と話すのをやめる' : 'PC と話す';
+    $('pc').disabled = !client;
+    $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています')
+      : pc ? 'PC と会話中 (スピーカーで)' : '';
     $('drama').disabled = !client || screen !== null; // 共有は 1 つずつ
     $('screen').disabled = !client || drama !== null;
   }
@@ -211,6 +216,14 @@
     } catch (e) {
       showError(String(e), null);
     }
+  });
+
+  // PC と話すモード: スピーカーで鳴る別の音声 AI (ChatGPT など) と、マイクとスピーカーでそのまま話す。
+  // AI の声はサーバ (Chrome の外) が鳴らす。ブラウザが鳴らすと、相手のエコー除去に消されるため
+  $('pc').addEventListener('click', () => {
+    pc = !pc;
+    showDrama();
+    pushUi();
   });
 })();
 </script>
