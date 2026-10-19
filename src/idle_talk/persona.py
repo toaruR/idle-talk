@@ -1,4 +1,4 @@
-"""ペルソナ (設計書 6.6)。personas.toml の人物設定を読み、画面で選んだものを system プロンプトの頭に置く。
+"""ペルソナ (設計書 6.6)。personas.toml の人物設定と共通ルールを読み、system プロンプトに使う。
 
 ファイルは更新時刻が変わったら読み直す (保存すれば再起動なしで次の応答から効く)。
 不正な内容は警告して前の内容を使い続ける。選択肢の増減 (画面の一覧) は再起動後に反映される。
@@ -13,12 +13,6 @@ from typing import NamedTuple
 log = logging.getLogger("idle_talk.persona")
 
 PERSONAS_FILE = "personas.toml"
-# 全ペルソナ共通の話し方の決まり。人物設定の後ろに付ける。
-# 切り替え直後は履歴に前のペルソナの口調が残るので、4B が真似ないよう人物設定を優先させる
-STYLE_RULES = ("話し言葉で 2〜4 文ほど自然に返答してください。"
-               "相づちだけで終わらせず、自分の感想や小さな体験談を添え、ときどき質問や関連する新しい話題を自分から振ってください。"
-               "口調と一人称は上の人物設定に従い、これまでの会話の口調には合わせないでください。"
-               "箇条書きや記号は使わないでください。")
 ID_MAX = 64  # ui.persona の最大長 (protocol の MESSAGE_SCHEMA と一致させる)
 
 
@@ -35,6 +29,8 @@ def parse_personas(raw: dict) -> tuple[list[Persona], str]:
     """personas.toml の中身 -> (ペルソナ一覧 (ファイル順), 既定の id)。不正なら ValueError。"""
     raw = dict(raw)
     default = raw.pop("default", None)
+    if not isinstance(raw.pop("style_rules", ""), str):
+        raise ValueError("style_rules must be a string")
     out: list[Persona] = []
     for pid, t in raw.items():
         if not isinstance(t, dict):
@@ -66,11 +62,14 @@ class PersonaBook:
         self.path = Path(path) if path is not None else None
         self.personas: list[Persona] = [DEFAULT]
         self.default_id = DEFAULT.id
+        self.style_rules = ""
         self._mtime: float | None = None
         if self.path is not None and self.path.is_file():
             self._mtime = self._stat()
             with self.path.open("rb") as f:  # 起動時の不正は ValueError / TOMLDecodeError で止める
-                self.personas, self.default_id = parse_personas(tomllib.load(f))
+                raw = tomllib.load(f)
+                self.personas, self.default_id = parse_personas(raw)
+                self.style_rules = raw.get("style_rules", "").strip()
         self.current_id = self.default_id
 
     def _stat(self) -> float | None:
@@ -86,11 +85,14 @@ class PersonaBook:
         self._mtime = mtime
         try:
             with self.path.open("rb") as f:
-                personas, default_id = parse_personas(tomllib.load(f))
+                raw = tomllib.load(f)
+                personas, default_id = parse_personas(raw)
+                style_rules = raw.get("style_rules", "").strip()
         except (ValueError, OSError, tomllib.TOMLDecodeError) as e:
             log.warning("personas not reloaded (keeping previous): %s", e)
             return False
         self.personas, self.default_id = personas, default_id
+        self.style_rules = style_rules
         if self.current_id not in {p.id for p in personas}:  # 選んでいたものが消えた
             self.current_id = default_id
         log.info("personas reloaded: %s", [p.id for p in personas])
@@ -113,7 +115,8 @@ class PersonaBook:
         return self.get(self.current_id) or self.personas[0]
 
     def system_prompt(self) -> str:
-        return self.current.prompt + "\n" + STYLE_RULES
+        prompt = self.current.prompt  # 更新時刻の確認と再読み込みを先に行う
+        return prompt + ("\n" + self.style_rules if self.style_rules else "")
 
     def choices(self) -> list[dict]:
         """画面の選択肢 (/config.json の personas)。"""

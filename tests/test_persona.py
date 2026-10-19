@@ -11,13 +11,14 @@ from mocks_browser import MockBrowser
 
 from idle_talk.clients import AsrClient
 from idle_talk.director import IdleTalkDirector
-from idle_talk.persona import DEFAULT, STYLE_RULES, PersonaBook, parse_personas
+from idle_talk.persona import DEFAULT, PersonaBook, parse_personas
 from idle_talk.protocol import validate_message
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
 
 TOML = """
 default = "b"
+style_rules = "共通の話し方です。"
 [a]
 name = "エー"
 prompt = "あなたはエーです。"
@@ -44,6 +45,10 @@ def test_parse_keeps_order_and_default():
     '[a]\nprompt = ""\n',
     '[a]\nprompt = "p"\nspeaker = 1\n',  # 未知キー (声は画面の「声」で選ぶ)
     f'["{"x" * 65}"]\nprompt = "p"\n',
+    'style_rules = 1\n[a]\nprompt = "p"\n',
+    'style_rules = false\n[a]\nprompt = "p"\n',
+    'style_rules = []\n[a]\nprompt = "p"\n',
+    'style_rules = {}\n[a]\nprompt = "p"\n',
 ])
 def test_parse_rejects(text):
     with pytest.raises(ValueError):
@@ -53,7 +58,7 @@ def test_parse_rejects(text):
 def test_book_without_file_uses_builtin(tmp_path):
     book = PersonaBook(tmp_path / "none.toml")
     assert book.current == DEFAULT and book.choices() == [{"id": "default", "name": DEFAULT.name}]
-    assert book.system_prompt() == DEFAULT.prompt + "\n" + STYLE_RULES
+    assert book.system_prompt() == DEFAULT.prompt
 
 
 def test_book_select_and_reload(tmp_path):
@@ -63,7 +68,7 @@ def test_book_select_and_reload(tmp_path):
     assert book.current.id == "b"
     assert book.choices() == [{"id": "a", "name": "エー"}, {"id": "b", "name": "b"}]
     book.select("a")
-    assert book.system_prompt().startswith("あなたはエーです。\n")
+    assert book.system_prompt() == "あなたはエーです。\n共通の話し方です。"
     with pytest.raises(ValueError):
         book.select("zz")
     assert book.current.id == "a"
@@ -76,9 +81,45 @@ def test_book_select_and_reload(tmp_path):
 
 
 def test_shipped_personas_file_is_valid():
-    personas, default = parse_personas(tomllib.loads(
-        (Path(__file__).resolve().parents[1] / "personas.toml").read_text(encoding="utf-8")))
+    path = Path(__file__).resolve().parents[1] / "personas.toml"
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    personas, default = parse_personas(raw)
     assert personas and default in {p.id for p in personas}
+    book = PersonaBook(path)
+    assert raw["style_rules"].strip()
+    assert book.system_prompt() == book.current.prompt + "\n" + raw["style_rules"].strip()
+
+
+@pytest.mark.parametrize("header", ["", 'style_rules = ""\n', 'style_rules = "  \\n  "\n'])
+def test_omitted_or_empty_style_rules_uses_persona_only(tmp_path, header):
+    path = tmp_path / "personas.toml"
+    path.write_text(header + '[a]\nprompt = "人物設定"\n', encoding="utf-8")
+    assert PersonaBook(path).system_prompt() == "人物設定"
+
+
+def test_style_rules_reload_keeps_selection_and_rejects_invalid_config(tmp_path):
+    path = tmp_path / "personas.toml"
+    write(path, TOML, 1)
+    book = PersonaBook(path)
+    assert book.system_prompt() == "あなたはビーです。\n共通の話し方です。"
+    book.select("a")
+
+    updated = TOML.replace("共通の話し方です。", "新しい共通ルールです。")
+    write(path, updated, 2)
+    assert book.system_prompt() == "あなたはエーです。\n新しい共通ルールです。"
+    assert book.current_id == "a"
+
+    invalid = TOML.replace('style_rules = "共通の話し方です。"', 'style_rules = []')
+    invalid = invalid.replace('default = "b"', 'default = "a"').replace("あなたはエーです。", "変更済み")
+    write(path, invalid, 3)
+    assert book.system_prompt() == "あなたはエーです。\n新しい共通ルールです。"
+    assert book.default_id == "b" and book.current_id == "a"
+
+    write(path, TOML.replace('prompt = "あなたはエーです。"', 'prompt = ""'), 4)
+    assert book.system_prompt() == "あなたはエーです。\n新しい共通ルールです。"
+
+    write(path, TOML.replace('style_rules = "共通の話し方です。"\n', ''), 5)
+    assert book.system_prompt() == "あなたはエーです。"
 
 
 def test_ui_persona_schema():
@@ -113,7 +154,7 @@ def test_ui_persona_switches_system_prompt(tmp_path):
             while not seen:
                 assert asyncio.get_running_loop().time() < end, "timeout"
                 await asyncio.sleep(0.01)
-            assert seen[0].startswith("あなたはエーです。\n" + STYLE_RULES)
+            assert seen[0].startswith("あなたはエーです。\n共通の話し方です。")
         finally:
             d.close()
             store.close()
