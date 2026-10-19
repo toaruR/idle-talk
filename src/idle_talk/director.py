@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
 from .config import Config, Drama, Screen
-from .drama import DramaListener, is_ai_voice
+from .drama import LEVEL_VOICE_RATIO, BleedMeter, DramaListener, is_ai_voice
 from .echo_chain import CANCEL_KIND
 from .epoch import Epoch
 from .errors import ERR_OUT_OF_RANGE
@@ -43,7 +43,7 @@ from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
 from .topics import mark_used, select_cards
-from .vad import EnergyVad, Vad
+from .vad import EnergyVad, Vad, rms
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
                        name_messages, parse_name, speaker_prompt)
 from .web_search import X_TREND, link_items
@@ -71,9 +71,10 @@ FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 DOWN_LOOKAHEAD = 1
 MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
 ECHO_SUPPRESSED_KIND = "echo_suppressed"  # AI 再生中に拾った自声の認識結果を捨てた 1 回 = 1 行
-PC_ECHO_KIND = "pc_echo_suppressed"  # PC と話すモードで AI の声の最中に始まった発話を捨てた 1 回 = 1 行
+PC_ECHO_KIND = "pc_echo_suppressed"  # ブラウザ補正なしモードで AI の声の最中に始まった発話を捨てた 1 回 = 1 行
 # ドラマモード (設計書 6.5)
 DRAMA_ECHO_KIND = "drama_echo_suppressed"  # マイクが拾ったドラマの台詞を捨てた 1 回 = 1 行
+DRAMA_VOICE_MIN = 0.45  # ドラマの音と重なった発話は、名前の分かった相手の声とこれ未満の類似度なら回り込み (暫定。本人 0.50〜0.56、ドラマ 0.15〜0.43)
 DRAMA_SELF_KIND = "drama_self_suppressed"  # 共有した音に入った AI の声をドラマの台詞から捨てた 1 回 = 1 行
 DRAMA_CONTEXT_PROMPT = "\n利用者と一緒にドラマを見ています。直近の台詞 (音声認識なので誤りを含みます):\n{lines}\n"
 # 「なし」の代わりに「聞こえなくて分からない」と言うことがある (実機 2026-10-14)。言っても楽しくないので黙る
@@ -227,6 +228,12 @@ class IdleTalkDirector:
         self.drama_on = False
         self._drama_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drama-asr")
         self._drama_uid = 0
+        self._drama_issued = 0  # 認識に回したドラマの区間の数
+        self._drama_settled = 0  # そのうち結果 (失敗・幻聴も含む) が出た数
+        self._speech_bled = False  # 現在のマイクの発話がドラマの音と重なった
+        self._transcript_bleed: tuple[int | None, bool] | None = None  # 今 _on_transcript に渡している発話の重なり (_take_bleed)
+        self.bleed_meter = BleedMeter(clock)  # タブの音量から見積もったマイクへの回り込み
+        self.drama_mic = True  # ドラマモード中もマイクを聞く ([drama].mic、画面の「ドラマ中もマイク」)
         self._digest_task: asyncio.Task | None = None  # 台詞をあらすじメモに要約する裏の LLM 呼び出し
         self._digest_stop = threading.Event()
         # 短い認識結果の判定 ([asr].short_chars / short_reply_s。main が設定から差し替える)
@@ -242,12 +249,12 @@ class IdleTalkDirector:
         self.screen_on = False
         # [screen].follow_window なら前面のウィンドウを撮る (wincap.WindowCapture.grab。main が結線)。None ならブラウザの共有
         self.screen_capture: Callable[[], object] | None = None
-        # PC と話すモード。画面の「PC と話す」で ui.pc が on。AI の声はブラウザではなくモニターが鳴らす
+        # ブラウザ補正なしモード。画面の「ブラウザ補正なし」で ui.pc が on。AI の声はブラウザではなくモニターが鳴らす
         self.pc_on = False
         self.open_monitor: Callable[[], object] | None = None  # モニターの出力機器を開く (main が結線)
         self.monitor: Monitor | None = None
         self.open_mic: Callable[[], object] | None = None  # マイクの入力機器を開く (main が結線)。None ならブラウザのマイクのまま
-        self.mic: MicCapture | None = None  # PC と話すモード中のマイク。動いている間はブラウザのマイクを捨てる
+        self.mic: MicCapture | None = None  # ブラウザ補正なしモード中のマイク。動いている間はブラウザのマイクを捨てる
         self._loop: asyncio.AbstractEventLoop | None = None
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
@@ -281,7 +288,7 @@ class IdleTalkDirector:
             meta = {"host": socket.gethostname() or "unknown", "started_at": self._m_started_at,
                     "ended_at": ended, "app_commit": self.app_commit, "sample_count": n}
             self.store.add_event(ended, self.epoch.current, "run_meta", json.dumps(meta))
-        for dev in (self.mic, self.monitor):  # PC と話すモードの機器を閉じる
+        for dev in (self.mic, self.monitor):  # ブラウザ補正なしモードの機器を閉じる
             if dev is not None:
                 dev.stop()
         self._asr_pool.shutdown(wait=False, cancel_futures=True)
@@ -335,7 +342,7 @@ class IdleTalkDirector:
 
     # ---- 送信 ----
     def _emit(self, msg: dict) -> None:
-        if self.monitor is not None:  # PC と話すモード: AI の声はモニターが鳴らすので、止める指示もモニターへ
+        if self.monitor is not None:  # ブラウザ補正なしモード: AI の声はモニターが鳴らすので、止める指示もモニターへ
             # duck は渡さない。モニターの声はマイクのエコー除去で消えず、自分の声で毎回音量が下がった (実機 2026-10-19)。
             # 割り込みは認識結果で判定し、語があれば cancel で止まる
             if msg.get("t") == "cancel":
@@ -351,7 +358,7 @@ class IdleTalkDirector:
         """再生中 1 + 先読み DOWN_LOOKAHEAD を超えないよう、再生終了の報告を待って次を送る。旧世代は捨てる。"""
         cur = self.epoch.current
         self._down_sent = {k for k in self._down_sent if k[0] == cur}  # 旧世代の報告はサーバで捨てられ届かない
-        monitor = self.monitor  # PC と話すモードではブラウザではなくモニターに渡す
+        monitor = self.monitor  # ブラウザ補正なしモードではブラウザではなくモニターに渡す
         while self._down_q and len(self._down_sent) <= DOWN_LOOKAHEAD:
             ep, utt, chunk, pcm = self._down_q.popleft()
             if ep != cur or (monitor is None and self.core.conn is None):
@@ -409,14 +416,58 @@ class IdleTalkDirector:
         except RuntimeError:  # ループ外 (同期テスト等): その場で実行
             done(work())
             return
+        bleed = self._take_bleed()
         fut = self._asr_pool.submit(work)
-        fut.add_done_callback(lambda f: loop.call_soon_threadsafe(self._asr_finished, f, done))
+        fut.add_done_callback(lambda f: loop.call_soon_threadsafe(self._asr_finished, f, done, bleed))
 
-    def _asr_finished(self, fut: Future, done: Callable[[object], None]) -> None:
+    def _take_bleed(self) -> tuple[int | None, bool] | None:
+        """終わった発話がドラマの音と重なっていれば (待つ区間, 音量で回り込みとみなしたか)。重なっていなければ None。"""
+        bled, self._speech_bled = self._speech_bled, False
+        voice = self.bleed_meter.take()
+        if not (bled and self.drama_on):
+            return None
+        echo = voice is not None and voice < LEVEL_VOICE_RATIO
+        log.info("mic over tab: voice frames %s%s", "-" if voice is None else f"{voice:.0%}",
+                 " (bleed)" if echo else "")  # LEVEL_VOICE_RATIO の調整用
+        # 音量で回り込みと決まらなければ、文字で比べるため重なった台詞の認識が出るまで待つ
+        return (None if echo else self.drama.closed + self.drama.seg_open()), echo
+
+    def _asr_finished(self, fut: Future, done: Callable[[object], None],
+                      bleed: tuple[int | None, bool] | None = None) -> None:
         if fut.cancelled():
             return
-        done(fut.result())
+        if bleed is not None and bleed[0] is not None:
+            asyncio.get_running_loop().create_task(self._after_drama(fut, done, bleed))
+            return
+        self._deliver(fut, done, bleed)
+
+    def _deliver(self, fut: Future, done: Callable[[object], None], bleed: tuple[int | None, bool] | None) -> None:
+        self._transcript_bleed = bleed
+        try:
+            done(fut.result())
+        finally:
+            self._transcript_bleed = None
         self._pump()
+
+    def _drama_wait_s(self) -> float:
+        """重なった台詞の認識を待つ上限。区間 (max_seg_s) の ASR の HTTP_TIMEOUT (区間長x2+2s)。"""
+        return 2 * self.drama.s.max_seg_s + 2
+
+    async def _after_drama(self, fut: Future, done: Callable[[object], None], bleed: tuple[int | None, bool]) -> None:
+        """マイクの認識が先に出ると、ドラマ側の台詞がまだ無く回り込みを捨てられなかった (実機 2026-10-19、
+        動画ビュワーの音は Chrome のエコー除去で消えない)。target 個目の区間が閉じ、それまでに回した認識が全部出てから渡す。"""
+        loop = asyncio.get_running_loop()
+        target, end, issued = bleed[0], loop.time() + self._drama_wait_s(), None
+        while self.drama_on and loop.time() < end:
+            if issued is None and self.drama.closed >= target:
+                issued = self._drama_issued
+            if issued is not None and self._drama_settled >= issued:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            if self.drama_on:
+                log.info("drama asr not settled in %.0fs: compare with current lines", self._drama_wait_s())
+        self._deliver(fut, done, bleed)
 
     def _on_up_audio(self, seq: int, pcm: bytes) -> None:
         if not self.core.hello_done:
@@ -424,11 +475,14 @@ class IdleTalkDirector:
         if is_drama(seq):  # 共有したタブの音: マイクの VAD・FSM・相槌・E6 には入れない
             if self.drama_on:
                 for i in range(0, len(pcm), FRAME_BYTES):
+                    self.bleed_meter.tab(rms(pcm[i:i + FRAME_BYTES]))
                     seg = self.drama.feed(pcm[i:i + FRAME_BYTES])
                     if seg is not None:
                         self._drama_asr(seg)
             return
-        if self.mic is not None:  # PC と話すモード: マイクは Python が録る (二重に聞かない)
+        if self.mic is not None:  # ブラウザ補正なしモード: マイクは Python が録る (二重に聞かない)
+            return
+        if self.drama_on and not self.drama_mic:  # ドラマを聞くだけ: 拾った台詞を話しかけと取らない
             return
         self._feed_mic(pcm)
 
@@ -443,7 +497,12 @@ class IdleTalkDirector:
             if not was_speaking and self.ingress._buf is not None:
                 spont_playing = self.spontaneous.pending and self._cur is not None
                 self._speech_in_ai = before in (State.AI_PLAYING, State.INTERRUPT_CHECK) or spont_playing
-            if self.backchannel is not None and not self.pc_on:  # PC と話すモード: 相槌は相手に届いて答えさせてしまう
+                self._speech_bled = False
+            if self.ingress._buf is not None and self.ingress.vad.bleed:
+                self._speech_bled = True
+            if self.drama_on:
+                self.bleed_meter.mic(rms(pcm[i:i + FRAME_BYTES]), self.ingress._buf is not None, self.ingress.vad.bleed)
+            if self.backchannel is not None and not self.pc_on:  # ブラウザ補正なしモード: 相槌は相手に届いて答えさせてしまう
                 self._bc_track(1)
 
     def _on_ui(self, settings: dict) -> None:
@@ -463,6 +522,8 @@ class IdleTalkDirector:
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
         if bool(settings.get("pc")) != self.pc_on:
             self._set_pc(bool(settings.get("pc")))
+        if "drama_mic" in settings:
+            self.drama_mic = bool(settings["drama_mic"])
         if bool(settings.get("drama")) != self.drama_on:
             self._set_drama(bool(settings.get("drama")))
         if bool(settings.get("screen")) != self.screen_on:
@@ -495,16 +556,17 @@ class IdleTalkDirector:
         if in_ai and self._is_echo(uid, text):
             return False
         if in_ai and self.pc_on and not is_stop_word(text, self.cfg):
-            # PC と話すモード: モニターの声はマイクのエコー除去で消えず、聞き違い (「嬉しいわ」→「うれしい」) は
+            # ブラウザ補正なしモード: モニターの声はマイクのエコー除去で消えず、聞き違い (「嬉しいわ」→「うれしい」) は
             # 文字の一致で捨てられずに割り込みになった (実機 2026-10-19)。AI の声の最中は停止語だけで止める
             log.info("pc echo discarded: utterance %d %r", uid, text)
             self.store.add_event(self.now_ms(), self.epoch.current, PC_ECHO_KIND,
                                  json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
-        if self.drama_on and self.drama.contains(text):  # スピーカーから回り込んだドラマの台詞
-            log.info("drama echo discarded: utterance %d %r", uid, text)
+        why = self._drama_echo(uid, text)
+        if why:  # スピーカーから回り込んだドラマの台詞
+            log.info("drama echo discarded (%s): utterance %d %r", why, uid, text)
             self.store.add_event(self.now_ms(), self.epoch.current, DRAMA_ECHO_KIND,
-                                 json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
+                                 json.dumps({"utterance_id": uid, "text": text, "by": why}, ensure_ascii=False))
             return False
         if self._out_of_context(in_ai, text):
             log.info("short transcript out of context discarded: utterance %d %r", uid, text)
@@ -521,7 +583,7 @@ class IdleTalkDirector:
         if self.fsm.ctx.state is State.USER_SPEAKING and self.ingress._buf is None:
             # T_confirm 超過で割り込み扱いになった後に届いた認識結果: 発話は終わっているので終話確認へ進める
             self.fsm.enqueue(Event(Ev.VAD_END, seg_ms=self.cfg.MIN_SEG))
-        if self.pc_on:  # PC と話すモード: マイクで聞いた相手は PC の音声 AI。名前の質問と記憶の抽出はしない
+        if self.pc_on:  # ブラウザ補正なしモード: マイクで聞いた相手は PC の音声 AI。名前の質問と記憶の抽出はしない
             talk_log.info("PC: %s", text)
             self.store.add_turn(self.now_ms(), "pc", text, 0, None, uid)
             return True
@@ -533,6 +595,22 @@ class IdleTalkDirector:
             self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text)]
         return True
 
+    def _drama_echo(self, uid: int, text: str) -> str | None:
+        """マイクの認識結果がドラマの回り込みなら理由 (level / text / voice)。ドラマの音と重なった発話だけ音量と声で見る。"""
+        if not self.drama_on:
+            return None
+        bleed = self._transcript_bleed
+        if bleed is not None and bleed[1]:
+            return "level"
+        if self.drama.contains(text, bleed is not None):
+            return "text"
+        if bleed is not None and self.voices is not None and self._voice is not None and self._voice[0] == uid:
+            score = self.voices.named_score(self._voice[1])
+            log.info("mic over tab: similarity to named speakers %s", "-" if score is None else f"{score:.2f}")
+            if score is not None and score < DRAMA_VOICE_MIN:
+                return "voice"
+        return None
+
     # ---- 話者識別 (設計書 6.4) ----
     def _on_voice(self, uid: int, emb: object) -> None:
         self._voice = (uid, emb)
@@ -542,7 +620,8 @@ class IdleTalkDirector:
         v, self._voice = self._voice, None
         if self.voices is None or v is None or v[0] != uid:
             return
-        sid = self.voices.identify(v[1], self.now_ms())
+        # ドラマの音と重なった発話からは新しい声を登録しない (ドラマの人物が名前なしで溜まった。2026-10-19)
+        sid = self.voices.identify(v[1], self.now_ms(), enroll=self._transcript_bleed is None)
         if sid != self._speaker:
             log.info("speaker changed: %s -> %s (%s)", self._speaker, sid, self.voices.name(sid) or "名前未登録")
         self._speaker = sid
@@ -746,7 +825,7 @@ class IdleTalkDirector:
             return self._drama_tick(idle)
         if self.screen_on:  # 画面を見ている間も同じく、無操作休止と普段の自発発話の代わりに画面の一言だけ
             return self._screen_tick(idle)
-        if self.pc_on:  # PC と話すモード: 会話は PC の音声 AI と続くので、無操作休止も普段の自発発話もしない
+        if self.pc_on:  # ブラウザ補正なしモード: 会話は PC の音声 AI と続くので、無操作休止も普段の自発発話もしない
             return None
         if idle and not self.spontaneous.radio and now - self._last_op >= self.cfg.IDLE_TIMEOUT:  # ラジオは聞き流し前提
             self.fsm.enqueue(Event(Ev.IDLE_TIMEOUT))
@@ -789,6 +868,7 @@ class IdleTalkDirector:
     # ---- ドラマモード (設計書 6.5): 一言は自発発話と同じ pending / 保留 / 取消 / 再生完了の経路を通る ----
     def _set_drama(self, on: bool) -> None:
         self.drama_on = on
+        self.bleed_meter.reset()
         if on:
             self.drama.start()
         else:
@@ -806,6 +886,7 @@ class IdleTalkDirector:
             return
         self._drama_uid = (self._drama_uid + 1) % (1 << 31)
         uid = self._drama_uid
+        self._drama_issued += 1
         name = self.ingress._put_shm(pcm)
         seg_s = len(pcm) / (FRAME_BYTES * 50)
 
@@ -819,6 +900,7 @@ class IdleTalkDirector:
                 self.ingress.release(name)
 
         def done(res: object) -> None:
+            self._drama_settled += 1
             if isinstance(res, dict) and self.drama_on:
                 if is_ai_voice(res["text"], self._ai_prev + self._ai_text):
                     log.info("drama line discarded (ai voice): %d chars", len(res["text"]))
@@ -1098,7 +1180,7 @@ class IdleTalkDirector:
         self._gen_done = True
         self._check_done()
 
-    # ---- PC と話すモード: AI の声を Chrome の外 (モニター) から鳴らし、スピーカーとマイクで PC の音声 AI と話す ----
+    # ---- ブラウザ補正なしモード: AI の声を Chrome の外 (モニター) から鳴らし、スピーカーとマイクで PC の音声 AI と話す ----
     def _set_pc(self, on: bool) -> None:
         """AI の声の出口をモニターに切り替える。相手 (ブラウザの ChatGPT 等) のエコー除去は、Chrome が鳴らした声を
         別のタブの音でも消したが、Chrome の外から鳴らした声は消さなかった (実測 2026-10-18)。"""
@@ -1207,7 +1289,7 @@ class IdleTalkDirector:
 
     def _start_memory(self) -> None:
         """応答と LLM を取り合わないよう、再生完了 (IDLE) 後にだけ走らせる。利用者発話で取消し、次回まとめて再試行する。"""
-        if self.pc_on:  # PC と話すモード: PC の発言は利用者の事実ではないので抜き出さない
+        if self.pc_on:  # ブラウザ補正なしモード: PC の発言は利用者の事実ではないので抜き出さない
             return
         if not (self._mem_pending or self._name_pending) or (self._mem_task is not None and not self._mem_task.done()):
             return
@@ -1252,7 +1334,8 @@ class IdleTalkDirector:
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:
-        messages = self._chat_messages(ask=not self.pc_on)  # PC と話すモード: 名前の質問は相手に答えさせてしまう
+        # ブラウザ補正なしモード: 名前の質問は相手に答えさせてしまう。ドラマモード: 動画の声は名乗らない (拾った台詞に尋ねた。2026-10-19)
+        messages = self._chat_messages(ask=not (self.pc_on or self.drama_on))
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current

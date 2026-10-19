@@ -161,12 +161,14 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
     director.personas = args.personas
-    director.drama = DramaListener(load_drama(args.config), EnergyVad(adaptive=True, ratio=vad.ratio,
+    drama = load_drama(args.config)
+    director.drama_mic = drama.mic  # 画面の「ドラマ中もマイク」の初期値 (接続時に ui で上書きされる)
+    director.drama = DramaListener(drama, EnergyVad(adaptive=True, ratio=vad.ratio,
                                                                       onset_frames=vad.onset_ms // FRAME_MS,
                                                                       min_threshold=vad.min_threshold),
                                    cfg.MIN_SEG)
     director.snap_dir = data_dir / SNAP_DIR
-    pc = load_pc(args.config)  # PC と話すモード: AI の声はモニターが [pc].monitor の機器に鳴らす
+    pc = load_pc(args.config)  # ブラウザ補正なしモード: AI の声はモニターが [pc].monitor の機器に鳴らす
     director.open_monitor = lambda: open_device(pc.monitor)
     director.open_mic = lambda: open_input(pc.mic)  # マイクもブラウザを通さず録る (Chrome のエコー除去が相手の声を消す)
     screen = load_screen(args.config)
@@ -410,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
         # personas.toml は設定ファイルと同じフォルダから読む。無ければ既定の 1 人だけ (選択欄を出さない)
         args.personas = PersonaBook(Path(args.config).with_name(PERSONAS_FILE))
         web = start_web(args.web_port, args.port,
-                        ui_defaults(cfg) | {"speaker": args.speaker, "persona": args.personas.current_id},
+                        ui_defaults(cfg) | {"speaker": args.speaker, "persona": args.personas.current_id,
+                                           "drama_mic": load_drama(args.config).mic},
                         args.speakers, personas=args.personas.choices(),
                         vision=lambda: director is not None and director.drama_vision,
                         follow_window=load_screen(args.config).follow_window and sys.platform == "win32")

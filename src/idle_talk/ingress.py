@@ -54,7 +54,7 @@ class Ingress:
         self.frames_by_state: Counter[str] = Counter()
         self.noise_log: list[int] = []
         self.device_lost = False
-        # E6 を無音で判定するか。Python で録るマイク (PC と話すモード) は静かな部屋で RMS 0.5 程度になり、
+        # E6 を無音で判定するか。Python で録るマイク (ブラウザ補正なしモード) は静かな部屋で RMS 0.5 程度になり、
         # 抜けたと誤判定したので、読み取りの失敗で判定する (Director が切り替える)
         self.silence_check = True
         self._buf: bytearray | None = None

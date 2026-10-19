@@ -1,4 +1,4 @@
-"""PC と話すモード: スピーカーで鳴る別の音声 AI と、マイクとスピーカーで話す。AI の声はモニターが鳴らす。"""
+"""ブラウザ補正なしモード (旧 PC と話すモード): スピーカーで鳴る別の音声 AI と、マイクとスピーカーで話す。AI の声はモニターが鳴らす。"""
 import asyncio
 import json
 import logging
@@ -230,7 +230,7 @@ def test_switching_stops_playing_voice(tmp_path):
         pc_on(d, b)
         assert d.pc_on and d.fsm.ctx.state is State.IDLE and d.epoch.current == ep + 1
         assert b.of("cancel")[-1]["new_epoch"] == ep + 1
-        assert d.spontaneous_tick() is None  # PC と話す間は自発発話も無操作休止もしない
+        assert d.spontaneous_tick() is None  # ブラウザ補正なしの間は自発発話も無操作休止もしない
     asyncio.run(run())
 
 

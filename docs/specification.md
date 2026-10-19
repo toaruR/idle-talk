@@ -320,6 +320,7 @@ flowchart LR
 | `finale_min_chars` | 600 | 0〜20000 | 前の感想から聞いた台詞がこれ未満なら感想は言わない |
 | `digest_chars` | 800 | 100〜2000 | 台詞がこれだけ溜まったらあらすじメモに要約する |
 | `log_prompt` | false | bool | 一言・感想・要約で LLM に渡した台詞とメモを `talk.log` に残す |
+| `mic` | true | 真偽 | ドラマモード中もマイクを聞く。偽なら聞くだけ (話しかけは聞かず、一言・感想は続ける)。画面の「ドラマ中もマイク」(`ui.drama_mic`) でも切り替える |
 | `keep_snaps` | 0 | 0〜20 | 一言・感想に使った画面を `data/snaps` に残す枚数。0 なら残さない。画面モードと共通 |
 
 - 同梱の `idle_talk.toml` は `interval_s`=15、`gap_ms`=800、`log_prompt`=true、`keep_snaps`=3 で上書きしている。

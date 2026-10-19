@@ -1,6 +1,7 @@
 """ドラマモード (設計書 6.5): 共有したタブの音を聞き、場面の切れ目にたまに一言。"""
 import asyncio
 import json
+import threading
 
 import pytest
 from mocks import FakeClock
@@ -10,7 +11,7 @@ from idle_talk import director as director_mod
 from idle_talk.clients import AsrClient
 from idle_talk.config import Drama, load_drama
 from idle_talk.director import DRAMA_ECHO_KIND, DRAMA_SELF_KIND, IdleTalkDirector
-from idle_talk.drama import DramaListener, is_ai_voice
+from idle_talk.drama import LEVEL_MIN_FRAMES, LEVEL_WINDOW_S, BleedMeter, DramaListener, is_ai_voice
 from idle_talk.protocol import DRAMA_FLAG, is_drama, pack_up_frame, validate_message
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
@@ -460,3 +461,165 @@ def test_tab_sound_raises_mic_threshold(tmp_path):
     assert not vad.bleed
     d.core.on_text(b, json.dumps({"t": "ui", "drama": False}))
     assert not d.drama.sounding()
+
+
+def test_contains_short_only_when_overlapped():
+    dl = listener(FakeClock())
+    dl.add_line("女性の娘は二年前ビルから転落して亡くなりました")
+    assert not dl.contains("二年前")  # 重なっていなければ短い結果は比べない
+    assert dl.contains("二年前", overlapped=True)
+    assert not dl.contains("十六歳", overlapped=True)  # 台詞に無い
+    assert not dl.contains("年", overlapped=True)  # ECHO_SHORT_CHARS 未満
+
+
+def split_asr(d, mic, drama):
+    """マイクとドラマの認識結果を別々に返す (スレッド名で見分ける)。"""
+    def send(req, timeout):
+        texts = drama if threading.current_thread().name.startswith("drama-asr") else mic
+        return 200, {"utterance_id": req["utterance_id"], "text": texts.pop(0),
+                     "no_speech_prob": 0.1, "compression_ratio": 1.0}
+    d.ingress.asr = AsrClient(send, clock=d.clock_)
+
+
+def echo_count(store):
+    return store.query(f"SELECT COUNT(*) FROM events WHERE kind='{DRAMA_ECHO_KIND}'")[0][0]
+
+
+def test_mic_overlapping_drama_waits_for_drama_line(tmp_path):
+    """動画ビュワーの音は Chrome のエコー除去で消えず、マイクの認識が先に出て USER として通った (実機 2026-10-19)。"""
+    async def run():
+        d, b, store = make(tmp_path, [], [])
+        split_asr(d, ["二年前"], ["女性の娘は二年前ビルから転落して亡くなりました"])
+        drama_on(d, b)
+        drama_speak(b, quiet=0)  # 台詞の途中
+        b.speak()  # その台詞をマイクが拾った
+        await asyncio.sleep(0.3)
+        assert d.ingress.asr_pending == 1 and echo_count(store) == 0 and d._task is None  # ドラマ側の認識を待っている
+        drama_speak(b, loud=0)  # 台詞の区間が閉じて認識に回る
+        await until(lambda: echo_count(store) == 1)
+        await asyncio.sleep(0.05)
+        assert d._task is None and not d.seen_ and d.fsm.ctx.state.value == "idle"
+    asyncio.run(run())
+
+
+def test_mic_overlapping_drama_passes_when_not_dialogue(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["たぶん兄の方だよ。"], [])
+        split_asr(d, ["今のって誰が犯人なの"], ["犯人はお前だ、そうだろう。"])
+        drama_on(d, b)
+        drama_speak(b, quiet=0)
+        b.speak()
+        drama_speak(b, loud=0)
+        await until(lambda: d.seen_)
+        assert echo_count(store) == 0 and "犯人はお前だ" in d.seen_[0][0]["content"]
+        await until(lambda: b.chunks)  # 応答を最後まで流してから閉じる
+    asyncio.run(run())
+
+
+def test_mic_overlapping_drama_gives_up_waiting(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["うん。"], [])
+        split_asr(d, ["今のって誰が犯人なの"], [])
+        d._drama_wait_s = lambda: 0.2
+        drama_on(d, b)
+        drama_speak(b, quiet=0)  # 区間が閉じないまま
+        b.speak()
+        await until(lambda: d.seen_)
+        assert echo_count(store) == 0
+        await until(lambda: b.chunks)
+    asyncio.run(run())
+
+
+# ---- 音量の比・聞くだけ・声 (2026-10-19) ----
+MID = b"\xe8\x03" * 320  # 振幅 1000 (LOUD の -6dB): スピーカーから回り込んだタブの音
+
+
+def test_bleed_meter_level_ratio():
+    clock = FakeClock()
+    m = BleedMeter(clock)
+    for _ in range(LEVEL_MIN_FRAMES):  # タブの音が鳴る間、マイクには -6dB で回り込む
+        m.tab(2000)
+        m.mic(1000, False, True)
+    assert abs(m.gain() - (-6.02)) < 0.01
+    for _ in range(10):
+        m.tab(2000)
+        m.mic(1000, True, True)  # 回り込みと同じ大きさ
+    assert m.take() == 0.0
+    for _ in range(10):
+        m.tab(2000)
+        m.mic(4000, True, True)  # 見積もりより 12dB 大きい = 利用者の声
+    assert m.take() == 1.0
+    m.mic(4000, True, False)  # タブの音が鳴っていない
+    assert m.take() is None
+    clock.advance(LEVEL_WINDOW_S + 0.01)
+    m.mic(4000, True, True)  # 比べるタブの音が古い
+    assert m.take() is None
+
+
+def both(b, mic, n):
+    for _ in range(n):
+        b.core.on_binary(b, pack_up_frame(DRAMA_FLAG | b.seq, LOUD))
+        b.seq += 1
+        b.send_frame(mic)
+
+
+def test_mic_at_bleed_level_is_discarded_without_waiting(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, [], [])
+        split_asr(d, ["四番です", "もちろん"], [])
+        drama_on(d, b)
+        both(b, MID, 60)  # 台詞の途中に、回り込んだ台詞をマイクが拾った
+        both(b, QUIET, 12)
+        both(b, MID, 20)
+        both(b, QUIET, 12)
+        await until(lambda: echo_count(store) == 2)  # 区間が閉じるのを待たない
+        assert d._task is None and not d.seen_
+        by = [json.loads(r[0])["by"] for r in store.query(f"SELECT payload_json FROM events WHERE kind='{DRAMA_ECHO_KIND}'")]
+        assert by == ["level", "level"]
+    asyncio.run(run())
+
+
+def test_listen_only_ignores_mic(tmp_path):
+    async def run():
+        d, b, _ = make(tmp_path, [], ["今のって誰が犯人なの"])
+        d.core.on_text(b, json.dumps({"t": "ui", "drama": True, "drama_mic": False}))
+        b.speak()
+        await asyncio.sleep(0.1)
+        assert d.fsm.ctx.state.value == "idle" and d.ingress._uid == 0
+        d.core.on_text(b, json.dumps({"t": "ui", "drama": False, "drama_mic": False}))
+        b.speak()  # ドラマモードでなければ聞く
+        await until(lambda: d.ingress._uid == 1)
+    asyncio.run(run())
+
+
+def test_overlapped_voice_unlike_named_speaker_is_discarded(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, [], [])
+        split_asr(d, ["今のって誰が犯人なの"], ["犯人はお前だ、そうだろう。"])
+
+        class Book:
+            enrolled = []
+            def named_score(self, emb): return 0.2
+            def identify(self, emb, now, enroll=True): self.enrolled.append(enroll)
+            def name(self, sid): return None
+        d.voices = Book()
+        d.ingress.on_voice = d._on_voice
+        d.ingress.embed = lambda pcm: "emb"
+        d.ingress.voice_min_ms = 0
+        drama_on(d, b)
+        drama_speak(b, quiet=0)
+        b.speak()
+        drama_speak(b, loud=0)
+        await until(lambda: echo_count(store) == 1)
+        assert json.loads(store.query(f"SELECT payload_json FROM events WHERE kind='{DRAMA_ECHO_KIND}'")[0][0])["by"] == "voice"
+    asyncio.run(run())
+
+
+def test_no_name_question_while_watching(tmp_path):
+    d, b, _ = make(tmp_path, [], [])
+    calls = []
+    d._chat_messages = lambda ask=True: calls.append(ask) or []
+    drama_on(d, b)
+    d._text = "こんにちは"
+    asyncio.run(d._respond())
+    assert calls == [False]

@@ -360,6 +360,7 @@ class Drama(NamedTuple):
     digest_chars: int = 800  # 台詞がこれだけ溜まったら裏であらすじメモに要約する (window_s を過ぎても話を覚えておく)
     log_prompt: bool = False  # 一言・感想・要約に LLM へ渡した台詞とメモを talk.log に残す (既定は保存しない)
     keep_snaps: int = 0     # 一言・感想に使った画面を data/snaps に新しい順でこの枚数だけ残す (0 なら保存しない)
+    mic: bool = True  # ドラマモード中もマイクを聞く。False なら聞くだけ (話しかけられないが、拾った台詞を利用者の発話と取らない)
 
 
 _DRAMA_RANGES = {"interval_s": (10, 3600), "gap_ms": (500, 30000), "window_s": (30, 1800),
@@ -371,9 +372,9 @@ def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:
     """[drama] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
     raw = _read_section(path, "drama", Drama._fields)
     for k, v in raw.items():
-        if k == "log_prompt":
+        if k in ("log_prompt", "mic"):
             if type(v) is not bool:
-                raise ValueError(f"[drama].log_prompt must be bool: {v!r}")
+                raise ValueError(f"[drama].{k} must be bool: {v!r}")
             continue
         lo, hi = _DRAMA_RANGES[k]
         if type(v) is not int or not lo <= v <= hi:
@@ -413,7 +414,7 @@ def load_screen(path: str | Path = SETTINGS_FILE) -> Screen:
 
 
 class Pc(NamedTuple):
-    """[pc]: PC と話すモード (スピーカーで鳴る別の音声 AI と、マイクとスピーカーで話す)。AI の声は Director が鳴らす。"""
+    """[pc]: ブラウザ補正なしモード (スピーカーで鳴る別の音声 AI と、マイクとスピーカーで話す)。AI の声は Director が鳴らす。"""
     monitor: str = ""  # AI の声を鳴らす出力機器の名前 (部分一致)。空なら Windows の既定の再生機器
     mic: str = ""  # マイクの入力機器の名前 (部分一致)。空なら Windows の既定の録音機器
 

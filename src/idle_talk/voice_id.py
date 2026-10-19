@@ -113,8 +113,14 @@ class VoiceBook:
         row = self._rows.get(sid)
         return row["name"] if row else None
 
-    def identify(self, emb: np.ndarray, now_ms: int) -> int | None:
-        """一致した (または今回登録した) 話者 id。登録前の知らない声なら None。一致したら声の平均を更新する。"""
+    def named_score(self, emb: np.ndarray) -> float | None:
+        """名前の分かった相手の声との類似度の最大値。名前の分かった相手がいなければ None。"""
+        emb = _unit(emb)
+        return max((float(r["emb"] @ emb) for r in self._rows.values() if r["name"]), default=None)
+
+    def identify(self, emb: np.ndarray, now_ms: int, enroll: bool = True) -> int | None:
+        """一致した (または今回登録した) 話者 id。登録前の知らない声なら None。一致したら声の平均を更新する。
+        enroll が偽なら知らない声を登録しない (登録の候補にも数えない)。"""
         emb = _unit(emb)
         best, score = None, -1.0
         for sid, row in self._rows.items():
@@ -129,6 +135,8 @@ class VoiceBook:
             self.store.execute("UPDATE speakers SET embedding=?, n=?, updated_at=? WHERE id=?",
                                (row["emb"].tobytes(), row["n"], now_ms, best))
             return best
+        if not enroll:
+            return None
         if self._pending and float(_unit(np.mean(self._pending, axis=0)) @ emb) >= self.threshold:
             self._pending.append(emb)
         else:

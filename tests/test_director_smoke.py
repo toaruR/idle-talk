@@ -139,7 +139,7 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
     assert seen["speaker"] == 42
     assert seen["web"] == (9004, 9000)
     assert seen["ui"] == {"on": True, "radio": False, "interval_s": 30, "quiet_start": "22:00", "quiet_end": "07:00",
-                          "speaker": 42, "persona": "default"}
+                          "speaker": 42, "persona": "default", "drama_mic": True}
     assert main_mod.main(base + ["--port", "7000", "--llm-url", "http://h:1", "--speaker", "7"]) == 0
     assert seen["run_port"] == 7000 and seen["llm_url"] == "http://h:1" and seen["speaker"] == 7
     assert main_mod.main(base + ["--web-port", "7001"]) == 0

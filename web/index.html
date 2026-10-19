@@ -113,7 +113,7 @@
   <div class="modes">
     <button id="drama" disabled aria-pressed="false">ドラマを一緒に見る</button>
     <button id="screen" disabled aria-pressed="false">画面を一緒に見る</button>
-    <button id="pc" disabled aria-pressed="false">PC と話す</button>
+    <button id="pc" disabled aria-pressed="false">ブラウザ補正なし</button>
   </div>
 </section>
 <section class="card">
@@ -122,6 +122,7 @@
     <label class="switch"><input type="checkbox" id="mute"> 休止</label>
     <label class="switch"><input type="checkbox" id="on" checked> 自発発話</label>
     <label class="switch"><input type="checkbox" id="radio"> ラジオ</label>
+    <label class="switch" title="オフならドラマモード中はマイクを聞かない (拾った台詞を話しかけと取らない)"><input type="checkbox" id="drama_mic" checked> ドラマ中もマイク</label>
   </div>
   <div class="grid">
     <label class="field">沈黙秒数 <input type="number" id="interval_s" min="10" max="3600" value="1200"></label>
@@ -149,7 +150,7 @@
   let client = null;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
-  let pc = false; // PC と話すモード (共有はしない。AI の声はサーバがスピーカーに鳴らす)
+  let pc = false; // ブラウザ補正なしモード (共有はしない。AI の声はサーバがスピーカーに鳴らす)
   let sink = null;
   let errorCode = null; // 表示中のサーバのエラーコード (一時的なものは再生が始まったら消す)
   function showError(text, code) { $('error').textContent = text; errorCode = code; }
@@ -198,6 +199,7 @@
       mute: $('mute').checked,
       on: $('on').checked,
       radio: $('radio').checked,
+      drama_mic: $('drama_mic').checked,
       interval_s: parseInt($('interval_s').value, 10),
       quiet_start: $('quiet_start').value,
       quiet_end: $('quiet_end').value,
@@ -235,7 +237,7 @@
   const serverConfig = loadServerConfig().then((c) => { fillSpeakers(c.speakers); fillPersonas(c.personas); applyUiDefaults(c.ui); return c; });
   serverConfig.catch((e) => { showError(String(e), null); });
   function pushUi() { if (client) client.sendUi(readUi()); }
-  for (const id of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'persona']) {
+  for (const id of ['mute', 'on', 'radio', 'drama_mic', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'persona']) {
     $(id).addEventListener('change', pushUi);
   }
 
@@ -284,13 +286,13 @@
   function showDrama() {
     $('drama').textContent = drama ? 'ドラマを見るのをやめる' : 'ドラマを一緒に見る';
     $('screen').textContent = screen ? '画面を見るのをやめる' : '画面を一緒に見る';
-    $('pc').textContent = pc ? 'PC と話すのをやめる' : 'PC と話す';
+    $('pc').textContent = pc ? 'ブラウザ補正なしをやめる' : 'ブラウザ補正なし';
     $('pc').disabled = !client;
     $('drama').setAttribute('aria-pressed', String(drama !== null)); // 使用中のモードのボタンを強調する (CSS)
     $('screen').setAttribute('aria-pressed', String(screen !== null));
     $('pc').setAttribute('aria-pressed', String(pc));
     $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています')
-      : pc ? 'PC と会話中 (スピーカーで)' : '';
+      : pc ? 'ブラウザ補正なしで会話中 (スピーカーで)' : '';
     $('drama').disabled = !client || screen !== null; // 共有は 1 つずつ
     $('screen').disabled = !client || drama !== null;
   }
@@ -333,7 +335,8 @@
     }
   });
 
-  // PC と話すモード: スピーカーで鳴る別の音声 AI (ChatGPT など) と、マイクとスピーカーでそのまま話す。
+  // ブラウザ補正なしモード: マイクと AI の声をブラウザ (Chrome) のエコー除去に通さず、サーバが直接録って鳴らす。
+  // スピーカーで鳴る別の音声 AI (ブラウザの ChatGPT など) とも、マイクとスピーカーでそのまま話せる。
   // AI の声はサーバ (Chrome の外) が鳴らす。ブラウザが鳴らすと、相手のエコー除去に消されるため
   $('pc').addEventListener('click', () => {
     pc = !pc;

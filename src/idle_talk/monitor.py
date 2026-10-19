@@ -65,7 +65,7 @@ def open_input(name: str, rate: int = MIC_RATE):
 
 
 class MicCapture:
-    """PC と話すモードのマイク。ブラウザ (Chrome) のエコー除去を通さずに録る。
+    """ブラウザ補正なしモードのマイク。ブラウザ (Chrome) のエコー除去を通さずに録る。
 
     Chrome のエコー除去は Chrome が鳴らした音を消すので、ブラウザの ChatGPT の声は idle-talk のタブのマイクから
     ほぼ消えた (実機 2026-10-19)。feed(pcm) は録音スレッドから 20ms ごとに呼ばれる (呼び出し側でループへ渡す)。"""
