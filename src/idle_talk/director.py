@@ -174,7 +174,8 @@ class IdleTalkDirector:
         self.path_calls: list[tuple[str, str]] = []  # (route, 関数名): 不変条件 3 の記録
         self.core = WsCore(self.cfg, self.epoch, clock, on_audio=self._on_up_audio,
                            on_playback=self._on_playback, on_ui=self._on_ui, on_hello=self._on_hello,
-                           on_snap=self._on_snap)
+                           on_snap=self._on_snap, on_disconnect=self._on_disconnect)
+        self._audio_session = 0
         self.fsm = StateDirector(self.cfg, self.epoch, on_actions=self._run_actions, on_state=self._send_state)
         self.history = PlaybackHistory(store, self.cfg)
         self._llm = llm_stream
@@ -369,7 +370,41 @@ class IdleTalkDirector:
             else:
                 self.core.conn.send_bytes(pack_down_chunk(ep, utt, chunk, pcm))
 
+    def _on_disconnect(self) -> None:
+        """サーバは残し、接続に属する録音・生成・再生を停止する。"""
+        self._audio_session += 1
+        self.ingress.reset()
+        previous_epoch = self.epoch.current
+        self._act_cancel_generation(None)
+        self.fsm.enqueue(Event(Ev.FAILURES))
+        self._pump()
+        self._act_stop_background(None)
+        # 相槌は USER_SPEAKING のまま鳴るので、FSM の取消対象外でも失効させる。
+        if self.epoch.current == previous_epoch:
+            self.epoch.bump()
+            self.fsm.ctx = replace(self.fsm.ctx, epoch=self.epoch.current)
+        for task in tuple(self._cancels):
+            if not task.done():
+                task.cancel()
+        self._finalize_utterance("interrupt", interrupted=True)
+        if self.backchannel is not None:
+            self.backchannel.on_speech_start()
+        if self.drama_on:
+            self._set_drama(False)
+        if self.screen_on:
+            self._set_screen(False)
+        if self.pc_on:
+            self._set_pc(False)
+        self._down_q.clear()
+        self._down_sent.clear()
+        self._idle_since = None
+        self._bc_speaking, self._bc_silence_ms, self._bc_active = False, 0, None
+
     def _on_hello(self) -> None:
+        if self.fsm.ctx.state is State.REST and not self.fsm.ctx.muted:
+            self.fsm.enqueue(Event(Ev.WAKE))
+            self._pump()
+        self._last_op = self.clock()
         ctx = self.fsm.ctx
         self._down_q.clear()  # 新しい接続: 前の接続向けの送出待ち・未報告は無効
         self._down_sent.clear()
@@ -552,6 +587,7 @@ class IdleTalkDirector:
         in_ai, self._speech_in_ai = self._speech_in_ai, False
         if not _alnum(text):
             log.info("transcript without words discarded: utterance %d %r", uid, text)
+            self.ingress.hold(uid)  # 発話の出だしだけの区間かもしれない: 次の区間の頭に足して認識し直す
             return False
         if in_ai and self._is_echo(uid, text):
             return False
@@ -570,6 +606,7 @@ class IdleTalkDirector:
             return False
         if self._out_of_context(in_ai, text):
             log.info("short transcript out of context discarded: utterance %d %r", uid, text)
+            self.ingress.hold(uid)
             self.store.add_event(self.now_ms(), self.epoch.current, SHORT_KIND,
                                  json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
@@ -892,6 +929,8 @@ class IdleTalkDirector:
 
         def work() -> object:
             try:
+                if session != self._audio_session:
+                    return None
                 return asr.transcribe(uid, name, seg_s)
             except Exception as e:  # noqa: BLE001  台詞が 1 区間欠けるだけ
                 log.info("drama asr failed: %s", e)
@@ -899,8 +938,12 @@ class IdleTalkDirector:
             finally:
                 self.ingress.release(name)
 
+        session = self._audio_session
+
         def done(res: object) -> None:
             self._drama_settled += 1
+            if session != self._audio_session:
+                return
             if isinstance(res, dict) and self.drama_on:
                 if is_ai_voice(res["text"], self._ai_prev + self._ai_text):
                     log.info("drama line discarded (ai voice): %d chars", len(res["text"]))

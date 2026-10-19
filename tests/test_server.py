@@ -38,6 +38,32 @@ def hello(**kw):
     return json.dumps(d)
 
 
+def test_disconnect_notifies_once_and_ignores_replaced_connection():
+    calls = []
+    core = WsCore(on_disconnect=lambda: calls.append(core.conn))
+    old, new = FakeConn(), FakeConn()
+    core.connect(old, OK)
+    core.connect(new, OK)
+    assert calls == [None]
+    core.disconnect(old)
+    assert calls == [None] and core.conn is new
+    core.disconnect(new)
+    core.disconnect(new)
+    assert calls == [None, None] and not core.hello_done
+
+
+def test_ping_timeout_notifies_disconnect():
+    calls = []
+    clock = FakeClock()
+    core = WsCore(clock=clock, on_disconnect=lambda: calls.append(True))
+    core.connect(FakeConn(), OK)
+    clock.advance(core.cfg.PING_INTERVAL)
+    core.tick()
+    clock.advance(core.cfg.PING_INTERVAL)
+    assert core.tick()
+    assert calls == [True] and core.conn is None
+
+
 def setup(**kw):
     clock = FakeClock()
     core = WsCore(clock=clock, **kw)

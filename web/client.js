@@ -122,14 +122,15 @@
       ws = new WebSocketCtor(wsUrl(port));
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
+        if (closed) return;
         ready = true;
         sendJson(makeHello(clientId));
         if (onOpen) onOpen(); // hello の後 (サーバは hello 前のメッセージを受け付けない)
       };
       ws.onclose = () => {
         ready = false;
-        if (player && player.reset) player.reset(); // 前の接続の音は鳴らさない。新しい接続の epoch は 0 から
         if (closed) return;
+        if (player && player.reset) player.reset(); // 前の接続の音は鳴らさない。新しい接続の epoch は 0 から
         if (onClose) onClose();
         setTimeoutFn(() => { if (!closed) connect(); }, reconnectMs);
       };
@@ -137,6 +138,7 @@
     }
 
     function onMessage(ev) {
+      if (closed) return;
       const d = ev.data;
       if (typeof d !== 'string') { if (player) player.pushBinary(d); return; }
       let msg;
@@ -158,21 +160,42 @@
       sendFrame(frame) { if (ready) ws.send(frame); },
       sendUi(settings) { sendJson(makeUi(settings)); },
       sendJson,
-      close() { closed = true; ws.close(); },
+      close() {
+        if (closed) return;
+        closed = true;
+        ready = false;
+        if (player && player.reset) player.reset();
+        ws.close();
+      },
     };
   }
 
   // Start mic capture -> worklet frames -> client.sendFrame. Browser only.
   async function startCapture({ getUserMedia, AudioContextCtor, workletUrl, client }) {
     const stream = await getUserMedia(micConstraints());
-    const ctx = new AudioContextCtor();
-    await ctx.audioWorklet.addModule(workletUrl);
-    const node = new AudioWorkletNode(ctx, 'capture-processor', {
-      processorOptions: { inRate: ctx.sampleRate, frameSamples: FRAME_SAMPLES },
-    });
-    node.port.onmessage = (ev) => client.sendFrame(ev.data);
-    ctx.createMediaStreamSource(stream).connect(node);
-    return { ctx, stream, node };
+    let ctx, node, source, stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (node) { node.port.onmessage = null; node.disconnect(); }
+      if (source) source.disconnect();
+      for (const track of stream.getTracks()) track.stop();
+      if (ctx) ctx.close();
+    };
+    try {
+      ctx = new AudioContextCtor();
+      await ctx.audioWorklet.addModule(workletUrl);
+      node = new AudioWorkletNode(ctx, 'capture-processor', {
+        processorOptions: { inRate: ctx.sampleRate, frameSamples: FRAME_SAMPLES },
+      });
+      node.port.onmessage = (ev) => client.sendFrame(ev.data);
+      source = ctx.createMediaStreamSource(stream);
+      source.connect(node);
+      return { ctx, stream, node, stop };
+    } catch (e) {
+      stop();
+      throw e;
+    }
   }
 
   // 共有したタブの音 -> worklet (seq に DRAMA_FLAG) -> client.sendFrame。共有が終わったら onEnded。Browser only.

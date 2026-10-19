@@ -15,10 +15,14 @@ from multiprocessing import shared_memory
 from .clients import AsrClient
 from .errors import ERR_MIC_LOST
 from .fsm import Director, Ev, Event
-from .vad import BYTES_PER_MS, SPEECH_END, SPEECH_START, Vad, rms
+from .vad import BYTES_PER_MS, FRAME_MS, SPEECH_END, SPEECH_START, Vad, rms
 
 log = logging.getLogger(__name__)
 _FAILED = object()  # ASR 失敗 (発話破棄)
+PRE_ROLL_MS = 300   # 開始判定より前の音も ASR に渡す長さ (閾値に届かない小声の出だし・子音)
+# 語なしで捨てた区間 (物音・1 字だけ等) の終わりからこの間隔以内に始まった区間は、捨てた区間を頭に足して認識し直す。
+# 発話が VAD で割れ、出だしの「え」だけの区間が捨てられて最初の何語かが欠けた (実機 2026-10-19)
+JOIN_GAP_MS = 1000
 
 # offload(work, done): work (ブロッキングの ASR 呼び出し) を別スレッドで走らせ、結果を done で呼び出し元のループへ返す
 Offload = Callable[[Callable[[], object], Callable[[object], None]], None]
@@ -58,15 +62,37 @@ class Ingress:
         # 抜けたと誤判定したので、読み取りの失敗で判定する (Director が切り替える)
         self.silence_check = True
         self._buf: bytearray | None = None
-        # VAD が発話開始を判定するまでの onset_frames - 1 フレーム (発話の頭) を区間に含めるための直前フレーム
-        self._pre: deque[bytes] = deque(maxlen=getattr(vad, "onset_frames", 1) - 1)
+        # VAD が発話開始を判定するまでの onset_frames - 1 フレーム (発話の頭) を区間に含めるための直前フレーム。
+        # さらに前の PRE_ROLL_MS は区間の長さに数えず、ASR に渡す音にだけ足す (_lead)
+        self._onset_head = getattr(vad, "onset_frames", 1) - 1
+        self._pre: deque[bytes] = deque(maxlen=self._onset_head + PRE_ROLL_MS // FRAME_MS)
+        self._lead = b""
+        self._n = 0  # 受けたフレーム数 (区間の間隔を測る)
+        self._start_n = 0
+        self._segs: dict[int, tuple[bytes, int]] = {}  # 認識待ちの区間: uid -> (ASR に渡した音, 終わりのフレーム番号)
+        self._head: tuple[bytes, int] | None = None  # 語なしで捨てた区間 (次の区間の頭に足す候補)
         self._uid = 0
+        self._discarded_until = 0
         self._silent_since: float | None = None
         self._shm: dict[str, shared_memory.SharedMemory] = {}
 
     @property
     def shm_count(self) -> int:
         return len(self._shm)
+
+    def reset(self) -> None:
+        """接続前の音と認識結果を捨てる。処理中の共有メモリはワーカーが解放する。"""
+        self._discarded_until = self._uid
+        self._buf = None
+        self._pre.clear()
+        self._lead = b""
+        self._head = None
+        self._segs.clear()
+        self._silent_since = None
+        self.device_lost = False
+        reset = getattr(self.vad, "reset", None)
+        if reset is not None:
+            reset()
 
     # ---- 共有メモリ ----
     def _put_shm(self, pcm: bytes) -> str:
@@ -90,13 +116,18 @@ class Ingress:
     def feed(self, frame: bytes) -> None:
         """全状態で同一に VAD を回す (不変条件 2)。fsm 状態は計数のみに使う。"""
         self.frames_by_state[self.director.ctx.state.value] += 1
+        self._n += 1
         if self.silence_check:
             self._check_silence(frame)
         if self._buf is not None:
             self._buf += frame
         ev = self.vad.process(frame)
         if ev == SPEECH_START:
-            self._buf = bytearray(b"".join(self._pre) + frame)
+            pre = list(self._pre)
+            k = max(0, len(pre) - self._onset_head)
+            self._lead = b"".join(pre[:k])
+            self._buf = bytearray(b"".join(pre[k:]) + frame)
+            self._start_n = self._n
             self._pre.clear()
             self.director.enqueue(Event(Ev.VAD_START))
         elif ev == SPEECH_END:
@@ -110,26 +141,43 @@ class Ingress:
     def _end_segment(self, pcm: bytes) -> None:
         seg_ms = len(pcm) // BYTES_PER_MS
         self.director.enqueue(Event(Ev.VAD_END, seg_ms=seg_ms))
+        audio, head, self._head = self._lead + pcm, self._head, None
+        if head is not None and (self._start_n - head[1]) * FRAME_MS <= JOIN_GAP_MS:
+            log.info("joined discarded head: %dms + %dms", len(head[0]) // BYTES_PER_MS, len(audio) // BYTES_PER_MS)
+            audio = head[0] + audio
         if seg_ms < self.cfg.MIN_SEG:
             self.noise_log.append(seg_ms)
             log.info("noise segment discarded: %dms < MIN_SEG=%d", seg_ms, self.cfg.MIN_SEG)
+            self._head = (audio, self._n)
             return
         if self.on_speech_end:
             self.on_speech_end()
-        self._asr(pcm, seg_ms)
+        self._asr(pcm, audio)
 
-    def _asr(self, pcm: bytes, seg_ms: int) -> None:
+    def hold(self, uid: int) -> None:
+        """uid の区間を語なしで捨てた (Director が物音の聞き違いと判断)。次の区間が JOIN_GAP_MS 以内に始まれば頭に足す。
+        自声・ドラマの回り込みは足さない (AI やドラマの言葉が利用者の発話に混ざる) ので、呼ぶのは語なしの破棄だけ。"""
+        seg = self._segs.get(uid)
+        if seg is not None and uid == self._uid:  # 後の区間をもう認識に出していたら足せない
+            self._head = seg
+
+    def _asr(self, pcm: bytes, audio: bytes) -> None:
+        """pcm は VAD の区間 (声の特徴に使う)、audio は ASR に渡す音 (前の音・捨てた区間を頭に足したもの)。"""
         if self.asr is None:
             return
         self._uid += 1
         uid = self._uid
-        name = self._put_shm(pcm)
+        name = self._put_shm(audio)
+        self._segs[uid] = (audio, self._n)
         self.asr_pending += 1
-        voice = self._start_embed(pcm) if seg_ms >= self.voice_min_ms else None
+        voice = self._start_embed(pcm) if len(pcm) // BYTES_PER_MS >= self.voice_min_ms else None
+        audio_s = len(audio) / BYTES_PER_MS / 1000
 
         def work() -> tuple[object, object]:
             try:
-                res = self.asr.transcribe(uid, name, seg_ms / 1000)
+                if uid <= self._discarded_until:
+                    return _FAILED, None
+                res = self.asr.transcribe(uid, name, audio_s)
             except Exception as e:  # noqa: BLE001  認識の失敗で会話を止めない (該当発話だけ捨てる)
                 log.warning("asr failed: utterance %d discarded: %s", uid, e)
                 res = _FAILED
@@ -150,12 +198,21 @@ class Ingress:
         return self._embed_pool.submit(self.embed, pcm)
 
     def _asr_done(self, uid: int, res: object, voice: object = None) -> None:
+        try:
+            self._settle(uid, res, voice)
+        finally:
+            self._segs.pop(uid, None)
+
+    def _settle(self, uid: int, res: object, voice: object) -> None:
         self.asr_pending -= 1
+        if uid <= self._discarded_until:
+            return
         if voice is not None and self.on_voice and isinstance(res, dict):
             self.on_voice(uid, voice)
         latest = uid == self._uid  # 後続区間の認識待ちがあれば、終話・破棄はそちらの結果で確定させる
         if res is None:  # 幻聴 (E4): 応答トリガを送らない
             log.info("asr hallucination discarded: utterance %d", uid)
+            self.hold(uid)
         if res is _FAILED or res is None or (self.on_transcript and self.on_transcript(uid, res["text"]) is False):
             if latest and self._buf is None:  # 発話は終わっている: 待機 (AI 再生中なら再生再開) へ戻す
                 self.director.enqueue(Event(Ev.DISCARDED))

@@ -73,6 +73,54 @@ test('createClient: close() stops reconnecting', () => {
   assert.equal(made.length, 1);
 });
 
+test('createClient: intentional stop immediately silences playback and rejects late socket events', () => {
+  const { WS, made } = fakeWs();
+  let resets = 0, opens = 0, states = 0;
+  const c = C.createClient({ port: 1, WebSocketCtor: WS,
+    player: { reset() { resets++; } }, onOpen() { opens++; }, onState() { states++; } });
+  made[0].onopen();
+  c.close();
+  const count = made[0].sent.length;
+  c.sendUi({ mute: false });
+  c.sendFrame(new Uint8Array(4));
+  made[0].onopen();
+  made[0].onmessage({ data: JSON.stringify({ t: 'state', state: 'ai_playing' }) });
+  c.close();
+  assert.equal(resets, 1);
+  assert.equal(opens, 1);
+  assert.equal(states, 0);
+  assert.equal(made[0].sent.length, count);
+});
+
+test('startCapture: stop releases microphone, graph and context; failure releases microphone too', async () => {
+  let tracks = 0, contexts = 0, nodes = 0, sources = 0;
+  const stream = { getTracks: () => [{ stop() { tracks++; } }] };
+  class Ctx {
+    constructor() { this.sampleRate = 48000; this.audioWorklet = { addModule: async () => {} }; }
+    createMediaStreamSource() { return { connect() {}, disconnect() { sources++; } }; }
+    close() { contexts++; }
+  }
+  const original = globalThis.AudioWorkletNode;
+  globalThis.AudioWorkletNode = class {
+    constructor() { this.port = {}; }
+    disconnect() { nodes++; }
+  };
+  try {
+    const c = await C.startCapture({ getUserMedia: async () => stream, AudioContextCtor: Ctx,
+      workletUrl: '', client: { sendFrame() {} } });
+    c.stop(); c.stop();
+    assert.equal(c.node.port.onmessage, null);
+    assert.deepEqual([tracks, contexts, nodes, sources], [1, 1, 1, 1]);
+    class BadCtx extends Ctx {
+      constructor() { super(); this.audioWorklet.addModule = async () => { throw Error('worklet failed'); }; }
+    }
+    await assert.rejects(C.startCapture({ getUserMedia: async () => stream, AudioContextCtor: BadCtx }), /worklet failed/);
+    assert.deepEqual([tracks, contexts], [2, 2]);
+  } finally {
+    globalThis.AudioWorkletNode = original;
+  }
+});
+
 test('snapSize: fits 640x360 keeping aspect, never enlarges', () => {
   assert.deepEqual(C.snapSize(1920, 1080), [640, 360]);
   assert.deepEqual(C.snapSize(1080, 1920), [203, 360]); // 縦長

@@ -166,6 +166,69 @@ def test_onset_frames_ignore_short_click_and_keep_speech_head():
     assert d.ctx.state is State.USER_SPEAKING and bytes(ing._buf) == loud * 3  # 開始判定前の 2 フレームも区間に含む
 
 
+class ScriptAsr:
+    """認識結果を順に返す。ASR に渡った音を区間の長さで切り出して残す (共有メモリはページ単位に丸められる)。"""
+
+    def __init__(self, texts):
+        self.texts, self.sent = iter(texts), []
+
+    def transcribe(self, uid, ref, seconds):
+        shm = shared_memory.SharedMemory(name=ref)
+        self.sent.append(bytes(shm.buf[: round(seconds * 32000)]))
+        shm.close()
+        return {"utterance_id": uid, "text": next(self.texts), "no_speech_prob": 0.1, "compression_ratio": 1.0}
+
+
+def test_pre_roll_sent_to_asr_but_not_counted():
+    quiet = struct.pack("<h", 300) * 320  # 閾値に届かない小声の出だし
+    loud = struct.pack("<h", 1000) * 320
+    asr = ScriptAsr(["やあ"])
+    d = Director(Config())
+    ing = Ingress(d, EnergyVad(threshold=500, hangover_frames=3, onset_frames=3), asr)
+    for f in [quiet] * 30 + [loud] * 12 + [b"\x00\x00" * 320] * 3:
+        ing.feed(f)
+    assert len(asr.sent) == 1 and asr.sent[0] == quiet * 15 + loud * 12 + b"\x00\x00" * 640  # 前の 300ms も渡す
+    assert ing.noise_log == []
+
+
+def _two_segments(first_text, gap):
+    """1 区間目を first_text、2 区間目を「ここから」と認識させ、ASR に渡った音と結果を返す。"""
+    loud = struct.pack("<h", 1000) * 320
+    quiet = b"\x00\x00" * 320
+    asr = ScriptAsr([first_text, "ここから"])
+
+    d = Director(Config())
+    ing = Ingress(d, EnergyVad(threshold=500, hangover_frames=10), asr)
+    got = []
+
+    def on_transcript(uid, text):
+        if len(text) <= 1:  # Director の語なし・短い結果の破棄
+            ing.hold(uid)
+            return False
+        got.append(text)
+        return True
+    ing.on_transcript = on_transcript
+    for f in [loud] * 10 + [quiet] * (10 + gap) + [loud] * 20 + [quiet] * 10:
+        ing.feed(f)
+    return asr.sent, got
+
+
+def test_discarded_head_joined_to_next_segment():
+    sent, got = _two_segments("え", gap=20)
+    assert len(sent) == 2 and got == ["ここから"]
+    assert sent[1].startswith(sent[0]) and len(sent[1]) > len(sent[0])  # 捨てた区間を頭に足して認識し直す
+
+
+def test_discarded_head_not_joined_after_gap():
+    sent, _ = _two_segments("え", gap=60)  # 1.2 秒空いた
+    assert not sent[1].startswith(sent[0])
+
+
+def test_accepted_segment_not_joined():
+    sent, got = _two_segments("あのね", gap=20)
+    assert got == ["あのね", "ここから"] and not sent[1].startswith(sent[0])
+
+
 def _tone(amp):
     return struct.pack("<h", amp) * 320
 

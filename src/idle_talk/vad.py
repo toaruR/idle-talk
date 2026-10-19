@@ -72,6 +72,13 @@ class EnergyVad:
         self._echo_db: float | None = None
         self._bleed_db: float | None = None
 
+    def reset(self) -> None:
+        """新しい接続では発話・音量の判定を取り直す。"""
+        self.playing = self.bleed = self._speaking = False
+        self._quiet = self._loud = 0
+        self._noise_db = self._echo_db = self._bleed_db = None
+        self._noise_ms = 0
+
     @property
     def current_threshold(self) -> float:
         if not self.adaptive or self._noise_db is None or self._noise_ms < NOISE_WARMUP_MS:

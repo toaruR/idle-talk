@@ -62,7 +62,8 @@ class WsCore:
                  on_playback: Callable[[dict], None] | None = None,
                  on_ui: Callable[[dict], None] | None = None,
                  on_hello: Callable[[], None] | None = None,
-                 on_snap: Callable[[dict], None] | None = None) -> None:
+                 on_snap: Callable[[dict], None] | None = None,
+                 on_disconnect: Callable[[], None] | None = None) -> None:
         self.host = check_bind_host(host)
         self.cfg = cfg or Config()
         self.epoch = epoch or Epoch()
@@ -72,6 +73,7 @@ class WsCore:
         self.on_ui = on_ui
         self.on_hello = on_hello
         self.on_snap = on_snap
+        self.on_disconnect = on_disconnect
         self.settings: dict = {"mute": False, "on": self.cfg.spontaneous_enabled, "radio": self.cfg.radio,
                                "interval_s": self.cfg.spont_interval_s,
                                "quiet_start": self.cfg.quiet_start,
@@ -91,7 +93,9 @@ class WsCore:
             return False
         if self.conn is not None:
             log.info("replacing existing connection (latest wins)")
-            self.conn.close(CLOSE_4001)
+            old = self.conn
+            self.disconnect(old)
+            old.close(CLOSE_4001)
         self.conn = conn
         self.hello_done = False
         if self._ever_connected:
@@ -107,6 +111,8 @@ class WsCore:
         if self.conn is conn:
             self.conn = None
             self.hello_done = False
+            if self.on_disconnect:
+                self.on_disconnect()
 
     def _send(self, conn: Conn, msg: dict) -> None:
         conn.send_text(json.dumps(msg, ensure_ascii=False))
@@ -130,7 +136,8 @@ class WsCore:
             self._missed += 1
             if self._missed >= MISSED_PINGS_LIMIT:
                 log.warning("pong missed %d times: connection dropped", self._missed)
-                dead, self.conn, self.hello_done = self.conn, None, False
+                dead = self.conn
+                self.disconnect(dead)
                 dead.close(1001)
                 return True
         self._send_ping()

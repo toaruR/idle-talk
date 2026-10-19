@@ -118,9 +118,11 @@ def test_e5_ws_drop_detected_within_two_pings_and_old_audio_is_silent(tmp_path):
             d.clock_.advance(ping)
             assert d.core.tick() is True  # PING_INTERVAL x 2 以内に切断検知
             assert d.core.conn is None and b.closed
+            dropped_epoch = d.epoch.current
+            assert dropped_epoch > old  # 切断時点で生成中の音声を失効させる
             b2 = MockBrowser()
             b2.attach(d.core)  # 再接続で epoch+1
-            assert d.epoch.current == old + 1 and b2.of("cancel")
+            assert d.epoch.current == dropped_epoch + 1 and b2.of("cancel")
             gate.set()  # 旧世代の LLM 結果が再接続後に到着
             await asyncio.sleep(0.1)
             assert b2.chunks == []

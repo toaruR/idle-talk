@@ -59,12 +59,11 @@
   button:hover:not(:disabled) { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   button:active:not(:disabled) { transform: scale(.98); }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  #start {
-    width: 100%; padding: 16px; font-size: 17px; border: 0; color: #fff;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 6px 20px rgba(99, 102, 241, .35);
-  }
-  #start:disabled { opacity: .35; box-shadow: none; }
-  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }
+  .connection { color: var(--muted); font-size: 13px; }
+  .switch.connection input { width: 32px; height: 18px; }
+  .switch.connection input::after { width: 12px; height: 12px; }
+  .switch.connection input:checked::after { transform: translateX(14px); }
+  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
   .modes button { display: flex; align-items: center; gap: 10px; text-align: left; }
   .modes button::before { font-size: 20px; }
   #drama::before { content: "🎬"; }
@@ -104,12 +103,11 @@
 <main class="wrap">
 <header>
   <h1>idle-talk</h1>
-  <div class="status"><span id="state" class="pill" data-state="offline">未接続</span><span id="drama_state" class="tag"></span></div>
+  <div class="status"><span id="state" class="pill" data-state="stopped">停止中</span><span id="drama_state" class="tag"></span><label class="switch connection" title="オフにすると音声認識・発話・共有を停止します"><input type="checkbox" id="connect" role="switch"> 接続</label></div>
 </header>
 <p id="search" class="notice"></p>
 <p id="error" class="notice" role="alert"></p>
 <section class="card">
-  <button id="start">▶ 開始</button>
   <div class="modes">
     <button id="drama" disabled aria-pressed="false">ドラマを一緒に見る</button>
     <button id="screen" disabled aria-pressed="false">画面を一緒に見る</button>
@@ -119,7 +117,7 @@
 <section class="card">
   <h2>設定</h2>
   <div class="switches">
-    <label class="switch"><input type="checkbox" id="mute"> 休止</label>
+    <label class="switch" title="AI の発話を休止します。音声認識も止めるには右上の接続をオフにしてください"><input type="checkbox" id="mute"> 休止</label>
     <label class="switch"><input type="checkbox" id="on" checked> 自発発話</label>
     <label class="switch"><input type="checkbox" id="radio"> ラジオ</label>
     <label class="switch" title="オフならドラマモード中はマイクを聞かない (拾った台詞を話しかけと取らない)"><input type="checkbox" id="drama_mic" checked> ドラマ中もマイク</label>
@@ -152,6 +150,7 @@
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
   let pc = false; // ブラウザ補正なしモード (共有はしない。AI の声はサーバがスピーカーに鳴らす)
   let sink = null;
+  let connection = null;
   let errorCode = null; // 表示中のサーバのエラーコード (一時的なものは再生が始まったら消す)
   function showError(text, code) { $('error').textContent = text; errorCode = code; }
 
@@ -241,21 +240,46 @@
     $(id).addEventListener('change', pushUi);
   }
 
-  // 押し直すとマイク取り込み・接続が二重になる (前の分を止めない) ので、押したら無効にし、失敗したときだけ戻す
-  $('start').addEventListener('click', async () => {
-    $('start').disabled = true;
+  function stopConnection() {
+    const old = connection;
+    connection = null;
+    client = null;
+    if (old) {
+      if (old.client) old.client.close();
+      if (old.player) old.player.reset();
+      if (old.capture) old.capture.stop();
+      if (old.actx) old.actx.close();
+    }
+    if (drama) drama.stop();
+    if (screen) screen.stop();
+    drama = screen = sink = null;
+    pc = false;
+    $('connect').checked = false;
+    $('state').textContent = '停止中';
+    $('state').dataset.state = 'stopped';
+    $('search').textContent = '';
+    showDrama();
+  }
+  window.addEventListener('pagehide', stopConnection);
+  $('connect').addEventListener('change', async () => {
+    if (!$('connect').checked) { stopConnection(); return; }
+    const session = {};
+    connection = session;
+    $('state').textContent = '接続中…';
+    $('state').dataset.state = 'offline';
     try {
-      const actx = new AudioContext();
+      const actx = session.actx = new AudioContext();
       const port = new URLSearchParams(location.search).get('port') || String((await serverConfig).ws_port);
+      if (connection !== session) return;
       sink = IdleTalkPlayer.createWebAudioSink(actx, undefined, volume());
-      const player = IdleTalkPlayer.createPlayer({
+      const player = session.player = IdleTalkPlayer.createPlayer({
         sink,
         send: (m) => {
           if (C.errorResolved(errorCode, m)) showError('', null); // 再生が始まった = 一時的な失敗は解消した
-          if (client) client.sendJson(m);
+          if (connection === session && session.client) session.client.sendJson(m);
         },
       });
-      client = C.createClient({
+      client = session.client = C.createClient({
         port, WebSocketCtor: WebSocket, player,
         onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); $('state').dataset.state = m.state; },
         onError: (m) => showError(`[${m.code}] ${m.message}`, m.code),
@@ -264,21 +288,22 @@
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
           const src = drama || screen;
           const r = src ? await src.snapshot() : { reason: 'not sharing' };
-          if (client) client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg, thumb: r.thumb } : { t: 'snap', id: m.id, reason: r.reason });
+          if (connection === session) session.client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg, thumb: r.thumb } : { t: 'snap', id: m.id, reason: r.reason });
         },
         onOpen: () => { showError('', null); pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
         onClose: () => { $('state').textContent = '再接続中…'; $('state').dataset.state = 'offline'; $('search').textContent = ''; },
       });
-      await C.startCapture({
+      const capture = await C.startCapture({
         getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
         AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
       });
+      if (connection !== session) { capture.stop(); return; }
+      session.capture = capture;
       showDrama();
     } catch (e) {
+      if (connection !== session) return;
+      stopConnection();
       showError(String(e), null);
-      if (client) client.close();
-      client = null;
-      $('start').disabled = false;
     }
   });
 
@@ -298,18 +323,22 @@
   }
   $('drama').addEventListener('click', async () => {
     if (drama) { drama.stop(); return; }
+    const owner = connection;
     try {
-      drama = await C.startDramaCapture({
+      const capture = await C.startDramaCapture({
         getDisplayMedia: (c) => navigator.mediaDevices.getDisplayMedia(c),
         AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
         // LLM が画像を読めるときだけ映像を残す (LLM の起動後に決まるので、画面を開いた時ではなく共有の開始時に聞く)
         vision: loadServerConfig().then((c) => Boolean(c.vision), () => false),
-        onEnded: () => { drama = null; showDrama(); pushUi(); },
+        onEnded: () => { if (connection !== owner) return; drama = null; showDrama(); pushUi(); },
       });
+      if (connection !== owner) { capture.stop(); return; }
+      drama = capture;
       showError('', null);
       showDrama();
       pushUi();
     } catch (e) {
+      if (connection !== owner) return;
       showError(String(e), null);
     }
   });
@@ -318,19 +347,24 @@
   // 前に話したときから変わっていれば一言言う
   $('screen').addEventListener('click', async () => {
     if (screen) { screen.stop(); return; }
+    const owner = connection;
     try {
       const opts = {
         getDisplayMedia: (c) => navigator.mediaDevices.getDisplayMedia(c),
         vision: loadServerConfig().then((c) => Boolean(c.vision), () => false),
-        onEnded: () => { screen = null; showDrama(); pushUi(); },
+        onEnded: () => { if (connection !== owner) return; screen = null; showDrama(); pushUi(); },
       };
       // follow_window は起動時に決まるので読込済みの設定で見る (共有画面を出す前に待つとクリックの扱いが切れる)
       const follow = await serverConfig.then((c) => Boolean(c.follow_window), () => false);
-      screen = follow ? await C.startWindowWatch(opts) : await C.startScreenCapture(opts);
+      if (connection !== owner) return;
+      const capture = follow ? await C.startWindowWatch(opts) : await C.startScreenCapture(opts);
+      if (connection !== owner) { capture.stop(); return; }
+      screen = capture;
       showError('', null);
       showDrama();
       pushUi();
     } catch (e) {
+      if (connection !== owner) return;
       showError(String(e), null);
     }
   });
