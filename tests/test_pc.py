@@ -6,14 +6,14 @@ import time
 
 import pytest
 from mocks import FakeClock
-from mocks_browser import MockBrowser
+from mocks_browser import LOUD, QUIET, MockBrowser
 
 from idle_talk.clients import AsrClient
 from idle_talk.config import Pc, load_pc
 from idle_talk.director import IdleTalkDirector
 from idle_talk.fsm import State
 from idle_talk.history import talk_log
-from idle_talk.monitor import Monitor
+from idle_talk.monitor import MicCapture, Monitor
 from idle_talk.protocol import validate_message
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
@@ -22,10 +22,10 @@ from idle_talk.vad import EnergyVad
 # ---- 設定・プロトコル ----
 def test_load_pc(tmp_path):
     f = tmp_path / "t.toml"
-    f.write_text('[pc]\nmonitor = "Realtek"\n', encoding="utf-8")
-    assert load_pc(f).monitor == "Realtek"
+    f.write_text('[pc]\nmonitor = "Realtek"\nmic = "USB"\n', encoding="utf-8")
+    assert load_pc(f) == Pc(monitor="Realtek", mic="USB")
     assert load_pc(tmp_path / "none.toml") == Pc()
-    for bad in ("monitor = 1", 'monitor = "' + "x" * 101 + '"', "x = 1"):
+    for bad in ("monitor = 1", 'monitor = "' + "x" * 101 + '"', "mic = 1", "x = 1"):
         f.write_text(f"[pc]\n{bad}\n", encoding="utf-8")
         with pytest.raises(ValueError):
             load_pc(f)
@@ -102,6 +102,32 @@ def test_monitor_open_failure_raises():
     assert not m.running
 
 
+class FakeInput:
+    """read(n) で用意したフレームを返し、尽きたら止まるまで無音を返す。"""
+    def __init__(self, frames: list[bytes] | None = None):
+        self.frames = list(frames or [])
+        self.closed = False
+
+    def read(self, n):
+        time.sleep(0.001)
+        return (self.frames.pop(0) if self.frames else b"\x00\x00" * n), False
+
+    def stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_mic_capture_feeds_frames():
+    got: list[bytes] = []
+    m = MicCapture(got.append, lambda: FakeInput([b"\x01\x00" * 320]))
+    m.start()
+    wait_for(lambda: len(got) >= 2)
+    m.stop()
+    assert got[0] == b"\x01\x00" * 320 and not m.running
+
+
 # ---- Director ----
 def make(tmp_path, replies, texts, open_ok=True):
     clock = FakeClock()
@@ -125,6 +151,9 @@ def make(tmp_path, replies, texts, open_ok=True):
             raise OSError("no device")
         return stream
     d.open_monitor = open_stream
+    mic = FakeInput()
+    d.open_mic = lambda: mic
+    d.mic_ = mic
     b = MockBrowser()
     b.attach(d.core)
     d.clock_, d.seen_, d.stream_ = clock, seen, stream
@@ -164,7 +193,7 @@ def test_pc_mode_plays_on_monitor_and_logs_pc(tmp_path):
         d, b, store = make(tmp_path, ["和食が好きだよ。"], ["好きな食べ物は何ですか"])
         pc_on(d, b)
         assert d.pc_on and d.monitor.running
-        b.speak()
+        d.mic_.frames = [LOUD] * 15 + [QUIET] * 12  # マイクは Python が録る
         await until(lambda: ai_turns(store) == 1)
         assert b.chunks == [] and d.stream_.data  # 声はモニターが鳴らし、ブラウザには届かない
         assert "".join(m["text"] for m in b.of("text")) == "和食が好きだよ。"  # 文字は画面に出す
@@ -202,6 +231,89 @@ def test_switching_stops_playing_voice(tmp_path):
         assert d.pc_on and d.fsm.ctx.state is State.IDLE and d.epoch.current == ep + 1
         assert b.of("cancel")[-1]["new_epoch"] == ep + 1
         assert d.spontaneous_tick() is None  # PC と話す間は自発発話も無操作休止もしない
+    asyncio.run(run())
+
+
+def test_pc_mode_does_not_duck_monitor(tmp_path):
+    async def run():
+        d, b, _ = make(tmp_path, [], [])
+        pc_on(d, b)
+        d._act_duck(None)  # マイクが拾ったモニターの声で発話開始になった
+        assert d.monitor.gain == 1.0
+        assert b.of("duck")  # 画面への通知は今までどおり
+    asyncio.run(run())
+
+
+def test_pc_mode_discards_speech_during_ai_voice_except_stop_words(tmp_path):
+    def pc_echo(store):
+        return store.query("SELECT COUNT(*) FROM events WHERE kind='pc_echo_suppressed'")[0][0]
+
+    async def run():
+        d, b, store = make(tmp_path, [], [])
+        d._ai_text = "そう言ってくれるの嬉しいわ！"
+        d._speech_in_ai = True
+        assert d._on_transcript(1, "うれしい") is True  # モード外: 文字が一致しないので自声とみなさない
+        pc_on(d, b)
+        d._speech_in_ai = True
+        assert d._on_transcript(2, "うれしい") is False  # AI の声の聞き違い
+        assert pc_echo(store) == 1
+        d._speech_in_ai = True
+        d._on_transcript(3, "ストップ")  # 停止語は止める
+        assert pc_echo(store) == 1
+        d._on_transcript(4, "好きな食べ物は何ですか")  # AI の声の最中でなければ使う
+        assert pc_echo(store) == 1
+    asyncio.run(run())
+
+
+def test_pc_mode_listens_with_python_mic(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["和食が好きだよ。"], ["好きな食べ物は何ですか"])
+        pc_on(d, b)
+        assert d.mic is not None and d.mic.running
+        b.speak()  # ブラウザのマイクは捨てる
+        await asyncio.sleep(0.1)
+        assert d.fsm.ctx.state is State.IDLE
+        d.mic_.frames = [LOUD] * 15 + [QUIET] * 12  # Python のマイクで聞く
+        await until(lambda: ai_turns(store) == 1)
+        pc_on(d, b, False)
+        assert d.mic is None and d.mic_.closed
+    asyncio.run(run())
+
+
+def test_pc_mode_quiet_python_mic_is_not_device_lost(tmp_path):
+    async def run():
+        d, b, _ = make(tmp_path, [], [])
+        d.ingress.clock = d.clock_
+        pc_on(d, b)
+        for _ in range(250):  # 静かな部屋の生の音 (RMS 1 未満) が 5 秒
+            d._feed_mic(b"\x01\x00" * 320)
+            d.clock_.advance(0.02)
+        d._pump()
+        assert not d.ingress.device_lost and d.fsm.ctx.state is State.IDLE
+        assert not b.of("error")
+        pc_on(d, b, False)
+        assert d.ingress.silence_check
+    asyncio.run(run())
+
+
+def test_mic_capture_read_failure_reports_lost():
+    class Broken(FakeInput):
+        def read(self, n):
+            raise OSError("unplugged")
+    lost: list[bool] = []
+    m = MicCapture(lambda pcm: None, Broken, lambda: lost.append(True))
+    m.start()
+    wait_for(lambda: lost)
+    m.stop()
+
+
+def test_pc_mode_mic_lost_rests(tmp_path):
+    async def run():
+        d, b, _ = make(tmp_path, [], [])
+        pc_on(d, b)
+        d._mic_lost()
+        await until(lambda: d.fsm.ctx.state is State.REST)
+        assert b.of("error")[-1]["code"] == 5005
     asyncio.run(run())
 
 

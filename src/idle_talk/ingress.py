@@ -54,6 +54,9 @@ class Ingress:
         self.frames_by_state: Counter[str] = Counter()
         self.noise_log: list[int] = []
         self.device_lost = False
+        # E6 を無音で判定するか。Python で録るマイク (PC と話すモード) は静かな部屋で RMS 0.5 程度になり、
+        # 抜けたと誤判定したので、読み取りの失敗で判定する (Director が切り替える)
+        self.silence_check = True
         self._buf: bytearray | None = None
         # VAD が発話開始を判定するまでの onset_frames - 1 フレーム (発話の頭) を区間に含めるための直前フレーム
         self._pre: deque[bytes] = deque(maxlen=getattr(vad, "onset_frames", 1) - 1)
@@ -87,7 +90,8 @@ class Ingress:
     def feed(self, frame: bytes) -> None:
         """全状態で同一に VAD を回す (不変条件 2)。fsm 状態は計数のみに使う。"""
         self.frames_by_state[self.director.ctx.state.value] += 1
-        self._check_silence(frame)
+        if self.silence_check:
+            self._check_silence(frame)
         if self._buf is not None:
             self._buf += frame
         ev = self.vad.process(frame)
@@ -160,6 +164,15 @@ class Ingress:
             self.director.enqueue(Event(Ev.SILENCE, silence_ms=self.cfg.T_silence, eot=True))
 
     # ---- E6: 無音フレーム連続 ----
+    def lost(self) -> None:
+        """マイクが読めなくなった (E6)。休止して 5005 を出す。"""
+        if self.device_lost:
+            return
+        self.device_lost = True
+        self.director.enqueue(Event(Ev.FAILURES))
+        if self.on_error:
+            self.on_error(ERR_MIC_LOST, "microphone device lost")
+
     def _check_silence(self, frame: bytes) -> None:
         now = self.clock()
         if rms(frame) > self.silent_rms:
@@ -168,11 +181,8 @@ class Ingress:
             return
         if self._silent_since is None:
             self._silent_since = now
-        if not self.device_lost and now - self._silent_since >= self.cfg.E_PARAMS.device_lost_s:
-            self.device_lost = True
-            self.director.enqueue(Event(Ev.FAILURES))
-            if self.on_error:
-                self.on_error(ERR_MIC_LOST, "microphone device lost")
+        if now - self._silent_since >= self.cfg.E_PARAMS.device_lost_s:
+            self.lost()
 
 
 def _embed_result(fut: Future | None, uid: int) -> object:

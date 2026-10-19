@@ -15,7 +15,8 @@ from collections.abc import Callable
 from .clients import TTS_RATE
 
 log = logging.getLogger("idle_talk.monitor")
-BLOCK_MS = 20  # この単位で書き込み、取消と音量の変更をすぐ効かせる
+BLOCK_MS = 20  # この単位で書き込み、取消と音量の変更をすぐ効かせる (マイクもこの単位で読む)
+MIC_RATE = 16000  # 上りと同じ 16kHz mono s16le
 
 
 def open_device(name: str, rate: int = TTS_RATE):
@@ -38,6 +39,86 @@ def open_device(name: str, rate: int = TTS_RATE):
     except Exception as e:  # noqa: BLE001  PortAudioError 等は機器を開けなかったとして扱う
         raise OSError(f"cannot open output device {name or '(default)'}: {e}") from e
     return stream
+
+
+def open_input(name: str, rate: int = MIC_RATE):
+    """name を含む入力機器 (空なら Windows の既定の録音機器) を 16kHz mono s16le で開く。開けなければ OSError。"""
+    try:
+        import sounddevice as sd
+    except ImportError as e:
+        raise OSError("sounddevice is not installed (pip install sounddevice)") from e
+    device = None
+    if name:
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_input_channels"] > 0 and name in d["name"]:
+                device = i
+                break
+        else:
+            raise OSError(f"input device not found: {name!r}")
+    try:
+        stream = sd.RawInputStream(samplerate=rate, channels=1, dtype="int16", device=device,
+                                   blocksize=rate * BLOCK_MS // 1000)
+        stream.start()
+    except Exception as e:  # noqa: BLE001
+        raise OSError(f"cannot open input device {name or '(default)'}: {e}") from e
+    return stream
+
+
+class MicCapture:
+    """PC と話すモードのマイク。ブラウザ (Chrome) のエコー除去を通さずに録る。
+
+    Chrome のエコー除去は Chrome が鳴らした音を消すので、ブラウザの ChatGPT の声は idle-talk のタブのマイクから
+    ほぼ消えた (実機 2026-10-19)。feed(pcm) は録音スレッドから 20ms ごとに呼ばれる (呼び出し側でループへ渡す)。"""
+
+    def __init__(self, feed: Callable[[bytes], None], open_stream: Callable[[], object],
+                 on_lost: Callable[[], None] = lambda: None) -> None:
+        self._feed = feed
+        self._on_lost = on_lost
+        self._open = open_stream
+        self._stream = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        """機器を開いて録音スレッドを始める。開けなければ OSError。"""
+        if self._running:
+            return
+        self._stream = self._open()
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, name="mic", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception as e:  # noqa: BLE001
+                log.info("mic close failed: %s", e)
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+            self._thread = None
+
+    def _loop(self) -> None:
+        n = MIC_RATE * BLOCK_MS // 1000
+        while self._running:
+            stream = self._stream
+            if stream is None:
+                return
+            try:
+                data, _overflow = stream.read(n)
+            except Exception as e:  # noqa: BLE001  機器が抜けた等: 録音をやめて知らせる (E6)
+                if self._running:
+                    log.warning("mic read failed: %s", e)
+                    self._on_lost()
+                return
+            self._feed(bytes(data))
 
 
 class Monitor:

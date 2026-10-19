@@ -31,10 +31,10 @@ from .fsm import Action, Ctx, Ev, Event, State, transition
 from .fsm import Director as FsmDirector
 from .history import PlaybackHistory, history_window, talk_log
 from .ingress import Ingress
-from .interrupt import judge
+from .interrupt import is_stop_word, judge
 from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, parse_extracted, remember
 from .metrics import MetricsRecorder
-from .monitor import Monitor
+from .monitor import MicCapture, Monitor
 from .persona import PersonaBook
 from .pipeline import ResponsePipeline
 from .protocol import is_drama, pack_down_chunk
@@ -71,6 +71,7 @@ FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 DOWN_LOOKAHEAD = 1
 MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
 ECHO_SUPPRESSED_KIND = "echo_suppressed"  # AI 再生中に拾った自声の認識結果を捨てた 1 回 = 1 行
+PC_ECHO_KIND = "pc_echo_suppressed"  # PC と話すモードで AI の声の最中に始まった発話を捨てた 1 回 = 1 行
 # ドラマモード (設計書 6.5)
 DRAMA_ECHO_KIND = "drama_echo_suppressed"  # マイクが拾ったドラマの台詞を捨てた 1 回 = 1 行
 DRAMA_SELF_KIND = "drama_self_suppressed"  # 共有した音に入った AI の声をドラマの台詞から捨てた 1 回 = 1 行
@@ -245,6 +246,8 @@ class IdleTalkDirector:
         self.pc_on = False
         self.open_monitor: Callable[[], object] | None = None  # モニターの出力機器を開く (main が結線)
         self.monitor: Monitor | None = None
+        self.open_mic: Callable[[], object] | None = None  # マイクの入力機器を開く (main が結線)。None ならブラウザのマイクのまま
+        self.mic: MicCapture | None = None  # PC と話すモード中のマイク。動いている間はブラウザのマイクを捨てる
         self._loop: asyncio.AbstractEventLoop | None = None
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
@@ -278,6 +281,9 @@ class IdleTalkDirector:
             meta = {"host": socket.gethostname() or "unknown", "started_at": self._m_started_at,
                     "ended_at": ended, "app_commit": self.app_commit, "sample_count": n}
             self.store.add_event(ended, self.epoch.current, "run_meta", json.dumps(meta))
+        for dev in (self.mic, self.monitor):  # PC と話すモードの機器を閉じる
+            if dev is not None:
+                dev.stop()
         self._asr_pool.shutdown(wait=False, cancel_futures=True)
         self._drama_pool.shutdown(wait=False, cancel_futures=True)
         self.store.close()
@@ -329,14 +335,11 @@ class IdleTalkDirector:
 
     # ---- 送信 ----
     def _emit(self, msg: dict) -> None:
-        if self.monitor is not None:  # PC と話すモード: AI の声はモニターが鳴らすので、止める・音量の指示もモニターへ
-            t = msg.get("t")
-            if t == "cancel":
+        if self.monitor is not None:  # PC と話すモード: AI の声はモニターが鳴らすので、止める指示もモニターへ
+            # duck は渡さない。モニターの声はマイクのエコー除去で消えず、自分の声で毎回音量が下がった (実機 2026-10-19)。
+            # 割り込みは認識結果で判定し、語があれば cancel で止まる
+            if msg.get("t") == "cancel":
                 self.monitor.cancel()
-            elif t == "duck":
-                self.monitor.duck(msg["gain"])
-            elif t == "resume":
-                self.monitor.resume()
         if self.core.conn is not None:
             self.core.conn.send_text(json.dumps(msg, ensure_ascii=False))
 
@@ -425,6 +428,11 @@ class IdleTalkDirector:
                     if seg is not None:
                         self._drama_asr(seg)
             return
+        if self.mic is not None:  # PC と話すモード: マイクは Python が録る (二重に聞かない)
+            return
+        self._feed_mic(pcm)
+
+    def _feed_mic(self, pcm: bytes) -> None:
         cur = self.epoch.current  # 再生中 = 現行世代の送出済みチャンクが再生終了の報告待ち (VAD の自動校正が使う)
         self.ingress.vad.playing = any(k[0] == cur for k in self._down_sent)
         # ドラマの音が鳴っている間は、スピーカーからの回り込みを測ってマイクの閾値を上げる (笑い声や BGM を声と取らない)
@@ -485,6 +493,13 @@ class IdleTalkDirector:
             log.info("transcript without words discarded: utterance %d %r", uid, text)
             return False
         if in_ai and self._is_echo(uid, text):
+            return False
+        if in_ai and self.pc_on and not is_stop_word(text, self.cfg):
+            # PC と話すモード: モニターの声はマイクのエコー除去で消えず、聞き違い (「嬉しいわ」→「うれしい」) は
+            # 文字の一致で捨てられずに割り込みになった (実機 2026-10-19)。AI の声の最中は停止語だけで止める
+            log.info("pc echo discarded: utterance %d %r", uid, text)
+            self.store.add_event(self.now_ms(), self.epoch.current, PC_ECHO_KIND,
+                                 json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
         if self.drama_on and self.drama.contains(text):  # スピーカーから回り込んだドラマの台詞
             log.info("drama echo discarded: utterance %d %r", uid, text)
@@ -1096,16 +1111,25 @@ class IdleTalkDirector:
             except RuntimeError:
                 self._loop = None
             monitor = Monitor(self._monitor_report, self.epoch.is_current, self.open_monitor)
+            mic = MicCapture(self._mic_frame, self.open_mic, self._mic_lost) if self.open_mic is not None else None
             try:
                 monitor.start()
+                if mic is not None:
+                    mic.start()
             except OSError as e:  # 機器が開けない・sounddevice が無い: モードを始めない
+                monitor.stop()
                 log.warning("pc mode not started: %s", e)
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": f"pc: {e}"[:200]})
                 return
             self._switch_output()
-            self.monitor = monitor
+            self.monitor, self.mic = monitor, mic
+            self.ingress.silence_check = mic is None
         else:
             self._switch_output()
+            if self.mic is not None:
+                self.mic.stop()
+                self.mic = None
+            self.ingress.silence_check = True
             if self.monitor is not None:
                 self.monitor.stop()
                 self.monitor = None
@@ -1123,6 +1147,27 @@ class IdleTalkDirector:
             self._cancel_path("interrupt")
             self.fsm.ctx = replace(self.fsm.ctx, state=State.IDLE, epoch=self.epoch.current)
             self._send_state(self.fsm.ctx)
+
+    def _mic_frame(self, pcm: bytes) -> None:
+        """Python のマイクの録音スレッドから: イベントループに渡し、ブラウザの上りと同じ経路で聞く。"""
+        def deliver() -> None:
+            if self.mic is not None and self.core.hello_done:
+                self._feed_mic(pcm)
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(deliver)
+        else:
+            deliver()
+
+    def _mic_lost(self) -> None:
+        """Python のマイクが読めなくなった (録音スレッドから)。休止して 5005 を出す。"""
+        def deliver() -> None:
+            if self.mic is not None:
+                self.ingress.lost()
+                self._pump()
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(deliver)
+        else:
+            deliver()
 
     def _monitor_report(self, msg: dict) -> None:
         """モニターの再生スレッドから: イベントループに渡す。ブラウザの playback と同じく旧世代は捨てる。"""

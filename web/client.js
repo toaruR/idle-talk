@@ -45,7 +45,7 @@
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'screen', 'persona']) {
+    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'screen', 'pc', 'persona']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;

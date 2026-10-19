@@ -140,6 +140,10 @@ test('makeUi: screen is passed through', () => {
   assert.deepEqual(C.makeUi({ screen: true }), { t: 'ui', screen: true });
 });
 
+test('makeUi: pc is passed through', () => {
+  assert.deepEqual(C.makeUi({ pc: true }), { t: 'ui', pc: true });
+});
+
 test('grayThumb: one luminance byte per pixel', () => {
   const rgba = new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255, 255, 0, 0, 255]);
   assert.deepEqual([...Buffer.from(C.grayThumb(rgba), 'base64')], [255, 0, 76]);

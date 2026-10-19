@@ -24,7 +24,7 @@ from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
 from .llm_supervisor import LlmSupervisor, build_llama_argv, has_vision, is_ready, popen_starter, wait_ready, watch
 from .metrics import MetricsRecorder
-from .monitor import open_device
+from .monitor import open_device, open_input
 from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
@@ -168,6 +168,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     director.snap_dir = data_dir / SNAP_DIR
     pc = load_pc(args.config)  # PC と話すモード: AI の声はモニターが [pc].monitor の機器に鳴らす
     director.open_monitor = lambda: open_device(pc.monitor)
+    director.open_mic = lambda: open_input(pc.mic)  # マイクもブラウザを通さず録る (Chrome のエコー除去が相手の声を消す)
     screen = load_screen(args.config)
     director.screen = ScreenWatcher(screen)
     if screen.follow_window:  # ブラウザの共有の代わりに前面のウィンドウを撮る (設計書 6.7)
