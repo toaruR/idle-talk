@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "idle-talk",
+  "version": "1.0.0",
+  "description": "Guide connected idle-talk application through safe, user-directed idle conversation.",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/idle-talk/SKILL.md"
+    }
+  }
+}
