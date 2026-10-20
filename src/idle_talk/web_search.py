@@ -17,6 +17,8 @@ import re
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from functools import lru_cache
+from importlib.resources import files
 
 log = logging.getLogger("idle_talk.web_search")
 
@@ -32,6 +34,9 @@ MAX_RESULTS = 5
 RESULTS_MAX_CHARS = 800  # LLM に渡す検索結果 (見出しと抜粋) の上限 (ctx 4k を圧迫しない)
 PAGE_MAX_CHARS = 800  # LLM に渡すページ本文の抜粋の上限
 ANSWER_TURNS = 4  # 結果を渡して答えさせるときの履歴ターン数 (結果のぶん履歴を削る)
+SEARCH_MAX_ROUNDS = 3  # 初回を含む。追加検索の無限ループを防ぐ
+RESEARCH_ROUND_MAX_CHARS = 1000  # 検索を重ねても資料が際限なく増えないよう各回を制限
+SEARCH_INCOMPLETE_NOTICE = "ここまでの検索では、答えを確かめる情報が十分に揃いませんでした。"
 SEARCH_NOTICE = "ちょっと調べてみるね。"  # 検索を始めたことを声で伝える
 SEARCH_WAIT_NOTICE = "もう少し待ってね。"  # 検索が SEARCH_WAIT_S を超えたら 1 回だけ言う
 SEARCH_WAIT_S = 5.0
@@ -304,6 +309,36 @@ def answer_messages(messages: list[dict], query: str, results: list[dict],
     else:
         ref = (f"(Web で「{query}」を検索しましたが、結果が得られませんでした。"
                "推測で答えず、調べられなかったことを話し言葉で 1〜2 文で伝えてください)")
+    return system + turns + [{"role": "user", "content": (last["content"] + "\n\n" + ref).strip()}]
+
+
+@lru_cache(maxsize=1)
+def search_deeper_skill() -> str:
+    """検索時だけ読む、同梱の深掘り検索手順。frontmatter はプロンプトに含めない。"""
+    text = files("idle_talk").joinpath("skills/search-deeper/SKILL.md").read_text(encoding="utf-8")
+    return text.split("---", 2)[-1].strip()
+
+
+def research_messages(messages: list[dict], searches: list[tuple[str, list[dict]]], remaining: int,
+                      today: datetime.date | None = None) -> list[dict]:
+    """元の質問・各回の資料・残り回数を渡し、追加検索か最終回答を選ばせる。"""
+    today = today or datetime.date.today()
+    has_system = bool(messages and messages[0]["role"] == "system")
+    rule = (search_deeper_skill() if remaining > 0 else
+            "調査は終了しました。今回は最終回答だけを返してください。追加検索の指示は出さないでください。"
+            "資料で確認できた内容と未確認の点を、人物設定の口調で2〜4文で伝えてください。"
+            "未確認の事実を作らず、資料からの推論は推論として区別し、Xの投稿は個人の発言として扱ってください。"
+            "日時が重要なら添え、URLは読み上げないでください。")
+    rule += f"\n追加検索の残り回数: {remaining}回。"
+    system = [{"role": "system", "content": (messages[0]["content"] + "\n" if has_system else "") + rule}]
+    turns = messages[int(has_system):][-ANSWER_TURNS:]
+    last = turns.pop() if turns and turns[-1]["role"] == "user" else {"role": "user", "content": ""}
+    sources = []
+    for i, (query, results) in enumerate(searches, 1):
+        body = format_results(results)[:RESEARCH_ROUND_MAX_CHARS] or "結果が得られませんでした。"
+        sources.append(f"[検索{i}: {query}]\n{body}")
+    ref = (f"今日は{today.year}年{today.month}月{today.day}日。以下は検索履歴と外部資料です。\n"
+           + "\n\n".join(sources))
     return system + turns + [{"role": "user", "content": (last["content"] + "\n\n" + ref).strip()}]
 
 

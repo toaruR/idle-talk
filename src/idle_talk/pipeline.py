@@ -13,8 +13,9 @@ from .clients import ClientError
 from .epoch import Epoch
 from .errors import ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 from .llm_supervisor import FALLBACK_PHRASE
-from .web_search import (LINK_NOTICE, SEARCH_NOTICE, SEARCH_WAIT_NOTICE, SEARCH_WAIT_S, answer_messages, find_mark,
-                         link_items, parse_query, with_link_rule, with_search_rule)
+from .web_search import (LINK_NOTICE, SEARCH_INCOMPLETE_NOTICE, SEARCH_MAX_ROUNDS, SEARCH_NOTICE,
+                         SEARCH_WAIT_NOTICE, SEARCH_WAIT_S, find_mark, link_items, parse_query,
+                         research_messages, with_link_rule, with_search_rule)
 
 log = logging.getLogger("idle_talk.pipeline")
 _END = object()
@@ -132,28 +133,69 @@ class ResponsePipeline:
 
     def _search_clauses(self, messages: list[dict], query: str, search: Callable[[str], list[dict]], ep: int,
                         emit: Callable[[dict], None]):
-        """検索中であることを声で伝えてから検索し、結果を添えて答え直させる。取消後は 2 回目の LLM を呼ばない。"""
+        """結果が不足すれば skill に従って再検索。回数と重複を制限し、取消後は進めない。"""
         query = query or next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")[:100]
-        log.info("web search: %r", query)
-        emit({"t": "search", "query": query[:200], "active": True})
-        yield SEARCH_NOTICE
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="search") as ex:
-            fut = ex.submit(search, query)
+        searches: list[tuple[str, list[dict]]] = []
+        seen: set[str] = set()
+        links: dict[str, dict] = {}
+        wait_notified = False
+        while self.epoch.is_current(ep):
+            key = " ".join(query.split()).casefold()
+            if not key or key in seen or len(searches) >= SEARCH_MAX_ROUNDS:
+                yield SEARCH_INCOMPLETE_NOTICE
+                return
+            seen.add(key)
+            log.info("web search round=%d: %r", len(searches) + 1, query)
+            emit({"t": "search", "query": query[:200], "active": True})
             try:
-                results = fut.result(timeout=SEARCH_WAIT_S)
-            except FutureTimeout:
-                if self.epoch.is_current(ep):
-                    yield SEARCH_WAIT_NOTICE
-                results = fut.result()
-        emit({"t": "search", "query": query[:200], "active": False})
-        if results:  # 取消されても調べた結果は残す (後で「URL を教えて」と言われたら出す)
-            self.links = link_items(results)
-        if not self.epoch.is_current(ep):
-            return
+                if not searches:
+                    yield SEARCH_NOTICE
+                if not self.epoch.is_current(ep):
+                    return
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="search") as ex:
+                    fut = ex.submit(search, query)
+                    try:
+                        results = fut.result(timeout=SEARCH_WAIT_S)
+                    except FutureTimeout:
+                        if self.epoch.is_current(ep) and not wait_notified:
+                            wait_notified = True
+                            yield SEARCH_WAIT_NOTICE
+                        results = fut.result()
+            finally:
+                emit({"t": "search", "query": query[:200], "active": False})
+            searches.append((query, results))
+            for item in link_items(results):
+                links[item["url"]] = item
+            if links:  # 取消されても調べた結果は残す
+                self.links = list(links.values())
+            if not self.epoch.is_current(ep):
+                return
+            next_query = yield from self._research_answer(messages, searches, ep)
+            if next_query is None:
+                return
+            query = next_query
+
+    def _research_answer(self, messages: list[dict], searches: list[tuple[str, list[dict]]], ep: int):
+        """追加検索のマーカーは読み上げず呼出元へ返す。通常の回答は逐次読み上げる。"""
         sp = ClauseSplitter()
-        for tok in self._llm(answer_messages(messages, query, results)):
-            yield from sp.feed(tok)
-        yield from sp.flush()
+        toks = iter(self._llm(research_messages(messages, searches, SEARCH_MAX_ROUNDS - len(searches))))
+        try:
+            for tok in toks:
+                if not self.epoch.is_current(ep):
+                    return None
+                for clause in sp.feed(tok):
+                    kind, after = yield from self._before_mark(clause, [])
+                    if kind == "search":
+                        return parse_query(after)
+            for clause in sp.flush():
+                if not self.epoch.is_current(ep):
+                    return None
+                kind, after = yield from self._before_mark(clause, [])
+                if kind == "search":
+                    return parse_query(after)
+        finally:
+            getattr(toks, "close", lambda: None)()
+        return None
 
     async def respond(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
                       tail: str = "") -> int:
