@@ -32,7 +32,8 @@ from .screen import ScreenWatcher
 from .server import serve
 from .store import Store
 from .topic_worker import TopicWorker
-from .web_search import NEWS_QUERIES, WebSearch, news_search, x_trends
+from .browser_page import PageReader
+from .web_search import NEWS_QUERIES, WebSearch, http_fetch, news_search, x_trends
 from .wincap import WindowCapture
 from .vad import FRAME_MS, EnergyVad
 
@@ -185,6 +186,12 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     search = load_search(args.config)
     if search.on:
         director.web_search = WebSearch(engines=search.engines, read_page=search.read_page, realtime=search.realtime)
+        if search.read_window and sys.platform == "win32":  # 見ているページを読む (URL だけ r.jina.ai に送る)
+            director.page_reader = PageReader(http_fetch, screen.exclude)
+            try:  # 本文が読めないときは前面のウィンドウの画面で答える (LLM が画像を読めるときだけ)
+                director.page_capture = WindowCapture(screen.exclude, screen.width, screen.color_bits).grab
+            except OSError as e:
+                log.warning("page capture unavailable: %s", e)
     if topics.feeds or topics.x_trends or search.on:  # 話題カードが尽きたらニュース検索でも補充する ([search].on のとき)
         director.topic_worker = TopicWorker(store, list(topics.feeds), news=news_search if search.on else None,
                                             news_queries=NEWS_QUERIES, trends=x_trends if topics.x_trends else None)

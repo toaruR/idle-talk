@@ -94,6 +94,7 @@ on = true
 engines = ["duckduckgo", "bing"]  # 先頭から試し、失敗・0 件なら次へ (使えるのは duckduckgo / bing)
 read_page = true      # 上位 1 件のページ本文を r.jina.ai 経由で読んで添える (株価などの今の値が取れる。約 1〜5 秒)
 realtime = true       # X の新しい投稿 3 件も添える (Yahoo! リアルタイム検索。世間の反応・話題向け。約 1 秒増える)
+read_window = true    # 「このページどう思う？」等と頼むと、前面のブラウザ (Chrome / Edge) で開いているページを r.jina.ai 経由で読んで答える (Windows のみ。約 3〜10 秒)
 
 [voice_id]
 # 話者識別: 声の特徴で話し相手を見分け、初めての声 (2 回続けて同じ知らない声) なら会話の中で名前を聞いて覚える。

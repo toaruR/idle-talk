@@ -8,12 +8,13 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from .browser_page import PAGE_FAIL, PAGE_NOTICE, page_messages, wants_page
 from .clause import ClauseSplitter, is_synthesizable
 from .clients import ClientError
 from .epoch import Epoch
 from .errors import ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 from .llm_supervisor import FALLBACK_PHRASE
-from .web_search import (LINK_NOTICE, SEARCH_INCOMPLETE_NOTICE, SEARCH_MAX_ROUNDS, SEARCH_NOTICE,
+from .web_search import (ANSWER_TURNS, LINK_NOTICE, SEARCH_INCOMPLETE_NOTICE, SEARCH_MAX_ROUNDS, SEARCH_NOTICE,
                          SEARCH_WAIT_NOTICE, SEARCH_WAIT_S, find_mark, link_items, parse_query,
                          research_messages, with_link_rule, with_search_rule)
 
@@ -81,12 +82,17 @@ class ResponsePipeline:
         log.info("discard stale epoch=%d current=%d text=%r", ep, self.epoch.current, text)
 
     def _llm_clauses(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
-                     emit: Callable[[dict], None] | None = None):
+                     emit: Callable[[dict], None] | None = None, page: Callable[[], dict | None] | None = None,
+                     shot: Callable[[], tuple[str, str] | None] | None = None):
         """LLM 出力を節にする (別スレッドで回る)。emit はイベントループへ渡すメッセージ送出。"""
         emit = emit or self._emit
         sp = ClauseSplitter()
         ep = self.epoch.current
         try:
+            last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+            if page is not None and isinstance(last, str) and wants_page(last):
+                yield from self._page_clauses(messages, page, shot, ep, emit)
+                return
             links = list(self.links) if search is not None else []
             first = messages
             if search is not None:
@@ -113,6 +119,38 @@ class ResponsePipeline:
             log.warning("llm failed: %s", e)
             emit({"t": "error", "code": ERR_LLM_TIMEOUT, "message": str(e)[:200]})
             yield FALLBACK_PHRASE
+
+    def _page_clauses(self, messages: list[dict], page: Callable[[], dict | None],
+                      shot: Callable[[], tuple[str, str] | None] | None, ep: int, emit: Callable[[dict], None]):
+        """見ているページを読んで答える。URL が取れない・本文が読めなければ、shot (前面のウィンドウの
+        (画像の data URL, タイトル)。LLM が画像を読めるときだけ渡る) の画面で答える。どちらも無ければ定型文。"""
+        yield PAGE_NOTICE
+        found = page()
+        if not self.epoch.is_current(ep):  # 読む間に取り消された (HTTP は打ち切らず結果を捨てる)
+            return
+        if found is not None:
+            self.links = link_items([found])  # 読んだページは画面の URL 欄に出す (「URL を教えて」でも出せる)
+            emit({"t": "links", "items": self.links})
+        image = None
+        if found is None or not found["text"]:
+            got = shot() if shot is not None else None
+            if got is None or not self.epoch.is_current(ep):
+                if self.epoch.is_current(ep):
+                    yield PAGE_FAIL
+                return
+            image, title = got
+            found = {"title": (found or {}).get("title") or title}
+            log.info("page ask: read the screen instead")
+        sp = ClauseSplitter()
+        toks = iter(self._llm(page_messages(messages, found, ANSWER_TURNS, image)))
+        try:
+            for tok in toks:
+                if not self.epoch.is_current(ep):
+                    return
+                yield from sp.feed(tok)
+            yield from sp.flush()
+        finally:
+            getattr(toks, "close", lambda: None)()
 
     @staticmethod
     def _before_mark(clause: str, links: list[dict]):
@@ -198,11 +236,14 @@ class ResponsePipeline:
         return None
 
     async def respond(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
-                      tail: str = "") -> int:
-        """search を渡すと、LLM が「検索: 語」と答えたときに Web 検索してから答える。tail は返答の後に必ず読む定型文。"""
+                      tail: str = "", page: Callable[[], dict | None] | None = None,
+                      shot: Callable[[], tuple[str, str] | None] | None = None) -> int:
+        """search を渡すと、LLM が「検索: 語」と答えたときに Web 検索してから答える。tail は返答の後に必ず読む定型文。
+        page を渡すと、利用者が「このページどう思う？」等と頼んだときに見ているページを読んで答える。
+        shot は本文が読めないときに代わりに見る前面のウィンドウの画面。"""
         loop = asyncio.get_running_loop()
         emit = lambda m: loop.call_soon_threadsafe(self._emit, m)  # noqa: E731  節の生成は別スレッドで回る
-        clauses = self._llm_clauses(messages, search, emit)
+        clauses = self._llm_clauses(messages, search, emit, page, shot)
         if tail:
             clauses = _then(clauses, tail)
         return await self.play_utterance(clauses)

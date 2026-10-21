@@ -217,6 +217,8 @@ class IdleTalkDirector:
         self.personas = PersonaBook()  # ペルソナ (設計書 6.6)。main が personas.toml を読んだものに差し替える
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
         self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
+        self.page_reader: Callable[[], dict | None] | None = None  # 「このページどう思う？」で見ているページを読む (main が結線)
+        self.page_capture: Callable[[], object] | None = None  # 本文が読めないとき代わりに撮る前面のウィンドウ (wincap.WindowCapture.grab)
         # 話者識別 (設計書 6.4)。enable_voice_id で有効にする
         self.voices: VoiceBook | None = None
         self._voice: tuple[int, object] | None = None  # 認識結果待ちの声の特徴 (utterance_id, 埋め込み)
@@ -1385,7 +1387,8 @@ class IdleTalkDirector:
         me = asyncio.current_task()
         ep = self.epoch.current
         try:
-            await self.pipeline.respond(messages, search=self.web_search,
+            await self.pipeline.respond(messages, search=self.web_search, page=self.page_reader,
+                                        shot=self._page_shot if self.page_capture and self.drama_vision else None,
                                         tail=ASK_QUESTION if self._ask_plan is not None else "")
         except asyncio.CancelledError:  # 準備中の再発話で生成が取り消された: 旧世代の結果は破棄扱い (E15)
             self.pipeline._discard(ep, "<cancelled generation>")
@@ -1399,6 +1402,18 @@ class IdleTalkDirector:
             self._pump()
         else:
             self._check_done()
+
+    def _page_shot(self) -> tuple[str, str] | None:
+        """前面のウィンドウの (画像の data URL, タイトル)。撮れなければ None (別スレッドで呼ばれる)。"""
+        try:
+            shot = self.page_capture()
+        except OSError as e:
+            log.warning("page shot failed: %s", e)
+            return None
+        if shot is None:
+            return None
+        self._keep_snap(shot.png, "png")
+        return "data:image/png;base64," + shot.png, shot.title
 
     def _cancel_path(self, route: str) -> None:
         """pipeline.cancel は await を含まないので eager 実行して epoch を即時に確定させる。"""

@@ -250,6 +250,7 @@ class Search(NamedTuple):
     engines: tuple[str, ...] = ("duckduckgo", "bing")  # 先頭から試し、失敗・0 件なら次へ
     read_page: bool = True  # 上位 1 件のページ本文を r.jina.ai で読んで添える
     realtime: bool = False  # X の投稿 (Yahoo! リアルタイム検索) も添える
+    read_window: bool = True  # 「このページどう思う？」で前面のブラウザのページを r.jina.ai で読む (Windows のみ)
 
 
 SEARCH_ENGINES = ("duckduckgo", "bing")
@@ -258,13 +259,14 @@ SEARCH_ENGINES = ("duckduckgo", "bing")
 def load_search(path: str | Path = SETTINGS_FILE) -> Search:
     """[search] を読む。無ければ既定値 (検索しない)。型違い・未知キー・未知のエンジンは ValueError。"""
     raw = _read_section(path, "search", Search._fields)
-    for k in ("on", "read_page", "realtime"):
+    for k in ("on", "read_page", "realtime", "read_window"):
         if k in raw and type(raw[k]) is not bool:
             raise ValueError(f"[search].{k} must be bool: {raw[k]!r}")
     engines = raw.get("engines", list(Search._field_defaults["engines"]))
     if type(engines) is not list or not engines or not all(e in SEARCH_ENGINES for e in engines):
         raise ValueError(f"[search].engines must be a non-empty list of {list(SEARCH_ENGINES)}: {engines!r}")
-    return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True), raw.get("realtime", False))
+    return Search(raw.get("on", False), tuple(engines), raw.get("read_page", True), raw.get("realtime", False),
+                  raw.get("read_window", True))
 
 
 class Asr(NamedTuple):

@@ -342,9 +342,9 @@ def research_messages(messages: list[dict], searches: list[tuple[str, list[dict]
     return system + turns + [{"role": "user", "content": (last["content"] + "\n\n" + ref).strip()}]
 
 
-def http_fetch(url: str, headers: dict[str, str] | None = None) -> bytes:
+def http_fetch(url: str, headers: dict[str, str] | None = None, timeout: float = FETCH_TIMEOUT_S) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_S) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
