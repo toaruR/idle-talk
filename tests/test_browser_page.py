@@ -1,7 +1,8 @@
 import asyncio
+from urllib.parse import quote
 
-from idle_talk.browser_page import (PAGE_FAIL, PAGE_NOTICE, PageReader, body_excerpt, normalize_url,
-                                    page_messages, page_title, wants_page)
+from idle_talk.browser_page import (PAGE_FAIL, PAGE_NOTICE, SUMMARY_NOTICE, PageReader, body_excerpt, normalize_url,
+                                    page_messages, page_title, summary_url, wants_page, wants_summary)
 from idle_talk.pipeline import ResponsePipeline
 from idle_talk.web_search import READER_URL
 
@@ -128,6 +129,27 @@ def test_pipeline_ignores_page_without_request():
     called = []
     _, seen, spoken = run(lambda: called.append(1), user="今日はいい天気だね")
     assert called == [] and spoken == ["面白い記事だね。"] and len(seen) == 1
+
+
+def test_wants_summary_and_url():
+    assert wants_summary("このページ要約して") and wants_summary("この記事をまとめて")
+    assert not wants_summary("このページどう思う？") and not wants_summary("要約して")
+    assert summary_url("https://example.com/a?b=1") == (
+        "https://chatgpt.com/?q=" + quote("https://example.com/a?b=1 を日本語、小学生にも分かるように箇条書きで要約して", safe=""))
+
+
+def test_pipeline_opens_chatgpt_summary():
+    opened = []
+    r, calls = reader([(4, "記事")], {4: "example.com/a"}, {})
+    r._open = opened.append
+    p, seen, spoken = run(r, user="このページ要約して")
+    assert opened == [summary_url("https://example.com/a")]
+    assert spoken == [SUMMARY_NOTICE] and seen == [] and calls == []  # LLM も r.jina.ai も呼ばない
+    assert {"t": "links", "items": [{"title": "記事", "url": "https://example.com/a"}]} in run.emits
+    r, _ = reader([], {}, {})
+    r._open = opened.append
+    _, _, spoken = run(r, user="このページ要約して")
+    assert spoken == [PAGE_FAIL] and len(opened) == 1
 
 
 def test_load_search_read_window(tmp_path):

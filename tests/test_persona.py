@@ -11,7 +11,7 @@ from mocks_browser import MockBrowser
 
 from idle_talk.clients import AsrClient
 from idle_talk.director import IdleTalkDirector
-from idle_talk.persona import DEFAULT, PersonaBook, parse_personas
+from idle_talk.persona import DEFAULT, NAME_PROMPT, PersonaBook, parse_personas
 from idle_talk.protocol import validate_message
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
@@ -20,7 +20,7 @@ TOML = """
 default = "b"
 style_rules = "共通の話し方です。"
 [a]
-name = "エー"
+label = "エー"
 prompt = "あなたはエーです。"
 [b]
 prompt = "あなたはビーです。"
@@ -34,7 +34,7 @@ def write(path, text, t):
 
 def test_parse_keeps_order_and_default():
     personas, default = parse_personas(tomllib.loads(TOML))
-    assert [(p.id, p.name) for p in personas] == [("a", "エー"), ("b", "b")]
+    assert [(p.id, p.name, p.label) for p in personas] == [("a", "", "エー"), ("b", "", "b")]
     assert default == "b"
     assert parse_personas(tomllib.loads('[x]\nprompt = "p"\n'))[1] == "x"  # default 省略は先頭
 
@@ -43,6 +43,8 @@ def test_parse_keeps_order_and_default():
     "",  # 1 人もいない
     'default = "z"\n[a]\nprompt = "p"\n',  # 既定が無い
     '[a]\nprompt = ""\n',
+    '[a]\nprompt = "p"\nname = ""\n',
+    '[a]\nprompt = "p"\nlabel = 1\n',
     '[a]\nprompt = "p"\nspeaker = 1\n',  # 未知キー (声は画面の「声」で選ぶ)
     f'["{"x" * 65}"]\nprompt = "p"\n',
     'style_rules = 1\n[a]\nprompt = "p"\n',
@@ -57,7 +59,7 @@ def test_parse_rejects(text):
 
 def test_book_without_file_uses_builtin(tmp_path):
     book = PersonaBook(tmp_path / "none.toml")
-    assert book.current == DEFAULT and book.choices() == [{"id": "default", "name": DEFAULT.name}]
+    assert book.current == DEFAULT and book.choices() == [{"id": "default", "name": DEFAULT.label}]
     assert book.system_prompt() == DEFAULT.prompt
 
 
@@ -87,7 +89,9 @@ def test_shipped_personas_file_is_valid():
     assert personas and default in {p.id for p in personas}
     book = PersonaBook(path)
     assert raw["style_rules"].strip()
-    assert book.system_prompt() == book.current.prompt + "\n" + raw["style_rules"].strip()
+    assert all(p.name and p.name in p.label for p in personas)
+    assert book.system_prompt() == (NAME_PROMPT.format(name=book.current.name) + book.current.prompt
+                                    + "\n" + raw["style_rules"].strip())
 
 
 @pytest.mark.parametrize("header", ["", 'style_rules = ""\n', 'style_rules = "  \\n  "\n'])
@@ -120,6 +124,17 @@ def test_style_rules_reload_keeps_selection_and_rejects_invalid_config(tmp_path)
 
     write(path, TOML.replace('style_rules = "共通の話し方です。"\n', ''), 5)
     assert book.system_prompt() == "あなたはエーです。"
+
+
+def test_name_and_label_are_separate(tmp_path):
+    path = tmp_path / "personas.toml"
+    path.write_text('[a]\nname = "ミナ"\nlabel = "ミナ (先生)"\nprompt = "人物設定"\n'
+                    '[b]\nname = "ソラ"\nprompt = "p"\n', encoding="utf-8")
+    book = PersonaBook(path)
+    assert book.choices() == [{"id": "a", "name": "ミナ (先生)"}, {"id": "b", "name": "ソラ"}]
+    prompt = book.system_prompt()
+    assert prompt.startswith("あなたの名前は「ミナ」です。") and prompt.endswith("人物設定")
+    assert "先生" not in prompt  # 表示名は LLM に渡さない
 
 
 def test_ui_persona_schema():

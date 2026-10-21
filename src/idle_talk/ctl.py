@@ -213,9 +213,11 @@ def cmd_memories(args: argparse.Namespace, data_dir: Path) -> int:
             print(f"deleted memory {args.delete}" if n else f"memory {args.delete}: not found or not deletable")
             return 0 if n else 1
         else:
-            rows = con.execute("SELECT id, content, deletable FROM memories ORDER BY id").fetchall()
-            for mid, content, deletable in rows:
-                print(f"{mid:4d}{'' if deletable else ' (固定)'}  {content}")
+            has_persona = "persona" in {r[1] for r in con.execute("PRAGMA table_info(memories)")}  # v2 以前の DB
+            rows = con.execute(f"SELECT id, content, deletable, {'persona' if has_persona else 'NULL'} "
+                               "FROM memories ORDER BY id").fetchall()
+            for mid, content, deletable, persona in rows:
+                print(f"{mid:4d}{'' if deletable else ' (固定)'}  [{persona or '共通'}]  {content}")
             if not rows:
                 print("no memories")
     finally:

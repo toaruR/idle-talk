@@ -14,7 +14,7 @@ from typing import Any
 
 from .errors import ERR_DB
 
-SCHEMA_VERSION = 2  # 2: speakers (話者識別、設計書 6.4)
+SCHEMA_VERSION = 3  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)
 
 log = logging.getLogger("idle_talk.store")
 
@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS memories (
     content TEXT,
     evidence_utterance_id INTEGER,
     updated_at INTEGER,
-    deletable INTEGER
+    deletable INTEGER,
+    persona TEXT NULL
 );
 CREATE TABLE IF NOT EXISTS speakers (
     id INTEGER PRIMARY KEY,
@@ -137,6 +138,8 @@ class Store:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
             con.executescript(SCHEMA_SQL)
+            if "persona" not in {r[1] for r in con.execute("PRAGMA table_info(memories)")}:
+                con.execute("ALTER TABLE memories ADD COLUMN persona TEXT NULL")  # v2 以前: 既存の記憶は全ペルソナ共通
             con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._ready.set_result(True)
         except BaseException as e:  # noqa: BLE001

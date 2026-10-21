@@ -11,7 +11,9 @@ import logging
 import re
 import subprocess
 import sys
+import webbrowser
 from collections.abc import Callable
+from urllib.parse import quote
 
 from .wincap import excluded
 
@@ -25,6 +27,10 @@ PAGE_ASK_MAX_CHARS = 1500  # LLM に渡す本文の上限 (検索の抜粋より
 MIN_LINE_CHARS = 20  # これより短い行 (メニュー・ボタン等) は本文に含めない
 PAGE_NOTICE = "ちょっと読んでみるね。"
 PAGE_FAIL = "ごめん、見ているページが分からなかった。ブラウザでページを開いてから、もう一度聞いてね。"
+SUMMARY_NOTICE = "ChatGPT で要約を開いたよ。"
+SUMMARY_URL = "https://chatgpt.com/?q="
+SUMMARY_PROMPT = "{url} を日本語、小学生にも分かるように箇条書きで要約して"
+_SUMMARY_WORD = re.compile(r"要約|まとめ")
 
 # 「このページ」「この記事」等を指して、意見・感想・要約を求める発話
 _PAGE_WORD = re.compile(r"(この|その|今の|(今|いま)見て(い|る)|開いて(い|る))\s*(ページ|記事|サイト|ブログ|タブ|画面)"
@@ -45,6 +51,16 @@ def wants_page(text: str) -> bool:
     t = re.sub(r"\s+", "", text)
     m = _PAGE_WORD.search(t)
     return m is not None and _ASK_WORD.search(t[m.start():]) is not None
+
+
+def wants_summary(text: str) -> bool:
+    """見ているページの要約を求めているか (ChatGPT のタブで要約させる)。"""
+    return wants_page(text) and _SUMMARY_WORD.search(text) is not None
+
+
+def summary_url(url: str) -> str:
+    """ページの URL を要約させる ChatGPT の URL。"""
+    return SUMMARY_URL + quote(SUMMARY_PROMPT.format(url=url), safe="")
 
 
 def page_title(title: str) -> str:
@@ -131,17 +147,26 @@ def address_bar(hwnd: int) -> str:
 
 class PageReader:
     """reader() -> {title, url, text} | None (ページが見つからない)。本文が読めなければ text は空。
-    windows() / address(hwnd) / fetch(url, headers) は注入可能 (テストで差し替える)。"""
+    windows() / address(hwnd) / fetch(url, headers) / open_url(url) は注入可能 (テストで差し替える)。"""
 
     def __init__(self, fetch: Callable[..., bytes], exclude: tuple[str, ...] = (),
                  windows: Callable[[], list[tuple[int, str]]] = browser_windows,
-                 address: Callable[[int], str] = address_bar) -> None:
+                 address: Callable[[int], str] = address_bar,
+                 open_url: Callable[[str], object] = lambda u: webbrowser.open(u, new=2)) -> None:
         self._fetch = fetch
         self.exclude = tuple(exclude)
         self._windows = windows
         self._address = address
+        self._open = open_url
 
     def __call__(self) -> dict | None:
+        found = self.locate()
+        if found is not None:
+            found["text"] = self._read(found["url"], found["title"])
+        return found
+
+    def locate(self) -> dict | None:
+        """見ているページの {title, url} (本文は読まない)。見つからなければ None。"""
         for hwnd, title in self._windows():
             if excluded(title, self.exclude):  # idle-talk 自身・パスワード管理など。ログにもタイトルを残さない
                 continue
@@ -149,9 +174,16 @@ class PageReader:
             if not url:
                 continue
             log.info("page ask: %s", url)
-            return {"title": title[:200], "url": url, "text": self._read(url, title)}
+            return {"title": title[:200], "url": url}
         log.info("page ask: no browser page")
         return None
+
+    def summarize(self) -> dict | None:
+        """見ているページを ChatGPT に要約させるタブを開き、そのページの {title, url} を返す。"""
+        found = self.locate()
+        if found is not None:
+            self._open(summary_url(found["url"]))
+        return found
 
     def _read(self, url: str, title: str) -> str:
         from .web_search import READER_URL

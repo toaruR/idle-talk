@@ -23,7 +23,25 @@ def test_schema_columns(store):
     assert _cols(store, "turns") == {"id", "ts", "role", "text", "completed", "stop_position_ms", "utterance_id"}
     assert _cols(store, "topic_cards") == {
         "id", "hook", "facts", "source_url", "published_at", "expires_at", "angle", "used_at", "user_reaction"}
-    assert _cols(store, "memories") == {"id", "content", "evidence_utterance_id", "updated_at", "deletable"}
+    assert _cols(store, "memories") == {"id", "content", "evidence_utterance_id", "updated_at", "deletable", "persona"}
+
+
+def test_migrates_memories_persona(tmp_path):
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, content TEXT, evidence_utterance_id INTEGER, "
+                "updated_at INTEGER, deletable INTEGER)")
+    con.execute("INSERT INTO memories(content, evidence_utterance_id, updated_at, deletable) "
+                "VALUES ('利用者は猫好き。', 1, 1, 1)")
+    con.execute("PRAGMA user_version=2")
+    con.commit()
+    con.close()
+    s = Store(path, db_backup=False)
+    try:
+        assert "persona" in _cols(s, "memories")
+        assert [tuple(r) for r in s.query("SELECT content, persona FROM memories")] == [("利用者は猫好き。", None)]
+    finally:
+        s.close()
 
 
 def test_wal_and_user_version(store):

@@ -18,11 +18,14 @@ ID_MAX = 64  # ui.persona の最大長 (protocol の MESSAGE_SCHEMA と一致さ
 
 class Persona(NamedTuple):
     id: str
-    name: str  # 画面の選択肢に出す名前
-    prompt: str  # 人物設定 (名前・性格・口調)。声は画面の「声」で別に選ぶ
+    name: str  # AI 自身の名前 (system に「あなたの名前は〜」と添える)。空なら添えない
+    label: str  # 画面の選択肢に出す表示名 (省略時は name、それも無ければ id)
+    prompt: str  # 人物設定 (性格・口調)。声は画面の「声」で別に選ぶ
 
 
-DEFAULT = Persona("default", "気さくな雑談相手", "あなたは気さくな日本語の雑談相手です。")
+DEFAULT = Persona("default", "", "気さくな雑談相手", "あなたは気さくな日本語の雑談相手です。")
+NAME_PROMPT = ("あなたの名前は「{name}」です。名前を聞かれたら「{name}」と名乗り、"
+               "「{name}」と呼ばれたら自分のことだと分かって答えてください。\n")
 
 
 def parse_personas(raw: dict) -> tuple[list[Persona], str]:
@@ -37,15 +40,17 @@ def parse_personas(raw: dict) -> tuple[list[Persona], str]:
             raise ValueError(f"persona {pid!r} must be a table")
         if not 1 <= len(pid) <= ID_MAX:
             raise ValueError(f"persona id must be 1..{ID_MAX} chars: {pid!r}")
-        unknown = set(t) - {"name", "prompt"}
+        unknown = set(t) - {"name", "label", "prompt"}
         if unknown:
             raise ValueError(f"unknown keys in [{pid}]: {sorted(unknown)}")
-        prompt, name = t.get("prompt"), t.get("name", pid)
+        prompt = t.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError(f"[{pid}].prompt must be a non-empty string")
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError(f"[{pid}].name must be a non-empty string")
-        out.append(Persona(pid, name.strip(), prompt.strip()))
+        for key in ("name", "label"):
+            if key in t and (not isinstance(t[key], str) or not t[key].strip()):
+                raise ValueError(f"[{pid}].{key} must be a non-empty string")
+        name = t.get("name", "").strip()
+        out.append(Persona(pid, name, t.get("label", "").strip() or name or pid, prompt.strip()))
     if not out:
         raise ValueError("no persona defined")
     if default is None:
@@ -115,9 +120,10 @@ class PersonaBook:
         return self.get(self.current_id) or self.personas[0]
 
     def system_prompt(self) -> str:
-        prompt = self.current.prompt  # 更新時刻の確認と再読み込みを先に行う
+        p = self.current  # 更新時刻の確認と再読み込みを先に行う
+        prompt = (NAME_PROMPT.format(name=p.name) if p.name else "") + p.prompt
         return prompt + ("\n" + self.style_rules if self.style_rules else "")
 
     def choices(self) -> list[dict]:
         """画面の選択肢 (/config.json の personas)。"""
-        return [{"id": p.id, "name": p.name} for p in self.personas]
+        return [{"id": p.id, "name": p.label} for p in self.personas]

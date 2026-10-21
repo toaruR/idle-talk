@@ -344,21 +344,22 @@ flowchart LR
 
 - `personas.toml` は、設定ファイルと同じフォルダに置く (`persona.PersonaBook`)。
 - `[<id>]` ごとに 1 人を書く。
-  - `name`: 画面の表示名
-  - `prompt`: 名前・性格・口調・一人称
+  - `name`: AI 自身の名前 (省略可)。system プロンプトの先頭に「あなたの名前は「〜」です。名前を聞かれたら名乗り、呼ばれたら自分のことだと分かって」(`persona.NAME_PROMPT`) を添える
+  - `label`: 画面の表示名 (省略時は `name`、それも無ければ id)。LLM には渡さない
+  - `prompt`: 性格・口調・一人称
 - トップレベルの `default` が、起動時のペルソナを決める。省略時は先頭のペルソナである。
 - トップレベルの `style_rules` に、全ペルソナ共通の話し方を文字列で書く。最初の `[<id>]` より前に置く。省略・空文字列・空白のみなら共通ルールを付けない。文字列以外は不正とする。
 - 内容が不正なら `ValueError` になる。
 - ファイルが無ければ、組み込みの 1 人 (`persona.DEFAULT`、気さくな雑談相手) だけで動く。
 - 画面の選択欄は、ペルソナが 2 人以上のときだけ出る。
 - 同梱のペルソナは次の 3 人である。
-  - `wai`: 博多弁の天才宇宙人。一人称は「うち」。既定
-  - `haru`: 気さくな友達
-  - `shino`: 丁寧語の聞き上手
+  - `uchu` (うちゅ): 博多弁の天才宇宙人。一人称は「うち」。既定
+  - `haru` (ハル): 気さくな友達
+  - `shino` (シノ): 丁寧語の聞き上手
 
 プロンプトへの使い方:
 
-- system プロンプトは「選んだペルソナの `prompt`」+「`personas.toml` の共通の話し方 `style_rules`」である。
+- system プロンプトは「名前の節 (`name` があるとき)」+「選んだペルソナの `prompt`」+「`personas.toml` の共通の話し方 `style_rules`」である。
 - この system プロンプトを、通常応答・自発発話・ドラマの一言と感想・画面モードの一言に使う。
 - 記憶の抽出と名前の抜き出しには使わない。
 - 同梱の `style_rules` の中身（ファイルで編集できる）:
@@ -374,10 +375,11 @@ flowchart LR
 - 画面の「ペルソナ」は `ui.persona` を送る。次の応答から切り替わる。
 - 一覧に無い id は 5006 になる。
 - 切り替えても、会話の履歴は残す。
+- 記憶 (`memories`) はペルソナごとに分ける。抜き出しを始めた時点のペルソナの id を `persona` 列に入れ、応答には今のペルソナの記憶だけを添える。上限 `MAX_MEMORIES` もペルソナごとである。`persona` が NULL の行 (スキーマ v2 以前の記憶) は全ペルソナ共通とする。id を変えると記憶を引き継がない。
 - `PersonaBook` は、system プロンプトを作るたびにファイルの更新時刻を見る。変わっていれば読み直す。
 - そのため、`prompt` と `style_rules` の編集は再起動なしで次の応答から効く。
 - 読み直した内容が不正なら warn し、前の内容を使い続ける。
-- ペルソナの増減と `name` の変更は、再起動後に画面へ反映する。`/config.json` の `personas` で渡すためである。
+- ペルソナの増減と `label` の変更は、再起動後に画面へ反映する。`/config.json` の `personas` で渡すためである。
 
 ## WebSocket プロトコル (設計書 §12.1)
 
@@ -1250,7 +1252,7 @@ flowchart TD
 | `events` | id, ts, epoch, kind, payload_json |
 | `turns` | id, ts, role, text, completed(0/1), stop_position_ms, utterance_id |
 | `topic_cards` | id, hook, facts, source_url, published_at, expires_at, angle, used_at, user_reaction |
-| `memories` | id, content, evidence_utterance_id, updated_at, deletable |
+| `memories` | id, content, evidence_utterance_id, updated_at, deletable, persona (ペルソナの id。NULL は共通、スキーマ v3) |
 | `speakers` | id, name (NULL = 名前未登録), embedding (float32 単位ベクトルの BLOB), n (平均に使った発話数), updated_at |
 
 - スキーマ版は `PRAGMA user_version` = 2 である。版 2 で `speakers` を追加した。

@@ -27,6 +27,8 @@
 - 2026-10-17：ドラマの音に入った AI の声を台詞から除く（§6.5）。
 - 2026-10-19：タブの音と重なったマイクの発話は、音量の比・声・ドラマ側の認識（待ってから比べる）で回り込みか判定する。`[drama].mic` で聞くだけにできる。ドラマモード中は名前を尋ねない（§6.5）。
 - 2026-10-18：PC と話すモード（2026-10-19 に「ブラウザ補正なし」に改名）を追加（§6.8）。スピーカーで鳴る別の音声 AI（ChatGPT など）と、マイクとスピーカーで話す。AI の声は Director がスピーカーに鳴らす。
+- 2026-10-21：ペルソナの名前と表示名を分け（`name` は AI 自身の名前で system に名乗りの節を添える、`label` は画面の表示名）、記憶をペルソナごとに分ける（`memories.persona`、スキーマ v3。既存の記憶は共通）（§3.4、§6.6）。
+- 2026-10-21：見ているページの要約は ChatGPT のタブで開く（§6.3、§7）。
 - 2026-10-21：見ているページを読む（§6.3、§7）。「このページどう思う？」等と声で頼むと、前面のブラウザの URL を UI Automation で読み、r.jina.ai の本文で答える。読めなければ前面のウィンドウの画面で答える。
 - 2026-10-12：llama-server（b11564）はストリーム最初のチャンクで `delta.content` が `null` のため、SSE data 行スキーマの `content` を string または null に変更（§12.1）。
 
@@ -111,7 +113,7 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |`events`|id INTEGER PK, ts INTEGER, epoch INTEGER, kind TEXT, payload_json TEXT|
 |`turns`|id INTEGER PK, ts INTEGER, role TEXT, text TEXT, completed INTEGER(0/1), stop_position_ms INTEGER NULL, utterance_id INTEGER|
 |`topic_cards`|id INTEGER PK, hook TEXT NOT NULL, facts TEXT(JSON), source_url TEXT, published_at INTEGER(epoch ms), expires_at INTEGER, angle TEXT, used_at INTEGER NULL, user_reaction TEXT NULL|
-|`memories`|id INTEGER PK, content TEXT, evidence_utterance_id INTEGER, updated_at INTEGER, deletable INTEGER|
+|`memories`|id INTEGER PK, content TEXT, evidence_utterance_id INTEGER, updated_at INTEGER, deletable INTEGER, persona TEXT NULL（§6.6。NULL は全ペルソナ共通）|
 |`speakers`|id INTEGER PK, name TEXT NULL, embedding BLOB（float32 の単位ベクトル）, n INTEGER（平均に使った発話数）, updated_at INTEGER（§6.4）|
 
 WAL モード、書き込みは専用スレッドのキュー経由。スキーマ版は `PRAGMA user_version`。
@@ -196,6 +198,7 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 画面の URL 欄は URL 自体をリンクにして（タイトルは添え書き、クリックで別タブ）先頭に積み（新しいものが上）、100 行を超えたら古い順に消す。同じ URL は付け直して先頭へ。
 - 検索中の割り込みで epoch が変わっていたら 2 回目の LLM は呼ばない（不変条件 1。検索の HTTP は打ち切らず結果を捨てる）。
 - 見ているページ（`[search].read_window`、既定オン、Windows のみ。`browser_page`）：利用者の発話が「この（その・今見てる）ページ／記事／サイト」等と意見・感想・要約の語を含めば（`wants_page`。LLM の指示ではなく文字で判定）、「ちょっと読んでみるね。」と言い、前面から Z 順で最初のブラウザ（クラス `Chrome_WidgetWin_1` でタイトル末尾が「- Google Chrome」「- Microsoft Edge」。VS Code・Obsidian も同じクラス）のアドレスバーを UI Automation（PowerShell の `System.Windows.Automation`。値は `https://` が省かれる）で読み、r.jina.ai で本文を取る（15 秒。記事ページで約 7 秒かかった）。メニュー等の 20 字未満の行を除き、ページのタイトルが出る位置から 1500 字を最後の利用者発話に添え、履歴を直近 4 ターンに絞って答えさせる。idle-talk 自身・`[screen].exclude` の語を含むウィンドウは読まない。読み取った URL はすぐ `links` で画面の URL 欄に出す（「URL を教えて」でも出る）。
+- ページの要約（2026-10-21）：見ているページを頼む発話が「要約」「まとめ」を含めば（`wants_summary`）、本文は読まず LLM も呼ばずに、アドレスバーの URL から `https://chatgpt.com/?q=<URL> を日本語、小学生にも分かるように箇条書きで要約して`（URL エンコード）を既定のブラウザの新しいタブで開き（`webbrowser.open`）、「ChatGPT で要約を開いたよ。」と言う。URL が取れなければ「見ているページが分からなかった」と言う（画面では答えない）。
 - URL が取れない・本文が読めなければ、LLM が画像を読めるとき（`/props` の vision）だけ前面のウィンドウを撮って（`wincap.WindowCapture`、§6.7 と同じ大きさ・色数）画像で答える。どちらも無ければ「見ているページが分からなかった」と言う。外部に出るのは読むページの URL だけ（画面は送らない）。
 
 ### 6.4 話者識別
@@ -224,9 +227,10 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 限界：画面は一言・感想の時点の 1 コマだけで、場面の流れ（動き）は分からない。画面を使わないときは音だけで映像は分からない。BGM・効果音は幻聴フィルタと語なし判定に頼る。
 
 ### 6.6 ペルソナ
-- 設定ファイル（`idle_talk.toml`）と同じフォルダの `personas.toml` に、id ごとの表で `name`（画面の表示名）・`prompt`（名前・性格・口調・一人称）を書く。声は持たせず、画面の「声」（`ui.speaker`）で別に選ぶ。トップレベルの `default` が起動時のペルソナ（省略時は先頭）。ファイルが無ければ組み込みの 1 人（気さくな雑談相手）だけで動く。
-- system プロンプトは「選んだペルソナの `prompt` + 共通の話し方の決まり（`personas.toml` のトップレベル `style_rules`。2〜4 文・箇条書きなし等）」で、通常応答・自発発話・ドラマの一言のすべてに使う。`style_rules` も保存すれば次の応答から再読み込みし、省略・空なら付けない。記憶・名前の抜き出しには使わない。
+- 設定ファイル（`idle_talk.toml`）と同じフォルダの `personas.toml` に、id ごとの表で `name`（AI 自身の名前）・`label`（画面の表示名、省略時は `name`）・`prompt`（性格・口調・一人称）を書く。声は持たせず、画面の「声」（`ui.speaker`）で別に選ぶ。トップレベルの `default` が起動時のペルソナ（省略時は先頭）。ファイルが無ければ組み込みの 1 人（気さくな雑談相手）だけで動く。
+- system プロンプトは「名前の節（「あなたの名前は〇〇。聞かれたら名乗り、呼ばれたら自分のことだと分かる」、`name` があるとき）+ 選んだペルソナの `prompt` + 共通の話し方の決まり（`personas.toml` のトップレベル `style_rules`。2〜4 文・箇条書きなし等）」で、通常応答・自発発話・ドラマの一言のすべてに使う。`style_rules` も保存すれば次の応答から再読み込みし、省略・空なら付けない。記憶・名前の抜き出しには使わない。
 - 画面の「ペルソナ」で `ui.persona` を送り、次の応答から切り替わる（一覧に無い id は 5006）。履歴は残すので、前のペルソナの口調を真似ないよう共通の決まりに「口調は人物設定に従い、これまでの会話に合わせない」を入れる。
+- 記憶（§3.4 `memories`）はペルソナごとに分ける。抜き出しを始めた時点のペルソナの id を `persona` に入れ、応答には今のペルソナの記憶と共通（NULL、v2 以前の記憶）の記憶だけを添える。保存上限もペルソナごと。会話の履歴と話者（§6.4）は共通。
 - `personas.toml` は更新時刻が変わったら読み直す（不正なら warn して前の内容を使う）。選択肢の増減は `/config.json` に載るので再起動後に反映。
 
 ### 6.7 画面モード
@@ -255,7 +259,7 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 
 E1〜E15 の検知・対処・テストは §12.3 に一本化する。
 
-セキュリティ/プライバシー：音声と書き起こしは外部送信しない。ニュース取得（M4。`[search].on` なら話題カードの補充に Bing ニュース検索も使う。`[topics].x_trends` なら X のトレンドも取る）と Web 検索（§6.3、`[search].on` のときのみ。送るのは LLM が作った検索語と読むページの URL だけ。`[search].realtime` なら同じ検索語を Yahoo! リアルタイム検索にも送る。`[search].read_window` なら、見ているページを頼まれたときだけその URL を r.jina.ai に送る）以外のネットワークアクセスなし。ドラマモード（§6.5）の音声・台詞・画面は外部に送らず、保存もしない（台詞はメモリの直近 `window_s` 秒のみ、画面は一言・感想に使う 1 枚だけで使ったら捨てる。画面はローカルの llama-server にだけ渡す）。ただし `[drama].log_prompt`（既定オフ）がオンのときは、一言・感想・要約で LLM に渡した台詞とあらすじメモを `data/talk.log` に `DRAMA(...)` 行で残す（画像は大きさだけ）。`[drama].keep_snaps`（既定 0）が 1 以上なら、一言・感想に使った画面を `data/snaps/snap-<日時>-<id>.jpg` に新しい方からその枚数だけ残す（古いものは消す）。PC と話すモード（§6.8）の相手の発話は、利用者の発話と同じく `turns` に保存する（外部には送らない）。画面モード（§6.7）の画面も同じ扱い（ローカルの llama-server にだけ渡し、縮小画像は比較用にメモリに 1 枚だけ置く。`keep_snaps` は共通）。保存データは SQLite のみで利用者が全削除できる。声の特徴（§6.4）も SQLite にだけ保存し、外部に送らない（ctl の `speakers` で確認・削除）。localhost バインドと Origin 検証で他サイトからのアクセスを遮断する。
+セキュリティ/プライバシー：音声と書き起こしは外部送信しない。ニュース取得（M4。`[search].on` なら話題カードの補充に Bing ニュース検索も使う。`[topics].x_trends` なら X のトレンドも取る）と Web 検索（§6.3、`[search].on` のときのみ。送るのは LLM が作った検索語と読むページの URL だけ。`[search].realtime` なら同じ検索語を Yahoo! リアルタイム検索にも送る。`[search].read_window` なら、見ているページを頼まれたときだけその URL を r.jina.ai に送る。要約を頼まれたら、その URL を含む ChatGPT のページをブラウザで開く）以外のネットワークアクセスなし。ドラマモード（§6.5）の音声・台詞・画面は外部に送らず、保存もしない（台詞はメモリの直近 `window_s` 秒のみ、画面は一言・感想に使う 1 枚だけで使ったら捨てる。画面はローカルの llama-server にだけ渡す）。ただし `[drama].log_prompt`（既定オフ）がオンのときは、一言・感想・要約で LLM に渡した台詞とあらすじメモを `data/talk.log` に `DRAMA(...)` 行で残す（画像は大きさだけ）。`[drama].keep_snaps`（既定 0）が 1 以上なら、一言・感想に使った画面を `data/snaps/snap-<日時>-<id>.jpg` に新しい方からその枚数だけ残す（古いものは消す）。PC と話すモード（§6.8）の相手の発話は、利用者の発話と同じく `turns` に保存する（外部には送らない）。画面モード（§6.7）の画面も同じ扱い（ローカルの llama-server にだけ渡し、縮小画像は比較用にメモリに 1 枚だけ置く。`keep_snaps` は共通）。保存データは SQLite のみで利用者が全削除できる。声の特徴（§6.4）も SQLite にだけ保存し、外部に送らない（ctl の `speakers` で確認・削除）。localhost バインドと Origin 検証で他サイトからのアクセスを遮断する。
 
 ---
 

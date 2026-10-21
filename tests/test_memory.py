@@ -49,6 +49,19 @@ def test_remember_caps_oldest_deletable(store):
     assert "利用者は固定。" in contents and "利用者は0番目。" not in contents
 
 
+def test_memories_are_per_persona(store):
+    memory.add_memory(store, "利用者は共通。", 1, 1)  # v2 以前の記憶 (persona NULL) は全員に見える
+    memory.remember(store, ["利用者は猫好き。"], 1, 10, "a")
+    memory.remember(store, ["利用者は犬好き。"], 2, 20, "b")
+    assert "猫" in memory.memory_prompt(store, "a") and "犬" not in memory.memory_prompt(store, "a")
+    assert "犬" in memory.memory_prompt(store, "b") and "共通" in memory.memory_prompt(store, "b")
+    assert memory.remember(store, ["利用者は猫好き"], 3, 30, "b") != []  # 別のペルソナには別に覚える
+    for i in range(memory.MAX_MEMORIES):  # 上限はペルソナごと
+        memory.remember(store, [f"利用者は{i}番目。"], 1, 100 + i, "a")
+    assert "犬" in memory.memory_prompt(store, "b")
+    assert len(memory.list_memories(store, "b")) == 3
+
+
 def test_memory_prompt(store):
     assert memory.memory_prompt(store) == ""
     memory.remember(store, [FACT], 1, 100)

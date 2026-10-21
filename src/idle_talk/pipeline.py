@@ -8,7 +8,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from .browser_page import PAGE_FAIL, PAGE_NOTICE, page_messages, wants_page
+from .browser_page import PAGE_FAIL, PAGE_NOTICE, SUMMARY_NOTICE, page_messages, wants_page, wants_summary
 from .clause import ClauseSplitter, is_synthesizable
 from .clients import ClientError
 from .epoch import Epoch
@@ -90,6 +90,10 @@ class ResponsePipeline:
         ep = self.epoch.current
         try:
             last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+            summarize = getattr(page, "summarize", None)
+            if summarize is not None and isinstance(last, str) and wants_summary(last):
+                yield from self._summary_clauses(summarize, ep, emit)
+                return
             if page is not None and isinstance(last, str) and wants_page(last):
                 yield from self._page_clauses(messages, page, shot, ep, emit)
                 return
@@ -119,6 +123,18 @@ class ResponsePipeline:
             log.warning("llm failed: %s", e)
             emit({"t": "error", "code": ERR_LLM_TIMEOUT, "message": str(e)[:200]})
             yield FALLBACK_PHRASE
+
+    def _summary_clauses(self, summarize: Callable[[], dict | None], ep: int, emit: Callable[[dict], None]):
+        """見ているページの要約は ChatGPT のタブで開く (LLM は呼ばない)。"""
+        found = summarize()
+        if not self.epoch.is_current(ep):
+            return
+        if found is None:
+            yield PAGE_FAIL
+            return
+        self.links = link_items([found])
+        emit({"t": "links", "items": self.links})
+        yield SUMMARY_NOTICE
 
     def _page_clauses(self, messages: list[dict], page: Callable[[], dict | None],
                       shot: Callable[[], tuple[str, str] | None] | None, ep: int, emit: Callable[[dict], None]):

@@ -1327,7 +1327,8 @@ class IdleTalkDirector:
         """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。"""
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in history_window(self.store, self.cfg) if t["text"]]
-        system = self.personas.system_prompt() + memory_prompt(self.store) + self._speaker_section(ask)
+        system = (self.personas.system_prompt() + memory_prompt(self.store, self.personas.current_id)
+                  + self._speaker_section(ask))
         lines = self.drama.context_text() if self.drama_on else ""
         if lines:
             system += DRAMA_CONTEXT_PROMPT.format(lines=lines)
@@ -1342,14 +1343,16 @@ class IdleTalkDirector:
             return
         self._mem_stop = threading.Event()
         self._mem_task = asyncio.get_running_loop().create_task(
-            self._background(list(self._mem_pending), list(self._name_pending), self._mem_stop))
+            self._background(list(self._mem_pending), list(self._name_pending), self._mem_stop,
+                             self.personas.current_id))
 
-    async def _background(self, batch: list[tuple[int, str]], names: list[str], stop: threading.Event) -> None:
+    async def _background(self, batch: list[tuple[int, str]], names: list[str], stop: threading.Event,
+                          persona: str) -> None:
         """名前の抜き出し (尋ねた直後なので先に) と記憶の抽出を順に行う。"""
         if names:
             await self._learn_name(names, stop)
         if batch and not stop.is_set():
-            await self._extract_memory(batch, stop)
+            await self._extract_memory(batch, stop, persona)
 
     def _cancel_memory(self) -> None:
         self._mem_stop.set()
@@ -1364,7 +1367,8 @@ class IdleTalkDirector:
             out.append(tok)
         return "".join(out)
 
-    async def _extract_memory(self, batch: list[tuple[int, str]], stop: threading.Event) -> None:
+    async def _extract_memory(self, batch: list[tuple[int, str]], stop: threading.Event, persona: str) -> None:
+        """記憶は抜き出しを始めた時点のペルソナのものとして保存する (設計書 6.6)。"""
         try:
             text = await asyncio.to_thread(self._collect, extract_messages([t for _, t in batch]), stop)
         except Exception as e:  # noqa: BLE001  LLM の失敗で会話を止めない (未処理分は次回に回す)
@@ -1376,8 +1380,8 @@ class IdleTalkDirector:
         self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
         items = parse_extracted(text)
         if items:
-            remember(self.store, items, batch[-1][0], self.now_ms())
-            log.info("memory saved: %s", " / ".join(items))
+            remember(self.store, items, batch[-1][0], self.now_ms(), persona)
+            log.info("memory saved (%s): %s", persona, " / ".join(items))
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:

@@ -3,6 +3,7 @@
 会話の利用者発話から、本人が明言した好み・習慣・続いている話題だけを LLM で抜き出して少量保存し、
 応答のシステムプロンプトに添える (最終アーキテクチャ §5「記憶」)。ASR の誤認識で確定させないよう、
 短い発話は対象外・1 発話あたりの件数と 1 件の長さに上限を設け、利用者が ctl から確認・削除できる。
+記憶はペルソナごとに分ける (persona 列、設計書 6.6)。persona が NULL の行 (v2 以前の記憶) は全ペルソナ共通。
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import re
 
 from .store import Store
 
-MAX_MEMORIES = 30  # 保存上限。超えたら古い deletable 行から消す
+MAX_MEMORIES = 30  # ペルソナごとの保存上限。超えたら古い deletable 行から消す
 MAX_PER_UTTERANCE = 3
 MAX_CHARS = 60  # 1 件の長さ上限 (超えたら捨てる: 要約に失敗した長文はプロンプトを圧迫する)
 MIN_UTTERANCE_CHARS = 6  # これより短い発話 (相づち・誤認識の断片) からは抜き出さない
@@ -28,17 +29,20 @@ class MemoryError_(Exception):
 
 
 def add_memory(store: Store, content: str, evidence_utterance_id: int | None,
-               updated_at: int, deletable: int = 1) -> int:
+               updated_at: int, deletable: int = 1, persona: str | None = None) -> int:
     if evidence_utterance_id is None:
         raise ValueError("evidence_utterance_id is required")
     return store.execute(
-        "INSERT INTO memories(content, evidence_utterance_id, updated_at, deletable) VALUES (?,?,?,?)",
-        (content, evidence_utterance_id, updated_at, 1 if deletable else 0),
+        "INSERT INTO memories(content, evidence_utterance_id, updated_at, deletable, persona) VALUES (?,?,?,?,?)",
+        (content, evidence_utterance_id, updated_at, 1 if deletable else 0, persona),
     )
 
 
-def list_memories(store: Store) -> list:
-    return store.query("SELECT * FROM memories ORDER BY id")
+def list_memories(store: Store, persona: str | None = None) -> list:
+    """persona を指定するとそのペルソナと共通 (NULL) の記憶だけ。省略は全件。"""
+    if persona is None:
+        return store.query("SELECT * FROM memories ORDER BY id")
+    return store.query("SELECT * FROM memories WHERE persona=? OR persona IS NULL ORDER BY id", (persona,))
 
 
 def delete_memory(store: Store, memory_id: int) -> None:
@@ -80,9 +84,11 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in s if ch.isalnum())
 
 
-def remember(store: Store, items: list[str], evidence_utterance_id: int, now_ms: int) -> list[int]:
-    """候補を保存する。同じ内容 (句読点・空白を除いて一致) は更新時刻だけ進める。上限超過分は古い順に消す。"""
-    existing = {_norm(r["content"]): r["id"] for r in list_memories(store)}
+def remember(store: Store, items: list[str], evidence_utterance_id: int, now_ms: int,
+             persona: str | None = None) -> list[int]:
+    """候補を persona の記憶として保存する。同じ内容 (句読点・空白を除いて一致) は更新時刻だけ進める。
+    上限超過分はそのペルソナの行から古い順に消す。"""
+    existing = {_norm(r["content"]): r["id"] for r in list_memories(store, persona)}
     ids: list[int] = []
     for item in items:
         key = _norm(item)
@@ -92,18 +98,19 @@ def remember(store: Store, items: list[str], evidence_utterance_id: int, now_ms:
             store.execute("UPDATE memories SET updated_at=?, evidence_utterance_id=? WHERE id=?",
                           (now_ms, evidence_utterance_id, existing[key]))
             continue
-        existing[key] = add_memory(store, item, evidence_utterance_id, now_ms)
+        existing[key] = add_memory(store, item, evidence_utterance_id, now_ms, persona=persona)
         ids.append(existing[key])
-    over = store.count("memories") - MAX_MEMORIES
+    over = store.query("SELECT COUNT(*) FROM memories WHERE persona IS ?", (persona,))[0][0] - MAX_MEMORIES
     if over > 0:
-        store.execute("DELETE FROM memories WHERE id IN (SELECT id FROM memories WHERE deletable=1 "
-                      "ORDER BY updated_at, id LIMIT ?)", (over,))
+        store.execute("DELETE FROM memories WHERE id IN (SELECT id FROM memories WHERE deletable=1 AND persona IS ? "
+                      "ORDER BY updated_at, id LIMIT ?)", (persona, over))
     return ids
 
 
-def memory_prompt(store: Store) -> str:
-    """システムプロンプトに添える記憶の節。記憶が無ければ空文字。"""
-    rows = store.query("SELECT content FROM memories ORDER BY updated_at DESC, id DESC LIMIT ?", (MAX_MEMORIES,))
+def memory_prompt(store: Store, persona: str | None = None) -> str:
+    """システムプロンプトに添える記憶の節 (persona と共通の記憶)。記憶が無ければ空文字。"""
+    rows = store.query("SELECT content FROM memories WHERE persona IS ? OR persona IS NULL "
+                       "ORDER BY updated_at DESC, id DESC LIMIT ?", (persona, MAX_MEMORIES))
     if not rows:
         return ""
     lines = "\n".join(f"- {r['content']}" for r in rows)
