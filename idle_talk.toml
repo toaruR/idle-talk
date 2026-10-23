@@ -82,6 +82,7 @@ use_gpu = false       # true で GPU 合成 (既定は CPU)。出力は data/aiv
 feeds = [
   "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",  # NHK 主要ニュース (旧 www3.nhk.or.jp/rss は 2026-08 で更新停止)
   "https://rss.itmedia.co.jp/rss/2.0/aiplus.xml",  # ITmedia AI+ (Google ニュースはリンクが記事に直接届かず概要が取れない)
+  "https://alphasignal.ai/feed.xml",  # AlphaSignal (英語の AI ニュース。RSS 2.0 で概要つき)
 ]
 interval_min = 30     # 取得間隔 (分)。休止中は取得しない
 x_trends = true       # 取得のたびに X のトレンド上位 3 件も話題カードにする (Yahoo! リアルタイム検索。ログイン不要。カードは 6 時間で期限切れ)

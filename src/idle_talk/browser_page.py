@@ -34,8 +34,8 @@ _SUMMARY_WORD = re.compile(r"要約|まとめ")
 
 # 「このページ」「この記事」等を指して、意見・感想・要約を求める発話
 _PAGE_WORD = re.compile(r"(この|その|今の|(今|いま)見て(い|る)|開いて(い|る))\s*(ページ|記事|サイト|ブログ|タブ|画面)"
-                        r"|(ページ|記事|サイト|ブログ)(を|、)?\s*(読んで|見て)")
-_ASK_WORD = re.compile(r"どう(思う|おもう|かな|です|でしょう|\?|？|$)|意見|感想|要約|まとめて|読んで|見て|教えて|説明|解説|何て|なんて|どんな")
+                        r"|(ページ|記事|サイト|ブログ)(を|、)?\s*(読んで|読め|見て)")
+_ASK_WORD = re.compile(r"どう(思う|おもう|かな|です|でしょう|\?|？|$)|意見|感想|要約|まとめて|読んで|読め|見て|教えて|説明|解説|何て|なんて|どんな")
 
 _PS = ("Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes;"
        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"

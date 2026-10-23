@@ -9,7 +9,8 @@ from idle_talk.web_search import READER_URL
 
 def test_wants_page():
     for t in ("このページどう思う？", "この記事の感想を聞かせて", "今見てるページを要約して",
-              "このサイトについて教えて", "記事を読んでどう思う", "この ページ どう"):
+              "このサイトについて教えて", "記事を読んでどう思う", "この ページ どう",
+              "このページ読める？", "この記事は読めますか？", "ページを読める？", "この ページ 読める？"):
         assert wants_page(t), t
     for t in ("今日はどう思う？", "ページって何", "この前の話どう思う", "記事を書いた", ""):
         assert not wants_page(t), t
@@ -105,6 +106,19 @@ def test_pipeline_reads_page():
     assert p.links == [{"title": "記事", "url": "https://example.com/a"}]
     assert {"t": "links", "items": p.links} in run.emits  # 読んだ URL を画面の URL 欄に出す
 
+
+def test_pipeline_reads_page_when_asked_if_readable():
+    page = {"title": "記事", "url": "https://example.com/a", "text": "本文"}
+    reads = []
+
+    def read():
+        reads.append(True)
+        return page
+
+    _, seen, spoken = run(read, user="このページ読める？", llm_out=("読めたよ。",))
+    assert reads == [True]
+    assert spoken == ["読んでみるね。", "読めたよ。"]
+    assert len(seen) == 1 and seen[0][-1]["content"].endswith("本文")
 
 def test_pipeline_falls_back_to_screen():
     p, seen, spoken = run(lambda: {"title": "記事", "url": "https://example.com/a", "text": ""},

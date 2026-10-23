@@ -51,7 +51,7 @@ X_TREND = "x_trend"  # トレンドから作った話題カードの angle
 _MARK = re.compile(r"^\s*(?:検索|けんさく)\s*[:：]\s*")
 _SEARCH_ANY = re.compile(r"(?:検索|けんさく)\s*[:：]")
 _ANY_MARK = re.compile(r"(?:検索|けんさく|リンク)\s*[:：]")
-LINK_NOTICE = "画面に表示するね。"  # 調べたページの URL を画面の URL 欄に出したことを声で伝える
+LINK_NOTICE = "読んでみるね。"  # 調べたページの URL を画面の URL 欄に出したことを声で伝える
 
 
 def search_rule(today: datetime.date) -> str:
