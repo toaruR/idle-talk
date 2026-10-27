@@ -13,6 +13,7 @@ import logging
 import random
 import re
 import socket
+import subprocess
 import threading
 import time
 from collections import Counter, deque
@@ -22,6 +23,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
+from .camera import CameraCycle, Cameras, Source
+from .camera import describe as describe_camera
+from .camera import grab as grab_camera
 from .config import Config, Drama, Screen
 from .drama import LEVEL_VOICE_RATIO, BleedMeter, DramaListener, is_ai_voice
 from .echo_chain import CANCEL_KIND
@@ -107,6 +111,12 @@ SCREEN_PROMPT = ("利用者のパソコンの画面を横で一緒に見てい�
                  "画面の説明や文字の読み上げはせず、気になったこと・思ったことを素直に。"
                  "何が映っているのか分からないときだけ『なし』とだけ出力してください。")
 SCREEN_TITLE_NOTE = "\nウィンドウのタイトル: {title}"  # 画像の文字は小さくて読めないことが多いので、何の画面かの手がかりにする
+# カメラモード (設計書 6.9): 画面モードと同じ経路で、ブラウザの Web カメラの 1 コマを見る
+CAMERA_PROMPT = ("利用者の Web カメラの映像を横で見ています。添えた画像が今のカメラの映像です。\n"
+                 "友人として、映っている様子 (利用者のしていること・持っている物・部屋の様子など) に一言 (40 字以内、1〜2 文) で話しかけてください。"
+                 "映像の説明や容姿の評価はせず、気になったこと・思ったことを素直に。"
+                 "誰も映っていない・暗くて分からないときだけ『なし』とだけ出力してください。")
+CAMERA_LABEL_NOTE = "\nこのカメラ: {label}"  # cameras.toml の label。どこを映したカメラかを伝える
 
 
 def _alnum(text: str) -> str:
@@ -253,6 +263,8 @@ class IdleTalkDirector:
         self.screen_on = False
         # [screen].follow_window なら前面のウィンドウを撮る (wincap.WindowCapture.grab。main が結線)。None ならブラウザの共有
         self.screen_capture: Callable[[], object] | None = None
+        self.camera_on = False  # カメラモード (ui.camera)。screen_on と一緒に立ち、cameras のソースを順に見る
+        self.cameras = CameraCycle(Cameras())  # main が cameras.toml で差し替える。既定はブラウザの Web カメラだけ
         # ブラウザ補正なしモード。画面の「ブラウザ補正なし」で ui.pc が on。AI の声はブラウザではなくモニターが鳴らす
         self.pc_on = False
         self.open_monitor: Callable[[], object] | None = None  # モニターの出力機器を開く (main が結線)
@@ -564,8 +576,14 @@ class IdleTalkDirector:
             self.drama_mic = bool(settings["drama_mic"])
         if bool(settings.get("drama")) != self.drama_on:
             self._set_drama(bool(settings.get("drama")))
-        if bool(settings.get("screen")) != self.screen_on:
-            self._set_screen(bool(settings.get("screen")))
+        camera = bool(settings.get("camera"))  # カメラモードは画面モードの見る先を Web カメラに替えたもの
+        want = bool(settings.get("screen")) or camera
+        if want != self.screen_on or (want and camera != self.camera_on):
+            if self.screen_on:
+                self._set_screen(False)
+            self.camera_on = camera
+            if want:
+                self._set_screen(True)
         self._last_op = self.clock()
         muted = bool(settings.get("mute"))
         if muted and not self.fsm.ctx.muted:
@@ -1151,12 +1169,13 @@ class IdleTalkDirector:
         self.screen_on = on
         if on:
             self.screen.start()
+            self.cameras.reset()
         else:
             self.screen.stop()
             if self.spontaneous.pending and self._spont_task is not None:  # 作りかけ・再生中の一言も取消す
                 self._cancel_spontaneous()
-        log.info("screen mode %s", "on" if on else "off")
-        self._bc_record("screen_mode", {"on": on})
+        log.info("%s mode %s", "camera" if self.camera_on else "screen", "on" if on else "off")
+        self._bc_record("screen_mode", {"on": on, "camera": self.camera_on})
 
     def _screen_tick(self, idle: bool) -> str | None:
         listening = self.core.conn is not None and self.core.hello_done
@@ -1186,19 +1205,46 @@ class IdleTalkDirector:
         self._keep_snap(shot.png, "png")
         return "data:image/png;base64," + shot.png, shot.thumb, shot.title
 
+    async def _camera_shot(self) -> tuple[str | None, bytes | None, Source]:
+        """次のソースの (画像の data URL, 縮小画像, ソース)。ブラウザの Web カメラは snap、他は ffmpeg で取る。"""
+        src = self.cameras.next()
+        if src.browser:
+            jpeg, thumb = await self._snap()
+        elif not self.drama_vision:
+            return None, None, src
+        else:
+            try:
+                jpeg, thumb = await asyncio.to_thread(grab_camera, src, self.cameras.c.ffmpeg)
+            except (OSError, subprocess.SubprocessError) as e:  # 取れなければ黙るだけ
+                log.warning("camera grab failed (%s): %s", describe_camera(src), e)
+                return None, None, src
+            log.info("camera snapshot (%s): %d KB", describe_camera(src), len(jpeg) * 3 // 4 // 1024)
+            self._snap_id = (self._snap_id + 1) % (1 << 31)
+            self._keep_snap(jpeg)
+        return ("data:image/jpeg;base64," + jpeg if jpeg else None), thumb, src
+
     async def _screen_respond(self) -> None:
         me = asyncio.current_task()
-        url, thumb, title = await self._screen_shot()
+        src = None
+        if self.camera_on:
+            url, thumb, src = await self._camera_shot()
+            title = None
+        else:
+            url, thumb, title = await self._screen_shot()
         if self._spont_task is not me or not self.spontaneous.pending:
             return
-        diff = self.screen.diff(thumb, title)
+        diff = self.cameras.diff(thumb) if src is not None else self.screen.diff(thumb, title)
         if not url or diff < self.screen.s.min_diff:  # 画面が取れない / 前に話したときからあまり変わっていない: 黙る
             self._bc_record("screen_skip", {"diff": round(diff, 1), "image": bool(url)})
             log.info("screen skipped: diff %.1f%% (image %s)", diff, bool(url))
             self.spontaneous.done()
             return
-        self.screen.mark_shown(thumb, title)
-        prompt = SCREEN_PROMPT + (SCREEN_TITLE_NOTE.format(title=title) if title else "")
+        if src is not None:
+            self.cameras.mark_shown(thumb)
+            prompt = CAMERA_PROMPT + (CAMERA_LABEL_NOTE.format(label=src.label) if src.label else "")
+        else:
+            self.screen.mark_shown(thumb, title)
+            prompt = SCREEN_PROMPT + (SCREEN_TITLE_NOTE.format(title=title) if title else "")
         messages = [{"role": "system", "content": self.personas.system_prompt()},
                     {"role": "user", "content": [
                         {"type": "text", "text": prompt},

@@ -117,7 +117,7 @@ def test_pipeline_reads_page_when_asked_if_readable():
 
     _, seen, spoken = run(read, user="このページ読める？", llm_out=("読めたよ。",))
     assert reads == [True]
-    assert spoken == ["読んでみるね。", "読めたよ。"]
+    assert spoken == [PAGE_NOTICE, "読めたよ。"]
     assert len(seen) == 1 and seen[0][-1]["content"].endswith("本文")
 
 def test_pipeline_falls_back_to_screen():

@@ -45,7 +45,7 @@
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'drama_mic', 'screen', 'pc', 'persona']) {
+    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'drama_mic', 'screen', 'camera', 'pc', 'persona']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;
@@ -284,7 +284,25 @@
     return { stream, stop, snapshot: snapshotter(video, () => stopped, 'no video track', createCanvas) };
   }
 
-  // 画面モードの [screen].follow_window: サーバが前面のウィンドウを撮るので共有はせず、オン・オフだけ持つ。
+  // カメラモード (設計書 6.9): Web カメラの映像を残し、画面モードと同じく求められたら snapshot() で返す。Browser only.
+  async function startCameraCapture({ getUserMedia, onEnded, vision, createCanvas }) {
+    if (!(await vision)) {
+      throw new Error('LLM が画像を読めないため使えません (idle_talk.toml の [llm].mmproj を指定してください)');
+    }
+    const stream = await step('カメラ', () => getUserMedia({ video: { width: { ideal: SNAP_W }, height: { ideal: SNAP_H } }, audio: false }));
+    const video = stream.getVideoTracks();
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      for (const t of video) t.stop();
+      if (onEnded) onEnded();
+    };
+    if (video.length) video[0].addEventListener('ended', stop); // カメラの取り外し・権限の取り消し
+    return { stream, stop, snapshot: snapshotter(video, () => stopped, 'no video track', createCanvas) };
+  }
+
+  // 画面モードの [screen].follow_window:サーバが前面のウィンドウを撮るので共有はせず、オン・オフだけ持つ。
   // 戻り値は startScreenCapture と同じ形 (snapshot は求められない)
   async function startWindowWatch({ onEnded, vision }) {
     if (!(await vision)) {
@@ -302,7 +320,7 @@
   const api = {
     PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, SNAP_W, SNAP_H, THUMB_W, THUMB_H, W, P,
     wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, grayThumb, errorResolved,
-    createClient, startCapture, startDramaCapture, startScreenCapture, startWindowWatch,
+    createClient, startCapture, startDramaCapture, startScreenCapture, startCameraCapture, startWindowWatch,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else if (typeof globalThis !== 'undefined') globalThis.IdleTalkClient = api;

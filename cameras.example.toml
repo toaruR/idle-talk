@@ -1,0 +1,18 @@
+# カメラモード (画面の「カメラで見てもらう」) で見るソース。cameras.toml にコピーして書き換える。
+# 上から順に、[screen].interval_s ごとに 1 つずつ見て、前にそのソースを見たときから変わっていれば一言話す。
+# cameras.toml はパスワードを含むので git に入れない (.gitignore 済み)。無ければブラウザの Web カメラだけを見る。
+# 変更は idle-talk の再起動で反映。ブラウザ以外は ffmpeg で 1 コマ取る (RTSP は 1 回 3〜4 秒)。
+
+# ffmpeg = "ffmpeg"   # ffmpeg の実行ファイル (PATH に無ければフルパス)
+
+[[source]]
+label = "部屋のカメラ"   # AI に伝えるカメラの名前 (40 字まで)
+url = "browser"         # ブラウザの Web カメラ (ボタンを押したときに開く)
+
+[[source]]
+label = "駐車場"
+url = "rtsp://user:password@192.168.0.10:554/stream1"  # ffmpeg が読める URL (rtsp / http)。パスワードはログに出さない
+
+# [[source]]
+# label = "玄関"
+# device = "ELECOM 2MP Webcam"  # この PC のカメラを idle-talk が直接撮る (機器名: ffmpeg -list_devices true -f dshow -i dummy)

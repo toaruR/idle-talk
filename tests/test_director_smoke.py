@@ -126,7 +126,7 @@ def test_main_ports_from_settings_file(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main_mod, "build_director", lambda d, args, cfg: seen.update(vars(args)) or D())
     monkeypatch.setattr(main_mod, "_run", lambda director, port, sup=None, stop_file=None, topic_interval_s=0: seen.update(run_port=port) or asyncio.sleep(0))
-    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui, speakers, personas=None, vision=None, follow_window=False: seen.update(web=(port, ws_port), ui=ui))
+    monkeypatch.setattr(main_mod, "start_web", lambda port, ws_port, ui, speakers, personas=None, vision=None, follow_window=False, camera_browser=True: seen.update(web=(port, ws_port), ui=ui))
     monkeypatch.setattr(main_mod.TtsClient, "speakers", lambda self: [])
     f = tmp_path / "s.toml"
     f.write_text("[ports]\nws = 9000\nllm = 9001\ntts = 9002\nasr = 9003\nweb = 9004\n"
@@ -158,7 +158,8 @@ def test_start_web_serves_dir_and_ws_port(tmp_path):
         r = c.getresponse()
         assert (r.status, json.loads(r.read())) == (200, {"ws_port": 9123, "ui": {"on": True},
                                                           "speakers": [{"id": 1, "name": "a b"}],
-                                                          "personas": [], "vision": False, "follow_window": False})
+                                                          "personas": [], "vision": False, "follow_window": False,
+                                                          "camera_browser": True})
         vision["on"] = True  # LLM の起動後に決まるので要求ごとに聞く
         c.request("GET", "/config.json")
         assert json.loads(c.getresponse().read())["vision"] is True

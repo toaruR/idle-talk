@@ -26,3 +26,11 @@ __pycache__/
 docs/knowledge-kit-usage.md
 data/models/
 *.egg-info/
+data/
+.bm25_sessions.db
+.bm25_sessions.db-wal
+.bm25_sessions.db-shm
+.bm25_sessions.json
+
+# カメラモードのソース (パスワードを含む)
+cameras.toml

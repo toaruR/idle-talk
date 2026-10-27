@@ -69,6 +69,7 @@
   .modes button::before { font-size: 20px; }
   #drama::before { content: "🎬"; }
   #screen::before { content: "🖥️"; }
+  #camera::before { content: "📷"; }
   #pc::before { content: "💬"; }
   .modes button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 16px; }
@@ -112,6 +113,7 @@
   <div class="modes">
     <button id="drama" disabled aria-pressed="false">ドラマを一緒に見る</button>
     <button id="screen" disabled aria-pressed="false">画面を一緒に見る</button>
+    <button id="camera" disabled aria-pressed="false">カメラで見てもらう</button>
     <button id="pc" disabled aria-pressed="false">ブラウザ補正なし</button>
   </div>
 </section>
@@ -149,6 +151,7 @@
   let client = null;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
+  let camera = null; // Web カメラ (startCameraCapture の戻り値)。drama・screen とは同時に使わない
   let pc = false; // ブラウザ補正なしモード (共有はしない。AI の声はサーバがスピーカーに鳴らす)
   let sink = null;
   let connection = null;
@@ -205,6 +208,7 @@
       quiet_end: $('quiet_end').value,
       drama: drama !== null,
       screen: screen !== null,
+      camera: camera !== null,
       pc,
     };
     if ($('speaker').options.length) ui.speaker = parseInt($('speaker').value, 10);
@@ -253,7 +257,8 @@
     }
     if (drama) drama.stop();
     if (screen) screen.stop();
-    drama = screen = sink = null;
+    if (camera) camera.stop();
+    drama = screen = camera = sink = null;
     pc = false;
     $('connect').checked = false;
     $('state').textContent = '停止中';
@@ -287,7 +292,7 @@
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
-          const src = drama || screen;
+          const src = drama || screen || camera;
           const r = src ? await src.snapshot() : { reason: 'not sharing' };
           if (connection === session) session.client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg, thumb: r.thumb } : { t: 'snap', id: m.id, reason: r.reason });
         },
@@ -312,15 +317,18 @@
   function showDrama() {
     $('drama').textContent = drama ? 'ドラマを見るのをやめる' : 'ドラマを一緒に見る';
     $('screen').textContent = screen ? '画面を見るのをやめる' : '画面を一緒に見る';
+    $('camera').textContent = camera ? 'カメラを止める' : 'カメラで見てもらう';
     $('pc').textContent = pc ? 'ブラウザ補正なしをやめる' : 'ブラウザ補正なし';
     $('pc').disabled = !client;
     $('drama').setAttribute('aria-pressed', String(drama !== null)); // 使用中のモードのボタンを強調する (CSS)
     $('screen').setAttribute('aria-pressed', String(screen !== null));
+    $('camera').setAttribute('aria-pressed', String(camera !== null));
     $('pc').setAttribute('aria-pressed', String(pc));
     $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています')
-      : pc ? 'ブラウザ補正なしで会話中 (スピーカーで)' : '';
-    $('drama').disabled = !client || screen !== null; // 共有は 1 つずつ
-    $('screen').disabled = !client || drama !== null;
+      : camera ? (camera.stream ? 'カメラで見ています' : 'カメラ (サーバ) を見ています') : pc ? 'ブラウザ補正なしで会話中 (スピーカーで)' : '';
+    $('drama').disabled = !client || screen !== null || camera !== null; // 共有は 1 つずつ
+    $('screen').disabled = !client || drama !== null || camera !== null;
+    $('camera').disabled = !client || drama !== null || screen !== null;
   }
   $('drama').addEventListener('click', async () => {
     if (drama) { drama.stop(); return; }
@@ -361,6 +369,31 @@
       const capture = follow ? await C.startWindowWatch(opts) : await C.startScreenCapture(opts);
       if (connection !== owner) { capture.stop(); return; }
       screen = capture;
+      showError('', null);
+      showDrama();
+      pushUi();
+    } catch (e) {
+      if (connection !== owner) return;
+      showError(String(e), null);
+    }
+  });
+
+  // カメラモード: Web カメラの映像を AI もときどき見て、前に話したときから変わっていれば一言言う
+  $('camera').addEventListener('click', async () => {
+    if (camera) { camera.stop(); return; }
+    const owner = connection;
+    try {
+      const opts = {
+        getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+        vision: loadServerConfig().then((c) => Boolean(c.vision), () => false),
+        onEnded: () => { if (connection !== owner) return; camera = null; showDrama(); pushUi(); },
+      };
+      // cameras.toml に url = "browser" が無ければ、サーバがネットワークカメラ等を撮るので Web カメラは開かない
+      const browserCam = await serverConfig.then((c) => c.camera_browser !== false, () => true);
+      if (connection !== owner) return;
+      const capture = browserCam ? await C.startCameraCapture(opts) : await C.startWindowWatch(opts);
+      if (connection !== owner) { capture.stop(); return; }
+      camera = capture;
       showError('', null);
       showDrama();
       pushUi();

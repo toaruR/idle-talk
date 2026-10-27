@@ -17,6 +17,7 @@ from html.parser import HTMLParser
 
 from .store import Store
 from .topics import add_card, has_card
+from .web_search import USER_AGENT
 
 TOPIC_TTL_MS = 24 * 60 * 60 * 1000  # カード有効期間 (published_at から)
 TREND_TTL_MS = 6 * 60 * 60 * 1000  # X のトレンドのカードの有効期間 (トレンドは移り変わりが速い)
@@ -98,7 +99,9 @@ def page_description(html_bytes: bytes) -> str | None:
 
 
 def http_fetch(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_S) as r:
+    # 既定の Python-urllib の UA だと AlphaSignal 等が 403 を返す
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_S) as r:
         return r.read()
 
 
@@ -165,7 +168,7 @@ class TopicWorker:
             try:
                 items = parse_feed(self._fetch(url))
             except (OSError, ValueError) as e:  # 取得失敗は次回に持ち越す (会話に影響させない)
-                log.debug("feed fetch failed: %s", e)
+                log.warning("feed fetch failed: %s: %s", url, e)
                 continue
             for item in items:
                 if not self.running or self._cancel.is_set():

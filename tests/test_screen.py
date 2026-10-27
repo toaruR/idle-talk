@@ -139,6 +139,26 @@ def test_screen_off_cancels_and_resets(tmp_path):
     asyncio.run(run())
 
 
+# ---- カメラモード (ui.camera) ----
+def test_camera_uses_browser_snap_and_camera_prompt(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["お、コーヒー飲んでるの？"], [])
+        d.drama_vision = True
+        d.screen_capture = lambda: pytest.fail("カメラは前面のウィンドウを撮らない")
+        assert validate_message({"t": "ui", "camera": True}) and not validate_message({"t": "ui", "camera": 1})
+        d.core.on_text(b, json.dumps({"t": "ui", "camera": True}))
+        assert d.screen_on and d.camera_on
+        await look(d, b, DARK)
+        text = d.seen_[0][1]["content"][0]["text"]
+        assert "カメラ" in text and "ウィンドウのタイトル" not in text
+        assert ai_turns(store) == ["お、コーヒー飲んでるの？"]
+        d.core.on_text(b, json.dumps({"t": "ui", "screen": True, "camera": False}))  # カメラから画面へ: 見直す (比べる相手を捨てる)
+        assert d.screen_on and not d.camera_on and d.screen.changed(None)
+        d.core.on_text(b, json.dumps({"t": "ui", "screen": False}))
+        assert not d.screen_on and not d.camera_on
+    asyncio.run(run())
+
+
 # ---- 前面のウィンドウ ([screen].follow_window) ----
 def test_load_follow_window(tmp_path):
     p = tmp_path / "s.toml"

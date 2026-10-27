@@ -188,6 +188,22 @@ test('makeUi: screen is passed through', () => {
   assert.deepEqual(C.makeUi({ screen: true }), { t: 'ui', screen: true });
 });
 
+test('makeUi: camera is passed through', () => {
+  assert.deepEqual(C.makeUi({ camera: true }), { t: 'ui', camera: true });
+});
+
+test('startCameraCapture: keeps the camera track and stops on ended', async () => {
+  const f = fakeScreen(false);
+  let asked = null, ended = 0;
+  const cap = await C.startCameraCapture({ getUserMedia: async (c) => { asked = c; return f.stream; }, vision: true, onEnded: () => { ended += 1; } });
+  assert.equal(asked.audio, false);
+  f.listeners.ended();
+  assert.equal(f.stops.video, 1);
+  assert.equal(ended, 1);
+  assert.deepEqual(await cap.snapshot(), { reason: 'capture stopped' });
+  await assert.rejects(C.startCameraCapture({ getUserMedia: async () => f.stream, vision: false }), /画像を読めない/);
+});
+
 test('makeUi: pc is passed through', () => {
   assert.deepEqual(C.makeUi({ pc: true }), { t: 'ui', pc: true });
 });

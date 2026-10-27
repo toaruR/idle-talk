@@ -28,6 +28,8 @@ from .monitor import open_device, open_input
 from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
+from .camera import CAMERAS_FILE, CameraCycle, load_cameras
+from .camera import describe as describe_camera
 from .screen import ScreenWatcher
 from .server import serve
 from .store import Store
@@ -179,6 +181,8 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
             director.screen_capture = WindowCapture(screen.exclude, screen.width, screen.color_bits).grab
         except OSError as e:
             log.warning("[screen].follow_window ignored: %s", e)
+    director.cameras = CameraCycle(load_cameras(Path(args.config).with_name(CAMERAS_FILE)))  # カメラモードのソース (設計書 6.9)
+    log.info("camera sources: %s", ", ".join(describe_camera(s) for s in director.cameras.c.sources))
     asr_settings = load_asr(args.config)
     director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)
@@ -224,17 +228,19 @@ def ui_defaults(cfg: Config) -> dict:
 
 def start_web(port: int, ws_port: int, ui: dict | None = None, speakers: list[dict] | SpeakerChoices | None = None,
               root: Path = WEB_DIR, personas: list[dict] | None = None,
-              vision: Callable[[], bool] = lambda: False, follow_window: bool = False) -> ThreadingHTTPServer:
+              vision: Callable[[], bool] = lambda: False, follow_window: bool = False,
+              camera_browser: bool = True) -> ThreadingHTTPServer:
     """web/ を 127.0.0.1:port で配信する。/config.json で WS ポート・設定欄の初期値・声とペルソナの選択肢をブラウザへ渡す。
 
     vision はドラマモードで画面も送るか (LLM が画像入力に対応しているか。LLM の起動後に決まるので要求ごとに聞く)。
     follow_window なら画面モードはブラウザで共有せず、サーバが前面のウィンドウを撮る。
+    camera_browser が偽ならカメラモードでブラウザの Web カメラを開かない (cameras.toml に url = "browser" が無い)。
     file:// だと Origin が null で WS に拒否されるため、ブラウザはこの URL から開く。"""
     def config() -> bytes:  # 声の一覧は AivisSpeech が後から起動したときのため要求ごとに取る
         choices = speakers.get() if isinstance(speakers, SpeakerChoices) else speakers or []
         return json.dumps({"ws_port": ws_port, "ui": ui or {}, "speakers": choices,
                            "personas": personas or [], "vision": vision(),
-                           "follow_window": follow_window}).encode("utf-8")
+                           "follow_window": follow_window, "camera_browser": camera_browser}).encode("utf-8")
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -423,7 +429,8 @@ def main(argv: list[str] | None = None) -> int:
                                            "drama_mic": load_drama(args.config).mic},
                         args.speakers, personas=args.personas.choices(),
                         vision=lambda: director is not None and director.drama_vision,
-                        follow_window=load_screen(args.config).follow_window and sys.platform == "win32")
+                        follow_window=load_screen(args.config).follow_window and sys.platform == "win32",
+                        camera_browser=CameraCycle(load_cameras(Path(args.config).with_name(CAMERAS_FILE))).needs_browser)
         sup = start_llm(args, data_dir, cfg)
         director = build_director(data_dir, args, cfg)
         director.drama_vision = has_vision(args.llm_url)  # mmproj 付きなら一言・感想に画面を添える (設計書 6.5)

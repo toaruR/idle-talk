@@ -68,7 +68,7 @@ test('connection toggle stops resources and sharing, disables modes, and reconne
   assert.equal(f.modes[0].stops, 1);
   assert.ok(f.players[0].resets);
   assert.equal(f.elements.get('state').textContent, '停止中');
-  for (const id of ['pc', 'drama', 'screen']) assert.equal(f.elements.get(id).disabled, true);
+  for (const id of ['pc', 'drama', 'screen', 'camera']) assert.equal(f.elements.get(id).disabled, true);
   await f.toggle(true);
   assert.equal(f.clients.length, 2);
   assert.equal(f.clients[1].closed, false);
