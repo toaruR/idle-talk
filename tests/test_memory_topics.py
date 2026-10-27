@@ -69,3 +69,19 @@ def test_ratio_q_simulation():
     assert sum(qs) <= 10
     for i in range(len(qs) - 2):
         assert sum(qs[i:i + 3]) <= 1
+
+
+def test_ends_with_question():
+    assert topics.ends_with_question("リキはそれを温かいまま飲むと？")
+    assert topics.ends_with_question("何かに集中しとるん?」")
+    assert topics.ends_with_question("趣味を詳しく聞かせてほしいっちゃんね")
+    assert topics.ends_with_question("また教えてね。")
+    assert not topics.ends_with_question("平穏に一日が終わるのが一番の贅沢かもしれんとね。")
+    assert not topics.ends_with_question("")
+
+
+def test_ratio_q_from_texts():
+    assert topics.QuestionRatio.from_texts([]).can_ask()
+    assert not topics.QuestionRatio.from_texts(["そうなん？"]).can_ask()
+    assert not topics.QuestionRatio.from_texts(["そうなん？", "いいね。"]).can_ask()  # 3 応答に 1 回以下
+    assert topics.QuestionRatio.from_texts(["そうなん？", "いいね。", "よかね。"]).can_ask()

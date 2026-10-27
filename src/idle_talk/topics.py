@@ -64,3 +64,24 @@ class QuestionRatio:
         q = bool(wants_question) and self.can_ask()
         self.record(q)
         return q
+
+    @classmethod
+    def from_texts(cls, ai_texts: list[str], window: int = RATIO_Q_WINDOW) -> "QuestionRatio":
+        """再生済みの AI 発話 (古い順) から作る。割り込みで途中までしか聞こえなかった発話は質問まで届いていない。"""
+        r = cls(window)
+        for t in ai_texts:
+            r.record(ends_with_question(t))
+        return r
+
+
+_TRAIL = "」』)）\"' 　\n"
+_REQUESTS = ("教えて", "聞かせて")  # 疑問符なしでも返事を求める締め (「趣味を聞かせてほしい」等、2026-10-19 の調査)
+
+
+def ends_with_question(text: str) -> bool:
+    """発話が質問・返事の要求で終わっているか。"""
+    s = (text or "").rstrip(_TRAIL)
+    if s.endswith(("?", "？")):
+        return True
+    s = s.rstrip("。！!…ー〜♪ね よな").rstrip(_TRAIL)
+    return any(w in s[-12:] for w in _REQUESTS)

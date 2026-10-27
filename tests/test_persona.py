@@ -175,3 +175,24 @@ def test_ui_persona_switches_system_prompt(tmp_path):
             store.close()
 
     asyncio.run(run())
+
+
+def test_question_note_after_recent_question(tmp_path):
+    """RATIO_Q: 直近 2 回の再生済み AI 発話に質問終わりがあれば、今回は質問で締めないよう system に足す。"""
+    from idle_talk.director import NO_QUESTION_NOTE
+    clock = FakeClock()
+    store = Store(tmp_path / "t.db", db_backup=False)
+    d = IdleTalkDirector(store, lambda m: iter(()), lambda text: b"RIFF....WAVE", lambda: None, EnergyVad(),
+                         AsrClient(mock_asr_send(clock)), clock=clock, now_ms=lambda: 1000)
+    try:
+        assert NO_QUESTION_NOTE not in d._chat_messages()[0]["content"]
+        store.add_turn(1, "ai", "温かいまま飲むと？", 1)
+        store.add_turn(2, "user", "冷たくして", 1)
+        assert d._chat_messages()[0]["content"].endswith(NO_QUESTION_NOTE)
+        store.add_turn(3, "ai", "冷たいのもよかね。", 1)
+        assert NO_QUESTION_NOTE in d._chat_messages()[0]["content"]  # 3 応答に 1 回以下
+        store.add_turn(4, "ai", "うちも好きよ。", 1)
+        assert NO_QUESTION_NOTE not in d._chat_messages()[0]["content"]
+    finally:
+        d.close()
+        store.close()

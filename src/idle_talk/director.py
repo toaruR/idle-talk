@@ -46,7 +46,7 @@ from .screen import ScreenWatcher, decode_thumb
 from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
-from .topics import mark_used, select_cards
+from .topics import QuestionRatio, mark_used, select_cards
 from .vad import EnergyVad, Vad, rms
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
                        name_messages, parse_name, speaker_prompt)
@@ -117,6 +117,9 @@ CAMERA_PROMPT = ("利用者の Web カメラの映像を横で見ています。
                  "映像の説明や容姿の評価はせず、気になったこと・思ったことを素直に。"
                  "誰も映っていない・暗くて分からないときだけ『なし』とだけ出力してください。")
 CAMERA_LABEL_NOTE = "\nこのカメラ: {label}"  # cameras.toml の label。どこを映したカメラかを伝える
+# 質問率 RATIO_Q (設計書 §8.1)。style_rules の「織り交ぜて」だけでは毎回質問で締めた (カメラモードの実機 2026-10-27)
+NO_QUESTION_NOTE = ("\n\n最近の発話で質問したので、今回は質問や問いかけ (『？』『教えて』『聞かせて』) で終えず、"
+                    "自分の感想・共感・連想で言い切ってください。")
 
 
 def _alnum(text: str) -> str:
@@ -1245,6 +1248,7 @@ class IdleTalkDirector:
         else:
             self.screen.mark_shown(thumb, title)
             prompt = SCREEN_PROMPT + (SCREEN_TITLE_NOTE.format(title=title) if title else "")
+        prompt += self._question_note(history_window(self.store, self.cfg))
         messages = [{"role": "system", "content": self.personas.system_prompt()},
                     {"role": "user", "content": [
                         {"type": "text", "text": prompt},
@@ -1369,12 +1373,18 @@ class IdleTalkDirector:
         return label.format(card["hook"]) + (f"(概要: {facts})" if facts else ""), card
 
     # ---- 記憶 (設計書 3.4): 応答の再生完了後に、溜まった利用者発話から抜き出して保存する ----
+    def _question_note(self, rows: list[dict]) -> str:
+        """直近の再生済み AI 発話に質問終わりがあれば、今回は質問で締めないよう指示する (RATIO_Q)。"""
+        ai = [t["text"] for t in rows if t["role"] == "ai" and t["text"]]
+        return "" if QuestionRatio.from_texts(ai, self.cfg.RATIO_Q[1]).can_ask() else NO_QUESTION_NOTE
+
     def _chat_messages(self, turns: int | None = None, ask: bool = False) -> list[dict]:
         """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。"""
+        rows = history_window(self.store, self.cfg)
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
-                   for t in history_window(self.store, self.cfg) if t["text"]]
+                   for t in rows if t["text"]]
         system = (self.personas.system_prompt() + memory_prompt(self.store, self.personas.current_id)
-                  + self._speaker_section(ask))
+                  + self._speaker_section(ask) + self._question_note(rows))
         lines = self.drama.context_text() if self.drama_on else ""
         if lines:
             system += DRAMA_CONTEXT_PROMPT.format(lines=lines)
