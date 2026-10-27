@@ -55,6 +55,11 @@ class ScreenWatcher:
     def changed(self, thumb: bytes | None, title: str | None = None) -> bool:
         return self.diff(thumb, title) >= self.s.min_diff
 
+    @property
+    def title(self) -> str | None:
+        """前に LLM に見せたウィンドウのタイトル。"""
+        return self._title
+
     def mark_shown(self, thumb: bytes | None, title: str | None = None) -> None:
         """LLM に見せた (「なし」で黙った場合も含む)。以後はこの画面と比べる。"""
         self._base, self._title = thumb, title

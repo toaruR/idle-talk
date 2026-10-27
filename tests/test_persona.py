@@ -196,3 +196,32 @@ def test_question_note_after_recent_question(tmp_path):
     finally:
         d.close()
         store.close()
+
+
+def test_mode_section_in_system(tmp_path):
+    """通常応答の system に今のモード (画面・カメラ・ドラマ・ブラウザ補正なし) を添える。"""
+    from idle_talk.camera import Cameras, Source
+    from idle_talk.director import (MODE_CAMERA_PROMPT, MODE_DRAMA_PROMPT, MODE_PC_PROMPT, MODE_SCREEN_PROMPT)
+    clock = FakeClock()
+    store = Store(tmp_path / "t.db", db_backup=False)
+    d = IdleTalkDirector(store, lambda m: iter(()), lambda text: b"RIFF....WAVE", lambda: None, EnergyVad(),
+                         AsrClient(mock_asr_send(clock)), clock=clock, now_ms=lambda: 1000)
+    try:
+        assert "モードです" not in d._chat_messages()[0]["content"]
+        d.screen_on = True
+        d.screen.mark_shown(None, "メモ帳")
+        system = d._chat_messages()[0]["content"]
+        assert MODE_SCREEN_PROMPT in system and "メモ帳" in system
+        d.camera_on = True
+        d.cameras.c = Cameras((Source("駐車場", "rtsp://x"),))
+        assert MODE_CAMERA_PROMPT.format(labels="駐車場") in d._chat_messages()[0]["content"]
+        d.screen_on = d.camera_on = False
+        d.drama_on = True
+        assert MODE_DRAMA_PROMPT in d._chat_messages()[0]["content"]
+        d.drama_on = False
+        d.pc_on = True
+        assert MODE_PC_PROMPT in d._chat_messages()[0]["content"]
+    finally:
+        d.pc_on = False
+        d.close()
+        store.close()

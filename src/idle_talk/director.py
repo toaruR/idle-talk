@@ -117,6 +117,15 @@ CAMERA_PROMPT = ("利用者の Web カメラの映像を横で見ています。
                  "映像の説明や容姿の評価はせず、気になったこと・思ったことを素直に。"
                  "誰も映っていない・暗くて分からないときだけ『なし』とだけ出力してください。")
 CAMERA_LABEL_NOTE = "\nこのカメラ: {label}"  # cameras.toml の label。どこを映したカメラかを伝える
+# 通常応答の system に今のモードを添える。無いと「画面見えてる？」に「見えない」と答え、自分の一言の出どころも分からなかった
+MODE_SCREEN_PROMPT = ("\n今は「画面を一緒に見る」モードです。利用者のパソコンの画面をときどき見て、あなたから一言話しかけています。"
+                      "この返答には画面の画像は添えていないので、画面について聞かれたら前に見たときの様子として答えてください。")
+MODE_SCREEN_TITLE_NOTE = "前に見た画面のウィンドウ: {title}\n"
+MODE_CAMERA_PROMPT = ("\n今は「カメラで見てもらう」モードです。カメラ ({labels}) の映像をときどき見て、あなたから一言話しかけています。"
+                      "この返答には映像は添えていないので、映像について聞かれたら前に見たときの様子として答えてください。\n")
+MODE_DRAMA_PROMPT = "\n今は「ドラマを一緒に見る」モードです。利用者と一緒にドラマ (動画) を見ています。\n"
+MODE_PC_PROMPT = ("\n今は「ブラウザ補正なし」モードです。話しかけてくる声には、利用者だけでなく"
+                  "パソコンで動く別の音声 AI の声も含まれます。\n")
 # 質問率 RATIO_Q (設計書 §8.1)。style_rules の「織り交ぜて」だけでは毎回質問で締めた (カメラモードの実機 2026-10-27)
 NO_QUESTION_NOTE = ("\n\n最近の発話で質問したので、今回は質問や問いかけ (『？』『教えて』『聞かせて』) で終えず、"
                     "自分の感想・共感・連想で言い切ってください。")
@@ -1378,13 +1387,27 @@ class IdleTalkDirector:
         ai = [t["text"] for t in rows if t["role"] == "ai" and t["text"]]
         return "" if QuestionRatio.from_texts(ai, self.cfg.RATIO_Q[1]).can_ask() else NO_QUESTION_NOTE
 
+    def _mode_section(self) -> str:
+        """今のモードの説明。ドラマを優先する (_on_ui と同じ)。"""
+        if self.drama_on:
+            return MODE_DRAMA_PROMPT
+        if self.screen_on and self.camera_on:
+            labels = "、".join(s.label for s in self.cameras.c.sources if s.label) or "Web カメラ"
+            return MODE_CAMERA_PROMPT.format(labels=labels)
+        if self.screen_on:
+            title = self.screen.title
+            return MODE_SCREEN_PROMPT + "\n" + (MODE_SCREEN_TITLE_NOTE.format(title=title) if title else "")
+        if self.pc_on:
+            return MODE_PC_PROMPT
+        return ""
+
     def _chat_messages(self, turns: int | None = None, ask: bool = False) -> list[dict]:
         """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。"""
         rows = history_window(self.store, self.cfg)
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in rows if t["text"]]
         system = (self.personas.system_prompt() + memory_prompt(self.store, self.personas.current_id)
-                  + self._speaker_section(ask) + self._question_note(rows))
+                  + self._speaker_section(ask) + self._mode_section() + self._question_note(rows))
         lines = self.drama.context_text() if self.drama_on else ""
         if lines:
             system += DRAMA_CONTEXT_PROMPT.format(lines=lines)
