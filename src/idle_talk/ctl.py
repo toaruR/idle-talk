@@ -244,9 +244,10 @@ def cmd_speakers(args: argparse.Namespace, data_dir: Path) -> int:
             print(f"deleted speaker {args.delete}" if n else f"speaker {args.delete}: not found")
             return 0 if n else 1
         else:
-            rows = con.execute("SELECT id, name, n FROM speakers ORDER BY id").fetchall()
-            for sid, name, n in rows:
-                print(f"{sid:4d}  {name or '(名前未登録)'}  {n} 発話")
+            has_alias = "alias" in {r[1] for r in con.execute("PRAGMA table_info(speakers)")}  # v3 以前の DB には無い
+            rows = con.execute(f"SELECT id, name, n, {'alias' if has_alias else 'NULL'} FROM speakers ORDER BY id").fetchall()
+            for sid, name, n, alias in rows:
+                print(f"{sid:4d}  {name or '(名前未登録)'}  {n} 発話" + (f"  (仮名: {alias})" if alias else ""))
             if not rows:
                 print("no speakers")
     finally:

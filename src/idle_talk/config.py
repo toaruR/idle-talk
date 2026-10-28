@@ -318,6 +318,26 @@ def load_voice_id(path: str | Path = SETTINGS_FILE) -> VoiceId:
     return VoiceId(raw.get("on", False), raw.get("model", VoiceId._field_defaults["model"]), float(th))
 
 
+class Transcribe(NamedTuple):
+    """[transcribe]: 文字起こしモードの話者の見分け方 (設計書 6.10)。"""
+    # 同じ人とみなす声の近さ。スピーカー越しの動画の声は BGM も混ざり、同じ人でも 0.4〜0.5 に下がって
+    # [voice_id].threshold (0.6) では別人が増え続けた (実機 2026-10-27)。別人がまとまるなら上げる
+    threshold: float = 0.45
+    voice_max_s: int = 8  # 声の特徴はこの秒数までの頭で測る (長い区間は複数人の声が混ざる)。認識は区間全体
+
+
+def load_transcribe(path: str | Path = SETTINGS_FILE) -> Transcribe:
+    """[transcribe] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "transcribe", Transcribe._fields)
+    th = raw.get("threshold", Transcribe._field_defaults["threshold"])
+    if type(th) not in (int, float) or not 0 < th < 1:
+        raise ValueError(f"[transcribe].threshold must be a number in (0, 1): {th!r}")
+    mx = raw.get("voice_max_s", Transcribe._field_defaults["voice_max_s"])
+    if type(mx) is not int or not 2 <= mx <= 60:
+        raise ValueError(f"[transcribe].voice_max_s must be an int in [2, 60]: {mx!r}")
+    return Transcribe(float(th), mx)
+
+
 class VadSettings(NamedTuple):
     """[vad]: 発話検出 (vad.EnergyVad)。物音で発話扱いになりすぎるなら ratio (自動校正時) か onset_ms を上げる。"""
     threshold: float = 500.0     # 発話とみなすフレーム RMS (16bit PCM)。自動校正時は推定がそろうまでの値

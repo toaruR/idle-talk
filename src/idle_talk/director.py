@@ -26,7 +26,7 @@ from .backchannel import Backchannel, event_payload
 from .camera import CameraCycle, Cameras, Source
 from .camera import describe as describe_camera
 from .camera import grab as grab_camera
-from .config import Config, Drama, Screen
+from .config import Config, Drama, Screen, Transcribe
 from .drama import LEVEL_VOICE_RATIO, BleedMeter, DramaListener, is_ai_voice
 from .echo_chain import CANCEL_KIND
 from .epoch import Epoch
@@ -49,7 +49,7 @@ from .store import Store
 from .topics import QuestionRatio, mark_used, select_cards
 from .vad import EnergyVad, Vad, rms
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
-                       name_messages, parse_name, speaker_prompt)
+                       name_messages, parse_name, speaker_prompt, voice_word)
 from .web_search import X_TREND, link_items
 
 log = logging.getLogger("idle_talk.director")
@@ -85,6 +85,7 @@ DRAMA_CONTEXT_PROMPT = "\n利用者と一緒にドラマを見ています。直
 # 「なし」の代わりに「聞こえなくて分からない」と言うことがある (実機 2026-10-14)。言っても楽しくないので黙る
 DRAMA_UNHEARD = re.compile(r"聞こえ(な|ず)|聞き取れ|分から(な|ず)|わから(な|ず)")
 SHORT_KIND = "short_discarded"  # 文脈の無い短い認識結果 (物音の聞き違い) を捨てた 1 回 = 1 行
+UNKNOWN_SPEAKER = "不明"  # 文字起こしで話者が分からない (話者識別なし・最初の発話が短い) ときのラベル
 DRAMA_HOLD_S = 8.0  # 一言の生成中に台詞が再開したら、次の切れ目をこれだけ待つ (来なければ古くなったので黙る)
 # 一言には会話履歴も前の一言も渡さず、前の一言以降の台詞 (今の場面) だけを見せる。
 # 履歴や 3 分ぶんの台詞を渡すと、4B は前の一言や古い台詞の目立つ語 (「噛み詰め」等) を毎回繰り返した (実機 2026-10-14)
@@ -284,6 +285,9 @@ class IdleTalkDirector:
         self.open_mic: Callable[[], object] | None = None  # マイクの入力機器を開く (main が結線)。None ならブラウザのマイクのまま
         self.mic: MicCapture | None = None  # ブラウザ補正なしモード中のマイク。動いている間はブラウザのマイクを捨てる
         self._loop: asyncio.AbstractEventLoop | None = None
+        # 文字起こしモード (設計書 6.10)。画面の「文字起こし」で ui.transcribe が on。AI は話さず、認識結果を話者の仮名つきで残す
+        self.transcribe_on = False
+        self.transcribe = Transcribe()  # main が [transcribe] で差し替える
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -422,6 +426,8 @@ class IdleTalkDirector:
             self._set_screen(False)
         if self.pc_on:
             self._set_pc(False)
+        if self.transcribe_on:
+            self._set_transcribe(False)
         self._down_q.clear()
         self._down_sent.clear()
         self._idle_since = None
@@ -564,7 +570,8 @@ class IdleTalkDirector:
                 self._speech_bled = True
             if self.drama_on:
                 self.bleed_meter.mic(rms(pcm[i:i + FRAME_BYTES]), self.ingress._buf is not None, self.ingress.vad.bleed)
-            if self.backchannel is not None and not self.pc_on:  # ブラウザ補正なしモード: 相槌は相手に届いて答えさせてしまう
+            # ブラウザ補正なしモード: 相槌は相手に届いて答えさせてしまう。文字起こしモードでは AI は話さない
+            if self.backchannel is not None and not (self.pc_on or self.transcribe_on):
                 self._bc_track(1)
 
     def _on_ui(self, settings: dict) -> None:
@@ -584,6 +591,8 @@ class IdleTalkDirector:
                 self._emit({"t": "error", "code": ERR_OUT_OF_RANGE, "message": str(e)[:200]})
         if bool(settings.get("pc")) != self.pc_on:
             self._set_pc(bool(settings.get("pc")))
+        if bool(settings.get("transcribe")) != self.transcribe_on:
+            self._set_transcribe(bool(settings.get("transcribe")))
         if "drama_mic" in settings:
             self.drama_mic = bool(settings["drama_mic"])
         if bool(settings.get("drama")) != self.drama_on:
@@ -643,6 +652,9 @@ class IdleTalkDirector:
             self.store.add_event(self.now_ms(), self.epoch.current, SHORT_KIND,
                                  json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
+        if self.transcribe_on:
+            self._transcribe(uid, text)
+            return False  # 応答しない (Ingress が DISCARDED を送り、待機に戻る)
         self._text = text
         self._identify(uid)
         self._m_mark("asr_done")
@@ -685,16 +697,56 @@ class IdleTalkDirector:
     def _on_voice(self, uid: int, emb: object) -> None:
         self._voice = (uid, emb)
 
-    def _identify(self, uid: int) -> None:
+    def _identify(self, uid: int, threshold: float | None = None) -> None:
         """自声・語なしを除いた発話の声で話し相手を決める。声の特徴が無い (短い発話) なら直前の相手のまま。"""
         v, self._voice = self._voice, None
         if self.voices is None or v is None or v[0] != uid:
             return
         # ドラマの音と重なった発話からは新しい声を登録しない (ドラマの人物が名前なしで溜まった。2026-10-19)
-        sid = self.voices.identify(v[1], self.now_ms(), enroll=self._transcript_bleed is None)
+        sid = self.voices.identify(v[1], self.now_ms(), enroll=self._transcript_bleed is None,
+                                   threshold=threshold)
         if sid != self._speaker:
             log.info("speaker changed: %s -> %s (%s)", self._speaker, sid, self.voices.name(sid) or "名前未登録")
         self._speaker = sid
+
+    # ---- 文字起こしモード (設計書 6.10) ----
+    def _set_transcribe(self, on: bool) -> None:
+        if on:
+            self._switch_output()  # 話している途中の声・作りかけの自発発話を止める
+            self._cancel_memory()
+            self._cancel_digest()
+        self.transcribe_on = on
+        # ブラウザはエコー除去・雑音抑制なしでマイクを開き直す。生の音は静かな部屋で RMS 0.5 程度になり、
+        # 無音判定 (E6) で誤って休止した (ブラウザ補正なしモード、実機 2026-10-19) ので、モード中は切る
+        self.ingress.silence_check = not on and self.mic is None
+        # 動画の音を拾うと BGM で発話が終わらず、ずっとユーザー発話中のまま文字にならなかった (実機 2026-10-27)。
+        # ドラマの台詞と同じ長さ ([drama].max_seg_s) で切って認識に回す
+        self.ingress.max_seg_ms = self.drama.s.max_seg_s * 1000 if on else 0
+        self.ingress.voice_max_ms = self.transcribe.voice_max_s * 1000 if on else 0
+        if hasattr(self.ingress.vad, "floor_track"):  # 雑音は直近の小さい音 (台詞の切れ目の BGM) で見る
+            self.ingress.vad.floor_track = on
+        log.info("transcribe mode %s", "on" if on else "off")
+        self._bc_record("transcribe_mode", {"on": on})
+
+    def _transcribe(self, uid: int, text: str) -> None:
+        """認識結果を話者のラベルつきで talk.log・turns・画面に出す。知らない声は会話と同じく ENROLL_N 回続けて
+        一致したら登録して仮名を付け、それまでは「不明」 (1 回で登録すると、外れるたびに別人が増えた。実機 2026-10-27)。"""
+        self._identify(uid, self.transcribe.threshold)
+        label = self._speaker_label(uid)
+        talk_log.info("TRANSCRIPT(%s): %s", label, text)
+        self.store.add_turn(self.now_ms(), "transcript", f"{label}: {text}", 0, None, uid)  # 会話の履歴には入れない
+        self._emit({"t": "transcript", "speaker": label, "text": text, "ts": self.now_ms()})
+
+    def _speaker_label(self, uid: int) -> str:
+        """名前が分かればその名前、無ければ仮名 (無ければ今の発話の声から付ける)。話者識別なし・判定前は「不明」。"""
+        sid = self._speaker
+        if self.voices is None or sid is None:
+            return UNKNOWN_SPEAKER
+        name = self.voices.name(sid) or self.voices.alias(sid)
+        if name:
+            return name
+        seg = self.ingress._segs.get(uid)  # 認識に渡した音 (Ingress は結果を渡し終えてから捨てる)
+        return self.voices.set_alias(sid, voice_word(seg[0]) if seg else "声", self.now_ms())
 
     def _speaker_section(self, ask: bool) -> str:
         """今の話し相手の節。名前の分からない登録済みの相手には、ask なら ASK_MAX 回まで名前を尋ねさせる。"""
@@ -891,6 +943,8 @@ class IdleTalkDirector:
         """定期呼び出し。'rest' (IDLE_TIMEOUT 遷移) / 'spontaneous' (発火) / None を返す。"""
         now = self.clock() if now is None else now
         idle = self.fsm.ctx.state is State.IDLE
+        if self.transcribe_on:  # 文字起こし中は AI は話さず、長く黙っていても休止しない
+            return None
         if self.drama_on:  # 見ている間は黙って長く過ごすので、無操作休止と普段の自発発話の代わりに一言の判定だけ
             return self._drama_tick(idle)
         if self.screen_on:  # 画面を見ている間も同じく、無操作休止と普段の自発発話の代わりに画面の一言だけ

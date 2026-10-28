@@ -18,7 +18,8 @@ from pathlib import Path
 
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
-                     load_asr, load_drama, load_pc, load_screen, load_search, load_topics, load_vad, load_voice, load_voice_id)
+                     load_asr, load_drama, load_pc, load_screen, load_search, load_topics, load_transcribe, load_vad,
+                     load_voice, load_voice_id)
 from .director import IdleTalkDirector
 from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
@@ -186,6 +187,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     asr_settings = load_asr(args.config)
     director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)
+    director.transcribe = load_transcribe(args.config)  # 文字起こしモードの話者の見分け方 (設計書 6.10)
     topics = load_topics(args.config)
     search = load_search(args.config)
     if search.on:

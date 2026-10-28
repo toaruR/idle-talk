@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import array
 import math
+from collections import deque
 from typing import Protocol
 
 SPEECH_START = "speech_start"
@@ -17,6 +18,8 @@ NOISE_WARMUP_MS = 1000     # 雑音の推定に使った非再生フレームが
 NOISE_DOWN_TAU_MS = 500    # 雑音の推定は静かな方へは速く追う (時定数)
 NOISE_UP_DB_PER_S = 0.5    # うるさい方へはゆっくり追う (発話で雑音の推定が上がりすぎないように)
 ECHO_TAU_MS = 2000         # 再生中の回り込みの平均 (時定数)。再生をまたいで保つ。ドラマの音 (bleed) も同じ時定数で別に測る
+FLOOR_WINDOW_MS = 10000    # floor_track: 雑音の推定を直近この長さの音量の下位 FLOOR_PCT より上げない (文字起こしモード)
+FLOOR_PCT = 0.05
 
 
 class Vad(Protocol):
@@ -64,6 +67,13 @@ class EnergyVad:
         self.min_threshold = min_threshold
         self.playing = False
         self.bleed = False
+        # 雑音の推定を直近 FLOOR_WINDOW_MS の音量の下位 FLOOR_PCT より上げない (文字起こしモード、Director が設定)。
+        # 動画の台詞が続くと、ゆっくり追う推定は台詞の大きさまで上がって 1 分半ほど何も拾わなかった (実機 2026-10-28)。
+        # 発話中に推定を止めると BGM の上の切れ目で区間が終わらず、15 秒で切った区間に何人もの声が混ざった。
+        # 推定そのものを下位 10% (5 秒) にすると、台詞が詰まった場面で床が台詞の大きさになり、大きな音まで拾わなかった。
+        # 推定は従来どおり追い (切れ目で区間が終わる)、台詞の切れ目・音節の間の小さい音を上限にする
+        self.floor_track = False
+        self._floor: deque[float] = deque(maxlen=FLOOR_WINDOW_MS // FRAME_MS)
         self._speaking = False
         self._quiet = 0
         self._loud = 0
@@ -78,6 +88,7 @@ class EnergyVad:
         self._quiet = self._loud = 0
         self._noise_db = self._echo_db = self._bleed_db = None
         self._noise_ms = 0
+        self._floor.clear()
 
     @property
     def current_threshold(self) -> float:
@@ -107,6 +118,9 @@ class EnergyVad:
             self._noise_db += (db - self._noise_db) * FRAME_MS / NOISE_DOWN_TAU_MS
         else:
             self._noise_db += min(db - self._noise_db, NOISE_UP_DB_PER_S * FRAME_MS / 1000)
+        if self.floor_track:
+            self._floor.append(db)
+            self._noise_db = min(self._noise_db, sorted(self._floor)[int(len(self._floor) * FLOOR_PCT)])
 
     def process(self, frame: bytes) -> str | None:
         level = rms(frame)

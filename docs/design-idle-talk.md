@@ -32,6 +32,7 @@
 - 2026-10-21：見ているページを読む（§6.3、§7）。「このページどう思う？」等と声で頼むと、前面のブラウザの URL を UI Automation で読み、r.jina.ai の本文で答える。読めなければ前面のウィンドウの画面で答える。
 - 2026-10-27：カメラモードで `cameras.toml` の複数のソース（ブラウザの Web カメラ・RTSP 等のネットワークカメラ・PC のカメラ）を名前つきで順に見る（§6.9）。
 - 2026-10-27：カメラモードを追加（§6.9、§7）。画面の「カメラで見てもらう」で Web カメラの映像を `getUserMedia` で取り、画面モードと同じ経路で一言話しかける。`ui` に `camera` を足す。
+- 2026-10-27：文字起こしモードを追加（§3.1、§3.4、§6.10）。AI は話さず、認識結果を話者のラベルつきで画面・talk.log・`turns` に残す。名前の無い声には声の高さと抑揚から「低く落ち着いた声1」のような仮名（言葉 + 通し番号）を付けて `speakers.alias` に保存する（スキーマ v4）。
 - 2026-10-12：llama-server（b11564）はストリーム最初のチャンクで `delta.content` が `null` のため、SSE data 行スキーマの `content` を string または null に変更（§12.1）。
 
 ---
@@ -81,7 +82,7 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |B→D|`hello`|§12.1|接続直後。version 不一致なら close 4002|
 |B→D|`playback`|§12.1|実再生位置の通知|
 | 共通 | `ping`/`pong` | §12.1 | `PING_INTERVAL` ごと。欠落 2 回で切断扱い |
-|B→D|`ui`|§12.1|設定変更（`drama`: ドラマモードの on/off、§6.5。`screen`: 画面モードの on/off、§6.7。`camera`: カメラモードの on/off、§6.9）|
+|B→D|`ui`|§12.1|設定変更（`drama`: ドラマモードの on/off、§6.5。`screen`: 画面モードの on/off、§6.7。`camera`: カメラモードの on/off、§6.9。`transcribe`: 文字起こしモードの on/off、§6.10）|
 |D→B|binary|16byte ヘッダ + PCM（§12.1）|先読みは1チャンクまで|
 |D→B|`duck`|§12.1|音量を下げる|
 |D→B|`cancel`|§12.1|new_epoch 未満のキューを全破棄|
@@ -89,6 +90,7 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |D→B|`state`|§12.1|UI 表示用|
 |D→B|`search`|`{"t":"search","query":str,"active":bool}`|Web 検索の開始/終了（§6.3。UI 表示用、§12.1 のスキーマ外）|
 |D→B|`links`|`{"t":"links","items":[{"title":str,"url":str}]}`|調べたページの URL を画面の URL 欄に出す（§6.3。§12.1 のスキーマ外）|
+|D→B|`transcript`|`{"t":"transcript","speaker":str,"text":str,"ts":int}`|文字起こしの 1 発話（§6.10。§12.1 のスキーマ外）|
 |D→B|`snap`|`{"t":"snap","id":u32}`|今の画面を 1 枚求める（§6.5）|
 |B→D|`snap`|`{"t":"snap","id":u32,"jpeg"?:base64,"thumb"?:base64,"reason"?:str}`|求められた画面（640×360 に収めた JPEG、base64 で最大 1MiB）。`thumb` は 32×18 の明るさ 1 バイトずつの縮小画像（§6.7 の変化の判定用）。映像が無い・描けなければ `jpeg` を省き、理由（200 字まで）を `reason` に入れる（Director がログに残す）|
 |共通|`error`|§12.1||
@@ -116,7 +118,7 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |`turns`|id INTEGER PK, ts INTEGER, role TEXT, text TEXT, completed INTEGER(0/1), stop_position_ms INTEGER NULL, utterance_id INTEGER|
 |`topic_cards`|id INTEGER PK, hook TEXT NOT NULL, facts TEXT(JSON), source_url TEXT, published_at INTEGER(epoch ms), expires_at INTEGER, angle TEXT, used_at INTEGER NULL, user_reaction TEXT NULL|
 |`memories`|id INTEGER PK, content TEXT, evidence_utterance_id INTEGER, updated_at INTEGER, deletable INTEGER, persona TEXT NULL（§6.6。NULL は全ペルソナ共通）|
-|`speakers`|id INTEGER PK, name TEXT NULL, embedding BLOB（float32 の単位ベクトル）, n INTEGER（平均に使った発話数）, updated_at INTEGER（§6.4）|
+|`speakers`|id INTEGER PK, name TEXT NULL, embedding BLOB（float32 の単位ベクトル）, n INTEGER（平均に使った発話数）, updated_at INTEGER（§6.4）, alias TEXT NULL（文字起こしの仮名、§6.10）|
 
 WAL モード、書き込みは専用スレッドのキュー経由。スキーマ版は `PRAGMA user_version`。
 
@@ -261,6 +263,17 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 画面モードとカメラモードを切り替えたら、比べる相手の画面を捨てて見直す。
 - 複数のソース（2026-10-27）：設定ファイルと同じフォルダの `cameras.toml`（パスワードを含むので git に入れない。書き方は `cameras.example.toml`）に `[[source]]` を並べる。各ソースは `label`（LLM に「このカメラ: 駐車場」と伝える名前、40 字まで）と、`url`（`"browser"` ならブラウザの Web カメラ、それ以外は ffmpeg が読める URL。rtsp は TCP）か `device`（DirectShow の機器名。idle-talk が直接撮る）のどちらか 1 つ。`interval_s` ごとに上から 1 つずつ順に見て、変化の判定はソースごとに前に LLM に見せたそのソースの画像と比べる。ブラウザ以外は `camera.grab` が ffmpeg で 1 コマを 640×360 の JPEG にし、その JPEG から 32×18 の明るさの縮小画像を作る（RTSP は 1 回 3〜4 秒、上限 15 秒。取れなければ黙る）。ファイルが無ければブラウザの Web カメラだけ。`url = "browser"` のソースが無ければブラウザは Web カメラを開かない（`/config.json` の `camera_browser`）。URL のパスワードはログに出さない（`camera.mask_url`）。
 - 限界：カメラの自動露出・ノイズで `thumb` の差が出やすく、`min_diff` は画面モードと共通。映像は外部に送らず、保存もしない（`keep_snaps` は共通）。
+
+### 6.10 文字起こしモード
+- 画面の「文字起こし」で `ui.transcribe=true` を送る。共有はしない。ドラマ・画面・カメラ・ブラウザ補正なしモードとは同時に使わない（画面で他のボタンを無効にする）。オンにしたら鳴っている途中の声・作りかけの自発発話を取消す。
+- マイク：ブラウザはモード中だけマイクをエコー除去・雑音抑制なし（`micConstraints(raw)`）で開き直す。Chrome のエコー除去は Chrome が鳴らした音をすべて参照にするので、別のタブで再生した動画の声をスピーカー越しに拾っても消してしまう。AI は話さないので自声の回り込みは無い。生の音は静かな部屋で無音判定（E6）を誤って起こすので（§6.8）、モード中は E6 の無音判定を切る。
+- 区間の上限：動画の BGM で発話が終わらず、ずっと「ユーザー発話中」のまま文字にならなかった（実機 2026-10-27）。モード中はマイクの区間を `[drama].max_seg_s`（既定 15 秒）で切って認識に回し、続きを次の区間として溜める（`ingress.max_seg_ms`）。
+- 閾値の自動校正：モード中は雑音の推定（§5.1 の自動校正）を、直近 10 秒の音量の下位 5% より上げない（`EnergyVad.floor_track`）。台詞の切れ目・音節の間の小さい音（BGM）が上限になるので、閾値は台詞の大きさまで上がらず、切れ目で区間が終わる。推定そのものを直近 5 秒の下位 10% にすると、台詞の詰まった場面で床が台詞の大きさになり、最初の一言の後は大きな音まで拾わなかった（実機 2026-10-28）。従来の推定（うるさい方へ毎秒 0.5dB）は台詞が続くと台詞の大きさまで上がり、1 分半ほど何も拾わなかった。発話中に推定を止めると、BGM の上の切れ目で区間が終わらず、すべて 15 秒で切られて 1 区間に何人もの声が混ざり、話者がまとまりすぎた（いずれも実機 2026-10-28）。
+- 認識結果は自声・語なし・文脈の無い短い結果（§5.1）を除いたあと、LLM に渡さず、`_on_transcript` が False を返して待機に戻る（応答・相槌・自発発話・名前の質問・記憶の抽出・`IDLE_TIMEOUT` 休止をしない）。
+- 1 発話ごとに `transcript`（話者・本文・時刻）を画面に送り、talk.log に `TRANSCRIPT(話者): 本文`、`turns` に role `transcript`・本文 `話者: 本文` で残す。`turns` の `transcript` 行は会話の履歴（`history_window`）に入れない。
+- 話者：§6.4 の話者識別（`[voice_id].on` が必要）で見分ける。照合の閾値は `[transcribe].threshold`（既定 0.45。会話の `[voice_id].threshold` 0.6 とは別）。スピーカー越しの動画の声は BGM も混ざり、同じ人でも類似度が 0.4〜0.5 に下がって、0.6 では 17 分で 12 人に分かれた（実機 2026-10-27）。知らない声は会話と同じく `ENROLL_N`（2）回続けて一致したら登録し、それまでは「不明」とする（1 回で登録すると外れるたびに別人が増えた）。声の特徴は発話の頭から `[transcribe].voice_max_s`（既定 8 秒）までで測る（15 秒で切った区間は複数人の声が混ざる。認識は区間全体）。1.5 秒未満の発話は声の特徴を測らず直前の話者を引き継ぐ。話者識別なしのときも「不明」。
+- 仮名：名前（§6.4）があれば名前、無ければ `speakers.alias`。仮名が無い声は、初めて文字起こしで聞いた発話の音から「言葉 + 通し番号」で付けて保存する（以後のセッションでも同じ）。言葉は声の高さ（有声フレームの F0 の中央値。自己相関で 70〜500Hz を探す）が 125Hz 未満「低い」、165Hz 未満「やや低い」、220Hz 未満「やや高い」、それ以上「高い」と、抑揚（F0 の標準偏差、半音）が 2.0 未満「落ち着いた」、3.5 以上「抑揚のある」を組み合わせる（例：「低く落ち着いた声」「やや高い声」「高く抑揚のある声」。区切りは暫定）。有声部分が 0.2 秒未満なら「声」。番号はこれまでに付けた仮名の最大 + 1（言葉によらず通し）。ctl の `speakers` に仮名も出る。
+- 限界：仮名の言葉は最初の 1 発話で決まり、その発話の調子に左右される。声の似た人は同じ話者になり、同時に話すとどちらか 1 人になる。
 
 ---
 

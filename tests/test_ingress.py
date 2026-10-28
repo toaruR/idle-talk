@@ -286,3 +286,24 @@ def test_adaptive_bleed_threshold_separate_from_ai_echo():
     assert abs(v.current_threshold - 150) < 1  # 鳴り止んだら雑音の推定に戻る (雑音に混ぜていない)
     v.playing = True
     assert abs(v.current_threshold - 300) < 1  # AI の回り込みは別のまま
+
+
+def test_floor_track_splits_dialogue_over_bgm_at_line_gaps():
+    """文字起こしモード: BGM の上で台詞が続いても、雑音を直近の小さい音 (BGM) で見るので、閾値は台詞の大きさまで
+    上がらず (実機 2026-10-28: 1 分半拾わなかった)、台詞の切れ目で区間が終わる (15 秒で切ると何人もの声が混ざった)。"""
+    def frame(level):
+        return struct.pack("<320h", *([level] * 320))
+    quiet, bgm, voice = frame(30), frame(300), frame(2000)
+    sparse = [voice, voice, voice, bgm] * 15 + [bgm] * 20  # 1.2 秒の台詞 (音節の間は BGM) + 0.4 秒の切れ目
+    # 台詞が詰まった場面: 9 割以上が台詞。床を下位 10% (5 秒) にすると台詞の大きさになり、大きな音まで拾わなかった
+    dense = [voice] * 130 + [bgm] * 10  # 2.6 秒の台詞 + 0.2 秒の切れ目 (切れ目は 1 割未満)
+
+    for line in (sparse, dense):
+        v = EnergyVad(adaptive=True)
+        v.floor_track = True
+        for _ in range(100):  # 2 秒の静かな部屋
+            v.process(quiet)
+        events = [v.process(f) for _ in range(int(150 * 50 / len(line))) for f in line]  # 約 150 秒の台詞と BGM
+        assert events[-len(line) * 5:].count(SPEECH_START) == 5  # 最後まで台詞ごとに拾う
+        assert events.count(SPEECH_END) >= events.count(SPEECH_START) - 1  # 台詞の切れ目で区間が終わる
+        assert v.current_threshold < 2000

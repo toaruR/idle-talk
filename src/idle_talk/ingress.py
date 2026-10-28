@@ -61,6 +61,10 @@ class Ingress:
         # E6 を無音で判定するか。Python で録るマイク (ブラウザ補正なしモード) は静かな部屋で RMS 0.5 程度になり、
         # 抜けたと誤判定したので、読み取りの失敗で判定する (Director が切り替える)
         self.silence_check = True
+        # 区間の上限 (ms、0 なら無し)。文字起こしモードで動画の音を拾うと BGM で発話が終わらず、認識に回らなかった
+        # (実機 2026-10-27)。超えたら切って認識に回し、続きを次の区間として溜める (Director が切り替える)
+        self.max_seg_ms = 0
+        self.voice_max_ms = 0  # 声の特徴を測る長さの上限 (ms、0 なら区間全体)。長い区間は複数人の声が混ざる
         self._buf: bytearray | None = None
         # VAD が発話開始を判定するまでの onset_frames - 1 フレーム (発話の頭) を区間に含めるための直前フレーム。
         # さらに前の PRE_ROLL_MS は区間の長さに数えず、ASR に渡す音にだけ足す (_lead)
@@ -136,6 +140,12 @@ class Ingress:
             self._end_segment(pcm)
         elif self._buf is None:
             self._pre.append(frame)
+        elif self.max_seg_ms and len(self._buf) >= self.max_seg_ms * BYTES_PER_MS:
+            pcm, self._buf = bytes(self._buf), bytearray()
+            log.info("segment split at max_seg_ms=%d", self.max_seg_ms)
+            self._end_segment(pcm)
+            self._lead, self._start_n = b"", self._n
+            self.director.enqueue(Event(Ev.VAD_START))  # 発話は続いている: 終話確認からユーザー発話中へ戻す
         self.director.pump()
 
     def _end_segment(self, pcm: bytes) -> None:
@@ -195,6 +205,8 @@ class Ingress:
             return None
         if self._embed_pool is None:
             self._embed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voice")
+        if self.voice_max_ms:
+            pcm = pcm[:self.voice_max_ms * BYTES_PER_MS]
         return self._embed_pool.submit(self.embed, pcm)
 
     def _asr_done(self, uid: int, res: object, voice: object = None) -> None:

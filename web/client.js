@@ -24,9 +24,11 @@
     return `ws://127.0.0.1:${port}/ws`;
   }
 
-  function micConstraints() {
+  // raw: 文字起こしモード。AI は話さないのでエコー除去は要らず、かけると Chrome の別のタブが鳴らした動画の声まで消える
+  // (Chrome のエコー除去は Chrome が鳴らした音をすべて参照にする)。雑音抑制も台詞・BGM 越しの声を削るので切る
+  function micConstraints(raw = false) {
     // AGC off: the server's VAD calibrates its threshold from the noise floor, which AGC would keep shifting.
-    return { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } };
+    return { audio: { echoCancellation: !raw, noiseSuppression: !raw, autoGainControl: false, channelCount: 1 } };
   }
 
   // ドラマモード: 共有したタブ (画面) の音だけを使う。Chrome は video 無しの共有を受け付けないので映像は取ってすぐ止める
@@ -45,7 +47,7 @@
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'drama_mic', 'screen', 'camera', 'pc', 'persona']) {
+    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'drama_mic', 'screen', 'camera', 'pc', 'transcribe', 'persona']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;
@@ -104,11 +106,11 @@
     }
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onSnap(msg), onOpen(), onClose(),
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onLinks(msg), onSnap(msg), onTranscript(msg), onOpen(), onClose(),
   //         clientId, reconnectMs, setTimeoutFn }
   // 接続が切れた・つながらなかったら reconnectMs 後につなぎ直す (サーバの再起動中に開始を押しても待てば動く)。close() で止める
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError, onSearch, onLinks, onSnap, onOpen, onClose } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onSearch, onLinks, onSnap, onTranscript, onOpen, onClose } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
     const reconnectMs = opts.reconnectMs || RECONNECT_MS;
     const setTimeoutFn = opts.setTimeoutFn || setTimeout;
@@ -150,6 +152,7 @@
       else if (msg.t === 'search') { if (onSearch) onSearch(msg); }
       else if (msg.t === 'links') { if (onLinks) onLinks(msg); }
       else if (msg.t === 'snap') { if (onSnap) onSnap(msg); }
+      else if (msg.t === 'transcript') { if (onTranscript) onTranscript(msg); }
       else if (player) player.handleMessage(msg);
     }
 
@@ -171,8 +174,8 @@
   }
 
   // Start mic capture -> worklet frames -> client.sendFrame. Browser only.
-  async function startCapture({ getUserMedia, AudioContextCtor, workletUrl, client }) {
-    const stream = await getUserMedia(micConstraints());
+  async function startCapture({ getUserMedia, AudioContextCtor, workletUrl, client, raw = false }) {
+    const stream = await getUserMedia(micConstraints(raw));
     let ctx, node, source, stopped = false;
     const stop = () => {
       if (stopped) return;

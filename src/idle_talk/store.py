@@ -14,7 +14,8 @@ from typing import Any
 
 from .errors import ERR_DB
 
-SCHEMA_VERSION = 3  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)
+SCHEMA_VERSION = 4  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)、
+# 4: speakers.alias (文字起こしモードの仮名、設計書 6.10)
 
 log = logging.getLogger("idle_talk.store")
 
@@ -59,7 +60,8 @@ CREATE TABLE IF NOT EXISTS speakers (
     name TEXT NULL,
     embedding BLOB NOT NULL,
     n INTEGER,
-    updated_at INTEGER
+    updated_at INTEGER,
+    alias TEXT NULL
 );
 """
 
@@ -140,6 +142,8 @@ class Store:
             con.executescript(SCHEMA_SQL)
             if "persona" not in {r[1] for r in con.execute("PRAGMA table_info(memories)")}:
                 con.execute("ALTER TABLE memories ADD COLUMN persona TEXT NULL")  # v2 以前: 既存の記憶は全ペルソナ共通
+            if "alias" not in {r[1] for r in con.execute("PRAGMA table_info(speakers)")}:
+                con.execute("ALTER TABLE speakers ADD COLUMN alias TEXT NULL")  # v3 以前: 仮名は文字起こしで初めて聞いたときに付ける
             con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._ready.set_result(True)
         except BaseException as e:  # noqa: BLE001

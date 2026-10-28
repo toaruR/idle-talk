@@ -52,7 +52,7 @@ def history_window(store: Store, cfg: Config | None = None) -> list[dict]:
     cfg = cfg or Config()
     rows = store.query(
         "SELECT id, ts, role, text, completed, stop_position_ms, utterance_id "
-        "FROM turns ORDER BY id DESC LIMIT ?", (cfg.N_TURNS + 1,))
+        "FROM turns WHERE role != 'transcript' ORDER BY id DESC LIMIT ?", (cfg.N_TURNS + 1,))  # 文字起こしは会話ではない
     if len(rows) > cfg.N_TURNS:
         log.info("history truncated to last %d turns", cfg.N_TURNS)
         rows = rows[: cfg.N_TURNS]

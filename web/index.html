@@ -71,6 +71,7 @@
   #screen::before { content: "🖥️"; }
   #camera::before { content: "📷"; }
   #pc::before { content: "💬"; }
+  #transcribe::before { content: "📝"; }
   .modes button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 16px; }
   .field { display: grid; gap: 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
@@ -99,6 +100,10 @@
   #links li { padding: 8px 12px; border-radius: 10px; background: var(--bg); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   #links a { display: block; color: var(--accent); text-decoration: none; font-weight: 600; }
   #links a:hover { text-decoration: underline; }
+  #transcript { list-style: none; margin: 0; padding: 0; max-height: 28em; overflow-y: auto; display: grid; gap: 6px; }
+  #transcript li { padding: 8px 12px; border-radius: 10px; background: var(--bg); font-size: 14px; overflow-wrap: anywhere; }
+  #transcript .who { color: var(--accent); font-weight: 600; margin-right: .5em; }
+  #transcript time { color: var(--muted); font-size: 12px; margin-right: .5em; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -115,6 +120,7 @@
     <button id="screen" disabled aria-pressed="false">画面を一緒に見る</button>
     <button id="camera" disabled aria-pressed="false">カメラで見てもらう</button>
     <button id="pc" disabled aria-pressed="false">ブラウザ補正なし</button>
+    <button id="transcribe" disabled aria-pressed="false">文字起こし</button>
   </div>
 </section>
 <section class="card">
@@ -133,6 +139,10 @@
     <label class="field" id="speaker_label" hidden>声 <select id="speaker"></select></label>
   </div>
   <label class="volume">音量 <input type="range" id="volume" min="0" max="200" step="5" value="100"> <span id="volume_text">100%</span></label>
+</section>
+<section class="card" id="transcript_box" hidden>
+  <h2>文字起こし</h2>
+  <ul id="transcript"></ul>
 </section>
 <section class="card" id="links_box" hidden>
   <h2>URL</h2>
@@ -153,6 +163,7 @@
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
   let camera = null; // Web カメラ (startCameraCapture の戻り値)。drama・screen とは同時に使わない
   let pc = false; // ブラウザ補正なしモード (共有はしない。AI の声はサーバがスピーカーに鳴らす)
+  let transcribe = false; // 文字起こしモード (AI は話さず、認識結果を話者の仮名つきで出す)
   let sink = null;
   let connection = null;
   let errorCode = null; // 表示中のサーバのエラーコード (一時的なものは再生が始まったら消す)
@@ -197,6 +208,24 @@
     list.scrollTop = 0;
   }
 
+  // 文字起こしを下に積む (新しいものが下)。MAX_TRANSCRIPT 行を超えたら古い順 (上) から消す。文字列は textContent で入れる
+  const MAX_TRANSCRIPT = 500;
+  function showTranscript(m) {
+    const list = $('transcript');
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 20; // 遡って読んでいる間は飛ばさない
+    const li = document.createElement('li');
+    const time = document.createElement('time');
+    time.textContent = new Date(m.ts || Date.now()).toLocaleTimeString('ja-JP', { hour12: false });
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = String(m.speaker || '');
+    li.append(time, who, String(m.text || ''));
+    list.append(li);
+    while (list.children.length > MAX_TRANSCRIPT) list.firstElementChild.remove();
+    $('transcript_box').hidden = false;
+    if (atBottom) list.scrollTop = list.scrollHeight;
+  }
+
   function readUi() {
     const ui = {
       mute: $('mute').checked,
@@ -210,6 +239,7 @@
       screen: screen !== null,
       camera: camera !== null,
       pc,
+      transcribe,
     };
     if ($('speaker').options.length) ui.speaker = parseInt($('speaker').value, 10);
     if ($('persona').options.length) ui.persona = $('persona').value;
@@ -259,7 +289,7 @@
     if (screen) screen.stop();
     if (camera) camera.stop();
     drama = screen = camera = sink = null;
-    pc = false;
+    pc = transcribe = false;
     $('connect').checked = false;
     $('state').textContent = '停止中';
     $('state').dataset.state = 'stopped';
@@ -267,6 +297,25 @@
     showDrama();
   }
   window.addEventListener('pagehide', stopConnection);
+  function openMic(c, raw) {
+    return C.startCapture({
+      getUserMedia: (m) => navigator.mediaDevices.getUserMedia(m),
+      AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client: c, raw,
+    });
+  }
+  // 文字起こしの切り替えでマイクを開き直す (エコー除去は開いた後の applyConstraints では確実に切り替わらない)
+  async function reopenMic(raw) {
+    const session = connection;
+    if (!session || !session.capture || !session.client) return;
+    try {
+      const capture = await openMic(session.client, raw);
+      if (connection !== session || transcribe !== raw) { capture.stop(); return; }
+      session.capture.stop();
+      session.capture = capture;
+    } catch (e) {
+      if (connection === session) showError(String(e), null);
+    }
+  }
   $('connect').addEventListener('change', async () => {
     if (!$('connect').checked) { stopConnection(); return; }
     const session = {};
@@ -291,6 +340,7 @@
         onError: (m) => showError(`[${m.code}] ${m.message}`, m.code),
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
+        onTranscript: showTranscript,
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
           const src = drama || screen || camera;
           const r = src ? await src.snapshot() : { reason: 'not sharing' };
@@ -299,10 +349,7 @@
         onOpen: () => { showError('', null); pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
         onClose: () => { $('state').textContent = '再接続中…'; $('state').dataset.state = 'offline'; $('search').textContent = ''; },
       });
-      const capture = await C.startCapture({
-        getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
-        AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
-      });
+      const capture = await openMic(client, transcribe);
       if (connection !== session) { capture.stop(); return; }
       session.capture = capture;
       showDrama();
@@ -319,16 +366,20 @@
     $('screen').textContent = screen ? '画面を見るのをやめる' : '画面を一緒に見る';
     $('camera').textContent = camera ? 'カメラを止める' : 'カメラで見てもらう';
     $('pc').textContent = pc ? 'ブラウザ補正なしをやめる' : 'ブラウザ補正なし';
-    $('pc').disabled = !client;
+    $('pc').disabled = !client || transcribe;
+    $('transcribe').textContent = transcribe ? '文字起こしをやめる' : '文字起こし';
+    $('transcribe').disabled = !client || drama !== null || screen !== null || camera !== null || pc; // AI が話すモードとは同時に使わない
+    $('transcribe').setAttribute('aria-pressed', String(transcribe));
     $('drama').setAttribute('aria-pressed', String(drama !== null)); // 使用中のモードのボタンを強調する (CSS)
     $('screen').setAttribute('aria-pressed', String(screen !== null));
     $('camera').setAttribute('aria-pressed', String(camera !== null));
     $('pc').setAttribute('aria-pressed', String(pc));
     $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています')
-      : camera ? (camera.stream ? 'カメラで見ています' : 'カメラ (サーバ) を見ています') : pc ? 'ブラウザ補正なしで会話中 (スピーカーで)' : '';
-    $('drama').disabled = !client || screen !== null || camera !== null; // 共有は 1 つずつ
-    $('screen').disabled = !client || drama !== null || camera !== null;
-    $('camera').disabled = !client || drama !== null || screen !== null;
+      : camera ? (camera.stream ? 'カメラで見ています' : 'カメラ (サーバ) を見ています') : pc ? 'ブラウザ補正なしで会話中 (スピーカーで)'
+      : transcribe ? '文字起こし中 (AI は話しません)' : '';
+    $('drama').disabled = !client || screen !== null || camera !== null || transcribe; // 共有は 1 つずつ
+    $('screen').disabled = !client || drama !== null || camera !== null || transcribe;
+    $('camera').disabled = !client || drama !== null || screen !== null || transcribe;
   }
   $('drama').addEventListener('click', async () => {
     if (drama) { drama.stop(); return; }
@@ -410,6 +461,15 @@
     pc = !pc;
     showDrama();
     pushUi();
+  });
+
+  // 文字起こしモード: AI は話さず、聞こえた発話を声の特徴から付けた仮名 (「低く落ち着いた声1」等) つきで書き出す。
+  // マイクはエコー除去・雑音抑制なしで開き直す (別のタブで再生した動画の声をスピーカー越しに拾えるように)
+  $('transcribe').addEventListener('click', () => {
+    transcribe = !transcribe;
+    showDrama();
+    pushUi();
+    reopenMic(transcribe);
   });
 })();
 </script>

@@ -4,6 +4,7 @@
 保存済みの声とのコサイン類似度が threshold 以上なら同じ人。短い発話 (MIN_VOICE_MS 未満) は判定しない。
 知らない声が ENROLL_N 回続けて同じ声なら登録し、名前は応答の中で LLM に尋ねさせ、返事から抜き出す。
 同じ名前を名乗った登録はまとめる (マイクが変わって別人扱いになったときの戻し方)。声は外部に送らない。
+文字起こしモード (設計書 6.10) では、名前の無い声に声の高さと抑揚から「低く落ち着いた声3」のような仮名を付ける。
 """
 from __future__ import annotations
 
@@ -105,30 +106,44 @@ class VoiceBook:
         self.store = store
         self.threshold = threshold
         self._rows: dict[int, dict] = {
-            r["id"]: {"name": r["name"], "emb": np.frombuffer(r["embedding"], dtype=np.float32).copy(), "n": r["n"]}
-            for r in store.query("SELECT id, name, embedding, n FROM speakers")}
+            r["id"]: {"name": r["name"], "emb": np.frombuffer(r["embedding"], dtype=np.float32).copy(), "n": r["n"],
+                      "alias": r["alias"]}
+            for r in store.query("SELECT id, name, embedding, n, alias FROM speakers")}
         self._pending: list[np.ndarray] = []  # 登録前の知らない声
 
     def name(self, sid: int | None) -> str | None:
         row = self._rows.get(sid)
         return row["name"] if row else None
 
+    def alias(self, sid: int | None) -> str | None:
+        row = self._rows.get(sid)
+        return row["alias"] if row else None
+
+    def set_alias(self, sid: int, word: str, now_ms: int) -> str:
+        """仮名「word + 通し番号」を付けて返す。番号はこれまでに付けた仮名の最大 + 1 (特徴の言葉が違っても通し)。"""
+        nums = [int(m.group()) for r in self._rows.values() if r["alias"] and (m := re.search(r"\d+$", r["alias"]))]
+        alias = f"{word}{max(nums, default=0) + 1}"
+        self._rows[sid]["alias"] = alias
+        self.store.execute("UPDATE speakers SET alias=?, updated_at=? WHERE id=?", (alias, now_ms, sid))
+        return alias
+
     def named_score(self, emb: np.ndarray) -> float | None:
         """名前の分かった相手の声との類似度の最大値。名前の分かった相手がいなければ None。"""
         emb = _unit(emb)
         return max((float(r["emb"] @ emb) for r in self._rows.values() if r["name"]), default=None)
 
-    def identify(self, emb: np.ndarray, now_ms: int, enroll: bool = True) -> int | None:
+    def identify(self, emb: np.ndarray, now_ms: int, enroll: bool = True, threshold: float | None = None) -> int | None:
         """一致した (または今回登録した) 話者 id。登録前の知らない声なら None。一致したら声の平均を更新する。
-        enroll が偽なら知らない声を登録しない (登録の候補にも数えない)。"""
+        enroll が偽なら知らない声を登録しない (登録の候補にも数えない)。threshold は今回だけ使う閾値 (文字起こし)。"""
         emb = _unit(emb)
+        threshold = self.threshold if threshold is None else threshold
         best, score = None, -1.0
         for sid, row in self._rows.items():
             s = float(row["emb"] @ emb)
             if s > score:
                 best, score = sid, s
         log.info("voice similarity to nearest: %.2f (speaker %s)", score, best)  # 閾値の調整用
-        if best is not None and score >= self.threshold:
+        if best is not None and score >= threshold:
             row = self._rows[best]
             row["emb"] = _unit(row["emb"] * min(row["n"], MAX_WEIGHT) + emb)
             row["n"] += 1
@@ -137,16 +152,16 @@ class VoiceBook:
             return best
         if not enroll:
             return None
-        if self._pending and float(_unit(np.mean(self._pending, axis=0)) @ emb) >= self.threshold:
+        if self._pending and float(_unit(np.mean(self._pending, axis=0)) @ emb) >= threshold:
             self._pending.append(emb)
         else:
             self._pending = [emb]
         if len(self._pending) < ENROLL_N:
             return None
-        mean, self._pending = _unit(np.mean(self._pending, axis=0)), []
+        n, mean, self._pending = len(self._pending), _unit(np.mean(self._pending, axis=0)), []
         sid = self.store.execute("INSERT INTO speakers(name, embedding, n, updated_at) VALUES (NULL,?,?,?)",
-                                 (mean.tobytes(), ENROLL_N, now_ms))
-        self._rows[sid] = {"name": None, "emb": mean, "n": ENROLL_N}
+                                 (mean.tobytes(), n, now_ms))
+        self._rows[sid] = {"name": None, "emb": mean, "n": n, "alias": None}
         log.info("new voice enrolled: speaker %d (score to nearest %.2f)", sid, score)
         return sid
 
@@ -160,10 +175,51 @@ class VoiceBook:
         a, b = self._rows[same], self._rows.pop(sid)
         a["emb"] = _unit(a["emb"] * min(a["n"], MAX_WEIGHT) + b["emb"] * min(b["n"], MAX_WEIGHT))
         a["n"] += b["n"]
+        a["alias"] = a["alias"] or b["alias"]
         self.store.execute("UPDATE speakers SET embedding=?, n=?, updated_at=? WHERE id=?",
                            (a["emb"].tobytes(), a["n"], now_ms, same))
         self.store.execute("DELETE FROM speakers WHERE id=?", (sid,))
         return same
+
+
+# ---- 文字起こしの仮名 (設計書 6.10): 声の高さ (F0 の中央値) と抑揚 (F0 の散らばり) を言葉にする ----
+_PITCH_FRAME, _PITCH_SHIFT, _PITCH_NFFT = 640, 160, 2048  # 40ms 窓 / 10ms シフト (70Hz の 2 周期以上)
+F0_MIN, F0_MAX = 70.0, 500.0  # 話し声の基本周波数として探す範囲 (Hz)
+VOICED_MIN = 0.45  # 自己相関の山がこれ以上のフレームを有声とみなす
+VOICED_FRAMES_MIN = 20  # 有声フレームがこれ未満 (0.2 秒) なら特徴を出さない
+# 声の高さの区切り (Hz、暫定)。成人男性の話し声は 100〜150Hz、女性は 200〜250Hz 前後が多い
+PITCH_WORDS = ((125.0, "低い"), (165.0, "やや低い"), (220.0, "やや高い"), (float("inf"), "高い"))
+CALM_ST, LIVELY_ST = 2.0, 3.5  # F0 の標準偏差 (半音、暫定)。これ未満なら「落ち着いた」、以上なら「抑揚のある」
+
+
+def pitch_track(pcm: bytes) -> np.ndarray:
+    """16kHz mono s16le PCM -> 有声フレームの F0 (Hz) の列。自己相関の山で見る (音量の小さいフレームは除く)。"""
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    n = 1 + (len(x) - _PITCH_FRAME) // _PITCH_SHIFT if len(x) >= _PITCH_FRAME else 0
+    if n == 0:
+        return np.zeros(0)
+    fr = x[np.arange(_PITCH_FRAME)[None, :] + _PITCH_SHIFT * np.arange(n)[:, None]]
+    fr = fr - fr.mean(axis=1, keepdims=True)
+    level = np.sqrt((fr ** 2).mean(axis=1))
+    fr = fr[level >= max(100.0, 0.25 * float(np.percentile(level, 90)))]  # 無音・息継ぎを除く
+    if len(fr) == 0:
+        return np.zeros(0)
+    ac = np.fft.irfft(np.abs(np.fft.rfft(fr * np.hanning(_PITCH_FRAME), _PITCH_NFFT)) ** 2)
+    lo, hi = int(SAMPLE_RATE / F0_MAX), int(SAMPLE_RATE / F0_MIN)
+    lag = lo + np.argmax(ac[:, lo:hi + 1], axis=1)
+    peak = ac[np.arange(len(ac)), lag] / np.maximum(ac[:, 0], 1e-9)
+    return SAMPLE_RATE / lag[peak >= VOICED_MIN]
+
+
+def voice_word(pcm: bytes) -> str:
+    """仮名の言葉 (番号の前)。「低く落ち着いた声」「やや高い声」等。有声の部分が短すぎれば「声」。"""
+    f0 = pitch_track(pcm)
+    if len(f0) < VOICED_FRAMES_MIN:
+        return "声"
+    pitch = next(w for limit, w in PITCH_WORDS if float(np.median(f0)) < limit)
+    spread = float(np.std(12 * np.log2(f0)))  # 半音
+    tone = "落ち着いた" if spread < CALM_ST else "抑揚のある" if spread >= LIVELY_ST else ""
+    return f"{pitch[:-1]}く{tone}声" if tone else f"{pitch}声"
 
 
 # ---- プロンプト ----
