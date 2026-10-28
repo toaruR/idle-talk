@@ -23,6 +23,9 @@ PRE_ROLL_MS = 300   # 開始判定より前の音も ASR に渡す長さ (閾値
 # 語なしで捨てた区間 (物音・1 字だけ等) の終わりからこの間隔以内に始まった区間は、捨てた区間を頭に足して認識し直す。
 # 発話が VAD で割れ、出だしの「え」だけの区間が捨てられて最初の何語かが欠けた (実機 2026-10-19)
 JOIN_GAP_MS = 1000
+SPLIT_LOOK_MS = 2000  # 区間を切るときは、切る長さに達した時点の直近この長さで一番静かなフレームの後で切る
+SPLIT_NEAR_MS = 500  # 話者の替わり目で切るときは、その前後この長さで一番静かなフレームの後で切る
+SPLIT_MIN_MS = 1000  # 話者の替わり目で切るとき、切った前の区間・残りがこれより短くなるなら切らない
 
 # offload(work, done): work (ブロッキングの ASR 呼び出し) を別スレッドで走らせ、結果を done で呼び出し元のループへ返す
 Offload = Callable[[Callable[[], object], Callable[[object], None]], None]
@@ -51,6 +54,9 @@ class Ingress:
         # 話者識別 (設計書 6.4): voice_min_ms 以上の区間の声の特徴を ASR と並行して計算し、認識結果の直前に on_voice へ渡す
         self.embed = embed
         self.on_voice = on_voice
+        # 認識の失敗・幻聴で区間を捨てたときに呼ぶ (文字起こしモードは仮の文字で補う。Director が設定)。
+        # 真を返したら補えたので、捨てた区間を次の区間の頭に足さない (同じ言葉が 2 回出る)
+        self.on_discard: Callable[[int], bool] | None = None
         self.voice_min_ms = voice_min_ms
         self._embed_pool: ThreadPoolExecutor | None = None
         self.clock = clock
@@ -61,8 +67,9 @@ class Ingress:
         # E6 を無音で判定するか。Python で録るマイク (ブラウザ補正なしモード) は静かな部屋で RMS 0.5 程度になり、
         # 抜けたと誤判定したので、読み取りの失敗で判定する (Director が切り替える)
         self.silence_check = True
-        # 区間の上限 (ms、0 なら無し)。文字起こしモードで動画の音を拾うと BGM で発話が終わらず、認識に回らなかった
-        # (実機 2026-10-27)。超えたら切って認識に回し、続きを次の区間として溜める (Director が切り替える)
+        # 区間を切る長さ (ms、0 なら切らない)。文字起こしモードで動画の音を拾うと、テレビ・ドラマは音が途切れず発話が
+        # 終わらなかった (実機 2026-10-27)。この長さに達したら直近 SPLIT_LOOK_MS で一番静かな所 (台詞の切れ目・息継ぎ)
+        # で切って認識に回し、残りは次の区間の頭にする (決まった長さで切ると語の途中で切れた)。Director が切り替える
         self.max_seg_ms = 0
         self.voice_max_ms = 0  # 声の特徴を測る長さの上限 (ms、0 なら区間全体)。長い区間は複数人の声が混ざる
         self._buf: bytearray | None = None
@@ -74,6 +81,7 @@ class Ingress:
         self._n = 0  # 受けたフレーム数 (区間の間隔を測る)
         self._start_n = 0
         self._segs: dict[int, tuple[bytes, int]] = {}  # 認識待ちの区間: uid -> (ASR に渡した音, 終わりのフレーム番号)
+        self.seg_span: dict[int, tuple[int, int]] = {}  # 認識待ちの区間: uid -> (始まり, 終わり) のフレーム番号 (文字起こしの時刻)
         self._head: tuple[bytes, int] | None = None  # 語なしで捨てた区間 (次の区間の頭に足す候補)
         self._uid = 0
         self._discarded_until = 0
@@ -141,12 +149,54 @@ class Ingress:
         elif self._buf is None:
             self._pre.append(frame)
         elif self.max_seg_ms and len(self._buf) >= self.max_seg_ms * BYTES_PER_MS:
-            pcm, self._buf = bytes(self._buf), bytearray()
-            log.info("segment split at max_seg_ms=%d", self.max_seg_ms)
-            self._end_segment(pcm)
-            self._lead, self._start_n = b"", self._n
-            self.director.enqueue(Event(Ev.VAD_START))  # 発話は続いている: 終話確認からユーザー発話中へ戻す
+            self._split()
         self.director.pump()
+
+    def set_vad(self, vad: Vad) -> None:
+        """発話検出を差し替える (文字起こしモードの Silero VAD)。溜めている区間はそこで終えて認識に回す。"""
+        if self._buf is not None:
+            pcm, self._buf = bytes(self._buf), None
+            self._end_segment(pcm)
+        self.vad = vad
+        self._onset_head = getattr(vad, "onset_frames", 1) - 1
+        self._pre = deque(maxlen=self._onset_head + PRE_ROLL_MS // FRAME_MS)
+
+    def split_at(self, frame_n: int) -> bool:
+        """今溜めている区間を、フレーム番号 frame_n (話者の替わり目) の前後 SPLIT_NEAR_MS で一番静かな所で切る。
+        区間が無い・前後が SPLIT_MIN_MS より短くなるなら切らずに False。"""
+        if self._buf is None:
+            return False
+        fb = FRAME_MS * BYTES_PER_MS
+        n = len(self._buf) // fb
+        at = frame_n - (self._n - n + 1)  # 区間の中の位置 (先頭のフレームが 0)
+        near, least = SPLIT_NEAR_MS // FRAME_MS, SPLIT_MIN_MS // FRAME_MS
+        lo, hi = max(least, at - near), min(n - least, at + near)
+        if lo >= hi:
+            return False
+        self._split(lo, hi, "speaker change")
+        return True
+
+    def _split(self, lo: int | None = None, hi: int | None = None, why: str = "") -> None:
+        """発話の途中で区間を切る。[lo, hi) のフレーム (既定は直近 SPLIT_LOOK_MS) で一番静かなフレームまでを認識に回し、
+        残りを次の区間として溜める。"""
+        fb = FRAME_MS * BYTES_PER_MS
+        n = len(self._buf) // fb
+        if lo is None:
+            lo, hi = n - min(n - 1, SPLIT_LOOK_MS // FRAME_MS), n
+        levels = [rms(self._buf[i * fb:(i + 1) * fb]) for i in range(lo, hi)]
+        cut = (lo + levels.index(min(levels)) + 1) * fb
+        pcm, rest = bytes(self._buf[:cut]), self._buf[cut:]
+        self._buf = bytearray()
+        log.info("segment split at %dms (%s)", cut // BYTES_PER_MS, why or f"quietest of last {SPLIT_LOOK_MS}ms")
+        self._end_segment(pcm)
+        self._buf = bytearray(rest)
+        self._lead = b""
+        self._start_n = self._n - len(rest) // fb + 1 + self._onset_head  # 残りの最初のフレームが区間の頭
+        self.director.enqueue(Event(Ev.VAD_START))  # 発話は続いている: 終話確認からユーザー発話中へ戻す
+
+    def partial_audio(self) -> bytes | None:
+        """今溜めている区間の音 (前の音を含む)。発話中でなければ None。文字起こしの仮の文字に使う。"""
+        return None if self._buf is None else self._lead + bytes(self._buf)
 
     def _end_segment(self, pcm: bytes) -> None:
         seg_ms = len(pcm) // BYTES_PER_MS
@@ -179,6 +229,8 @@ class Ingress:
         uid = self._uid
         name = self._put_shm(audio)
         self._segs[uid] = (audio, self._n)
+        start = self._start_n - self._onset_head  # 途中で切った区間の終わりは今のフレームではないので、長さから出す
+        self.seg_span[uid] = (start, start + len(pcm) // (FRAME_MS * BYTES_PER_MS))
         self.asr_pending += 1
         voice = self._start_embed(pcm) if len(pcm) // BYTES_PER_MS >= self.voice_min_ms else None
         audio_s = len(audio) / BYTES_PER_MS / 1000
@@ -214,6 +266,7 @@ class Ingress:
             self._settle(uid, res, voice)
         finally:
             self._segs.pop(uid, None)
+            self.seg_span.pop(uid, None)
 
     def _settle(self, uid: int, res: object, voice: object) -> None:
         self.asr_pending -= 1
@@ -225,6 +278,8 @@ class Ingress:
         if res is None:  # 幻聴 (E4): 応答トリガを送らない
             log.info("asr hallucination discarded: utterance %d", uid)
             self.hold(uid)
+        if (res is _FAILED or res is None) and self.on_discard is not None and self.on_discard(uid):
+            self._head = None
         if res is _FAILED or res is None or (self.on_transcript and self.on_transcript(uid, res["text"]) is False):
             if latest and self._buf is None:  # 発話は終わっている: 待機 (AI 再生中なら再生再開) へ戻す
                 self.director.enqueue(Event(Ev.DISCARDED))

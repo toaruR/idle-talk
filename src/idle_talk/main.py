@@ -49,6 +49,7 @@ PID_FILE = "idle_talk.pid"  # data_dir 直下。二重起動検査と ctl の停
 STOP_FILE = "idle_talk.stop"  # data_dir 直下。置かれたら正常終了する (ctl stop)
 DB_FILE = "idle_talk.db"  # data_dir 直下。ctl memories も読む
 SNAP_DIR = "snaps"  # data_dir 直下。[drama].keep_snaps でドラマの画面を残す
+SILERO_FILE = "models/silero_vad_v6.onnx"  # data_dir 下。文字起こしモードの発話検出 (faster-whisper 同梱のものを複製、MIT)
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"  # src レイアウト前提 (リポジトリ直下の web/)
 
 
@@ -188,6 +189,12 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     director.short_chars, director.short_reply_s = asr_settings.short_chars, asr_settings.short_reply_s
     enable_voice_id(director, args.config)
     director.transcribe = load_transcribe(args.config)  # 文字起こしモードの話者の見分け方 (設計書 6.10)
+    try:  # 文字起こしモードの発話検出。無ければ音量の VAD で続ける
+        from .silero_vad import load_session
+
+        director.silero = load_session(data_dir / SILERO_FILE)
+    except (ImportError, OSError, RuntimeError) as e:
+        log.warning("silero vad unavailable (transcribe uses energy vad): %s", e)
     topics = load_topics(args.config)
     search = load_search(args.config)
     if search.on:

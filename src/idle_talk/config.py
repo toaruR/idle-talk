@@ -324,6 +324,9 @@ class Transcribe(NamedTuple):
     # [voice_id].threshold (0.6) では別人が増え続けた (実機 2026-10-27)。別人がまとまるなら上げる
     threshold: float = 0.45
     voice_max_s: int = 8  # 声の特徴はこの秒数までの頭で測る (長い区間は複数人の声が混ざる)。認識は区間全体
+    # 発話とみなす閾値 = 雑音 x vad_ratio ([vad].ratio の代わり)。話者が替わると小さい声の人の台詞を拾わず、
+    # 「私は」「もう」等の断片だけになった (実機 2026-10-28)。物音・BGM まで文字になるなら上げる
+    vad_ratio: float = 2.0
 
 
 def load_transcribe(path: str | Path = SETTINGS_FILE) -> Transcribe:
@@ -335,7 +338,10 @@ def load_transcribe(path: str | Path = SETTINGS_FILE) -> Transcribe:
     mx = raw.get("voice_max_s", Transcribe._field_defaults["voice_max_s"])
     if type(mx) is not int or not 2 <= mx <= 60:
         raise ValueError(f"[transcribe].voice_max_s must be an int in [2, 60]: {mx!r}")
-    return Transcribe(float(th), mx)
+    ratio = raw.get("vad_ratio", Transcribe._field_defaults["vad_ratio"])
+    if type(ratio) not in (int, float) or not 1 < ratio <= 10:
+        raise ValueError(f"[transcribe].vad_ratio must be a number in (1, 10]: {ratio!r}")
+    return Transcribe(float(th), mx, float(ratio))
 
 
 class VadSettings(NamedTuple):

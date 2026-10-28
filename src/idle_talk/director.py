@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import logging
 import random
@@ -20,6 +21,7 @@ from collections import Counter, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
@@ -47,7 +49,10 @@ from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
 from .topics import QuestionRatio, mark_used, select_cards
-from .vad import EnergyVad, Vad, rms
+from .silero_vad import SPEECH_ON as SILERO_ON
+from .silero_vad import SileroVad
+from .speaker_track import WINDOW_MS, ChangeDetector, SpeakerTrack
+from .vad import FRAME_MS, EnergyVad, Vad, rms
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
                        name_messages, parse_name, speaker_prompt, voice_word)
 from .web_search import X_TREND, link_items
@@ -85,6 +90,29 @@ DRAMA_CONTEXT_PROMPT = "\n利用者と一緒にドラマを見ています。直
 # 「なし」の代わりに「聞こえなくて分からない」と言うことがある (実機 2026-10-14)。言っても楽しくないので黙る
 DRAMA_UNHEARD = re.compile(r"聞こえ(な|ず)|聞き取れ|分から(な|ず)|わから(な|ず)")
 SHORT_KIND = "short_discarded"  # 文脈の無い短い認識結果 (物音の聞き違い) を捨てた 1 回 = 1 行
+TRANSCRIBE_SPLIT_MS = 8000  # 文字起こしモードで区間を切って確定する長さ (直近 2 秒の一番静かな所で切る)
+PARTIAL_MS = 1000  # 文字起こしモードで溜めている区間を認識し直して仮の文字を出す間隔
+LEVEL_LOG_S = 5  # 文字起こしモードで閾値と音量をログに出す間隔
+# 確定の文字が同じ区間の最後の仮の文字のこの割合より短ければ、確定の認識が崩れたとみなして仮の文字を使う。何人もの声が
+# 混ざると、仮の文字 (区間の頭) は読めていたのに確定 (区間全体) では「最高っすね」だけになった (実機 2026-10-28)
+PARTIAL_KEEP_RATIO = 0.9  # 灰色で見えていた文字が確定で消えた (2026-10-28)。仮の文字は区間の頭なので確定はそれ以上が普通
+PARTIAL_COVER = 0.6  # 確定の文字のこの割合以上が仮の文字に (順に) 含まれれば、確定は仮の文字の一部を読み直しただけとみなす
+
+
+def merge_final(partial: str, final: str) -> str:
+    """文字起こしの確定の文字を、同じ区間の最後の仮の文字 (区間の頭の部分) と合わせる。
+
+    区間に「質問 → 短い返事」等の話者の交代があると、ReazonSpeech は区間全体では前の部分を落とした (仮「じゃ一瞬しか
+    見れないってことですか」→ 確定「そうよ」、仮「一年に一回しか咲かないからね」→ 確定「一回しか」。実機 2026-10-28)。
+    確定が仮より PARTIAL_KEEP_RATIO 以上長ければ確定。短く、その大半が仮に含まれれば仮。含まれなければ、仮の後ろで
+    話された言葉とみなして仮 + 確定。"""
+    p, f = _alnum(partial), _alnum(final)
+    if not p or len(f) >= PARTIAL_KEEP_RATIO * len(p):
+        return final
+    if not f:
+        return partial
+    matched = sum(b.size for b in difflib.SequenceMatcher(None, p, f, autojunk=False).get_matching_blocks())
+    return partial if matched >= PARTIAL_COVER * len(f) else f"{partial} {final}"
 UNKNOWN_SPEAKER = "不明"  # 文字起こしで話者が分からない (話者識別なし・最初の発話が短い) ときのラベル
 DRAMA_HOLD_S = 8.0  # 一言の生成中に台詞が再開したら、次の切れ目をこれだけ待つ (来なければ古くなったので黙る)
 # 一言には会話履歴も前の一言も渡さず、前の一言以降の台詞 (今の場面) だけを見せる。
@@ -288,6 +316,22 @@ class IdleTalkDirector:
         # 文字起こしモード (設計書 6.10)。画面の「文字起こし」で ui.transcribe が on。AI は話さず、認識結果を話者の仮名つきで残す
         self.transcribe_on = False
         self.transcribe = Transcribe()  # main が [transcribe] で差し替える
+        # 話者の切り替わりは認識の区間とは別に、0.5 秒ずつずらした窓で測って talk.log に SPEAKER 行で出す
+        self.track: SpeakerTrack | None = None
+        self.ingress.on_discard = self._keep_partial
+        self._partial_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="partial-asr")
+        self._partial_busy: Future | None = None
+        self._partial_n = 0  # 前に仮の文字を求めたフレーム番号
+        self._partials: dict[int, str] = {}  # 区間 (確定するときの utterance_id) -> 最後の仮の文字
+        self._final_uid = 0  # 確定した区間の utterance_id の最大 (遅れて届いた古い区間の仮の文字は捨てる)
+        self.silero = None  # Silero VAD の onnx セッション (main が data/models/silero_vad_v6.onnx から読む)。None なら音量の VAD
+        self._energy_vad: Vad | None = None  # 文字起こしの間だけ Silero に差し替えた元の VAD
+        self._voiced_last = False
+        self._vad_ratio: float | None = None  # 文字起こしの間だけ差し替えた [vad].ratio の元の値
+        self._level_log = (0, 0.0, 0)  # (区切りのフレーム番号, 最大の音量, 閾値を超えたフレーム数)。閾値の調整用のログ
+        self._changes = ChangeDetector()
+        self._mic_ref = (0, 0.0)  # (フレーム番号, そのフレームを受けた時刻)。talk.log の時刻をマイクの音の位置から出す
+        self.wall = time.time
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -323,6 +367,9 @@ class IdleTalkDirector:
         for dev in (self.mic, self.monitor):  # ブラウザ補正なしモードの機器を閉じる
             if dev is not None:
                 dev.stop()
+        if self.track is not None:
+            self.track.close()
+        self._partial_pool.shutdown(wait=False, cancel_futures=True)
         self._asr_pool.shutdown(wait=False, cancel_futures=True)
         self._drama_pool.shutdown(wait=False, cancel_futures=True)
         self.store.close()
@@ -555,6 +602,7 @@ class IdleTalkDirector:
         self._feed_mic(pcm)
 
     def _feed_mic(self, pcm: bytes) -> None:
+        self._mic_ref = (self.ingress._n, self.wall())
         cur = self.epoch.current  # 再生中 = 現行世代の送出済みチャンクが再生終了の報告待ち (VAD の自動校正が使う)
         self.ingress.vad.playing = any(k[0] == cur for k in self._down_sent)
         # ドラマの音が鳴っている間は、スピーカーからの回り込みを測ってマイクの閾値を上げる (笑い声や BGM を声と取らない)
@@ -562,6 +610,12 @@ class IdleTalkDirector:
         for i in range(0, len(pcm), FRAME_BYTES):
             before, was_speaking = self.fsm.ctx.state, self.ingress._buf is not None
             self.ingress.feed(pcm[i:i + FRAME_BYTES])
+            if self.transcribe_on:
+                self._partial_tick()
+                self._voiced_last = self._voiced(pcm[i:i + FRAME_BYTES])
+                self._log_level(rms(pcm[i:i + FRAME_BYTES]))
+            if self.track is not None:
+                self.track.feed(pcm[i:i + FRAME_BYTES], self.ingress._n, self._voiced(pcm[i:i + FRAME_BYTES]))
             if not was_speaking and self.ingress._buf is not None:
                 spont_playing = self.spontaneous.pending and self._cur is not None
                 self._speech_in_ai = before in (State.AI_PLAYING, State.INTERRUPT_CHECK) or spont_playing
@@ -618,6 +672,8 @@ class IdleTalkDirector:
         short_reply_s が 0 なら AI の声の最中も含めて常に捨てる (AI が話し続けると文脈の条件が常に成り立つため)。"""
         if not 0 < len(_alnum(text)) <= self.short_chars:
             return False
+        if self.transcribe_on:  # 文字起こし: 話者が替わる所の「私は」「さあ」「もう」まで捨てて欠けた (実機 2026-10-28)
+            return False
         if self.short_reply_s == 0:
             return True
         if in_ai:
@@ -629,7 +685,8 @@ class IdleTalkDirector:
         in_ai, self._speech_in_ai = self._speech_in_ai, False
         if not _alnum(text):
             log.info("transcript without words discarded: utterance %d %r", uid, text)
-            self.ingress.hold(uid)  # 発話の出だしだけの区間かもしれない: 次の区間の頭に足して認識し直す
+            if not self._keep_partial(uid):
+                self.ingress.hold(uid)  # 発話の出だしだけの区間かもしれない: 次の区間の頭に足して認識し直す
             return False
         if in_ai and self._is_echo(uid, text):
             return False
@@ -716,37 +773,176 @@ class IdleTalkDirector:
             self._cancel_memory()
             self._cancel_digest()
         self.transcribe_on = on
+        self._start_track(on)
         # ブラウザはエコー除去・雑音抑制なしでマイクを開き直す。生の音は静かな部屋で RMS 0.5 程度になり、
         # 無音判定 (E6) で誤って休止した (ブラウザ補正なしモード、実機 2026-10-19) ので、モード中は切る
         self.ingress.silence_check = not on and self.mic is None
-        # 動画の音を拾うと BGM で発話が終わらず、ずっとユーザー発話中のまま文字にならなかった (実機 2026-10-27)。
-        # ドラマの台詞と同じ長さ ([drama].max_seg_s) で切って認識に回す
-        self.ingress.max_seg_ms = self.drama.s.max_seg_s * 1000 if on else 0
+        # テレビ・ドラマの音は途切れず、発話が終わらないまま文字にならなかった (実機 2026-10-27)。TRANSCRIBE_SPLIT_MS で
+        # 直近の一番静かな所で切って確定し、溜めている間も PARTIAL_MS ごとに認識し直して仮の文字を出す
+        self.ingress.max_seg_ms = TRANSCRIBE_SPLIT_MS if on else 0
         self.ingress.voice_max_ms = self.transcribe.voice_max_s * 1000 if on else 0
-        if hasattr(self.ingress.vad, "floor_track"):  # 雑音は直近の小さい音 (台詞の切れ目の BGM) で見る
-            self.ingress.vad.floor_track = on
+        # 発話検出は Silero VAD に替える (音量の VAD は BGM と声を区別できず、文の途中で切った。CER 18.4% → 13.7%)。
+        # モデルが無ければ音量の VAD のまま、下の調整 (floor_track・vad_ratio) で使う
+        if on and self.silero is not None and not isinstance(self.ingress.vad, SileroVad):
+            self._energy_vad = self.ingress.vad
+            self.ingress.set_vad(SileroVad(self.silero))
+        elif not on and self._energy_vad is not None:
+            self.ingress.set_vad(self._energy_vad)
+            self._energy_vad = None
+        vad = self._energy_vad or self.ingress.vad
+        if hasattr(vad, "floor_track"):  # 雑音は直近の小さい音 (台詞の切れ目の BGM) で見る
+            vad.floor_track = on
+        if hasattr(vad, "ratio"):  # 小さい声の話者も拾う (会話の ratio は物音対策で高め)
+            if on and self._vad_ratio is None:
+                self._vad_ratio, vad.ratio = vad.ratio, self.transcribe.vad_ratio
+            elif not on and self._vad_ratio is not None:
+                vad.ratio, self._vad_ratio = self._vad_ratio, None
+        self._level_log = (self.ingress._n, 0.0, 0)
         log.info("transcribe mode %s", "on" if on else "off")
         self._bc_record("transcribe_mode", {"on": on})
+
+    def _start_track(self, on: bool) -> None:
+        if self.track is not None:
+            self.track.close()
+            self.track = None
+        self._changes.reset()
+        if not on or self.voices is None or self.ingress.embed is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        def done(n: int, pcm: bytes, emb: object) -> None:  # 声の特徴のスレッドから: イベントループに戻して照合する
+            if loop is None:
+                self._on_window(n, pcm, emb)
+            elif not loop.is_closed():
+                loop.call_soon_threadsafe(self._on_window, n, pcm, emb)
+        self.track = SpeakerTrack(self.ingress.embed, done)
+
+    def _voiced(self, frame: bytes) -> bool:
+        """そのフレームが声か。Silero VAD なら声らしさ、音量の VAD なら閾値で見る。"""
+        vad = self.ingress.vad
+        if isinstance(vad, SileroVad):
+            return vad.prob >= SILERO_ON
+        return rms(frame) >= getattr(vad, "current_threshold", 500.0)
+
+    def _log_level(self, level: float) -> None:
+        """文字起こし中は LEVEL_LOG_S ごとに、閾値 (Silero なら -)・雑音の推定・音量の最大・声とみなした割合をログに出す
+        (取りこぼしの調査用)。"""
+        n0, peak, loud = self._level_log
+        vad = self.ingress.vad
+        peak, loud = max(peak, level), loud + self._voiced_last
+        frames = self.ingress._n - n0
+        if frames < LEVEL_LOG_S * 1000 // FRAME_MS:
+            self._level_log = (n0, peak, loud)
+            return
+        noise = getattr(vad, "_noise_db", None)
+        log.info("transcribe level: vad %s threshold %.0f noise %s peak %.0f voiced %d%%", type(vad).__name__,
+                 getattr(vad, "current_threshold", 0.0), "-" if noise is None else f"{10 ** (noise / 20):.0f}",
+                 peak, 100 * loud // frames)
+        self._level_log = (self.ingress._n, 0.0, 0)
+
+    def _keep_partial(self, uid: int) -> bool:
+        """文字起こしで区間の確定が捨てられた (認識の失敗・幻聴・語なし) とき、その区間の最後の仮の文字を確定にする。
+        灰色で見えていた文字が、確定が出ないまま次の確定で消えた (実機 2026-10-28)。仮の文字が無ければ偽。"""
+        if not self.transcribe_on or not self._partials.get(uid):
+            return False
+        log.info("final discarded, partial kept: utterance %d", uid)
+        self._transcribe(uid, self._partials[uid])
+        return True
+
+    def _partial_tick(self) -> None:
+        """溜めている区間が PARTIAL_MS ごとに伸びたら、そこまでの音を認識し直して仮の文字を画面に出す (talk.log には
+        出さない)。前の分の認識が終わっていなければ飛ばす (遅れを溜めない)。"""
+        n = self.ingress._n
+        audio = self.ingress.partial_audio()
+        if audio is None or self.ingress.asr is None:
+            self._partial_n = n
+            return
+        if n - self._partial_n < PARTIAL_MS // FRAME_MS or len(audio) < PARTIAL_MS * 32:
+            return
+        if self._partial_busy is not None and not self._partial_busy.done():
+            return
+        self._partial_n = n
+        seg = self.ingress._uid + 1  # この区間を確定したときの utterance_id (画面は確定が来たら仮の文字を消す)
+        asr, name = self.ingress.asr, self.ingress._put_shm(audio)
+        audio_s = len(audio) / (FRAME_BYTES * 50)
+
+        def work() -> object:
+            try:
+                return asr.transcribe(seg, name, audio_s)
+            except Exception as e:  # noqa: BLE001  仮の文字が 1 回出ないだけ
+                log.debug("partial asr failed: %s", e)
+                return None
+            finally:
+                self.ingress.release(name)
+
+        def done(res: object) -> None:
+            if self.transcribe_on and isinstance(res, dict) and _alnum(res["text"]) and seg > self._final_uid:
+                self._partials[seg] = res["text"]
+                self._emit({"t": "partial", "seg": seg, "text": res["text"]})
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # ループ外 (同期テスト等): その場で実行
+            done(work())
+            return
+        self._partial_busy = self._partial_pool.submit(work)
+        self._partial_busy.add_done_callback(lambda f: None if f.cancelled() or loop.is_closed()
+                                             else loop.call_soon_threadsafe(done, f.result()))
+
+    def _on_window(self, n: int, pcm: bytes, emb: object) -> None:
+        """窓の声を照合し、話者が替わったら talk.log に SPEAKER 行を出す (時刻は替わった窓の真ん中)。"""
+        if not self.transcribe_on or self.voices is None:
+            return
+        # 照合だけで登録はしない (登録は確定した区間の声で。窓で登録すると BGM 混じりの窓から仮名が 59 まで増えた)
+        sid = self.voices.identify(emb, self.now_ms(), enroll=False, threshold=self.transcribe.threshold, verbose=False)
+        change = self._changes.push(sid, n)
+        if change is None:
+            return
+        prev, new, at = change
+        mid = at - WINDOW_MS // FRAME_MS // 2  # 替わった最初の窓の真ん中
+        before = self._label(prev, b"") if prev is not None else "-"
+        talk_log.info("SPEAKER(%s): %s → %s", self._frame_time(mid), before, self._label(new, pcm))
+        if prev is not None:
+            # 替わり目で区間を切って 1 区間 1 人にする。何人もの声が混ざった 8 秒の区間は「最高っすね」だけになるなど、
+            # ReazonSpeech が一部しか文字にしなかった (実機 2026-10-28)
+            self.ingress.split_at(mid)
+
+    def _frame_time(self, n: int) -> str:
+        """フレーム番号をマイクの音の時刻 (時:分:秒.1/10) にする。ブラウザは 20ms ごとに途切れず送るので数で戻せる。"""
+        n0, t0 = self._mic_ref
+        return datetime.fromtimestamp(t0 + (n - n0) * FRAME_MS / 1000).strftime("%H:%M:%S.%f")[:-5]
+
+    def _label(self, sid: int, pcm: bytes) -> str:
+        """名前、無ければ仮名。仮名が無ければ pcm の声の高さと抑揚から付ける。"""
+        name = self.voices.name(sid) or self.voices.alias(sid)
+        return name or self.voices.set_alias(sid, voice_word(pcm) if pcm else "声", self.now_ms())
 
     def _transcribe(self, uid: int, text: str) -> None:
         """認識結果を話者のラベルつきで talk.log・turns・画面に出す。知らない声は会話と同じく ENROLL_N 回続けて
         一致したら登録して仮名を付け、それまでは「不明」 (1 回で登録すると、外れるたびに別人が増えた。実機 2026-10-27)。"""
         self._identify(uid, self.transcribe.threshold)
+        partial = self._partials.pop(uid, "")
+        self._final_uid = max(self._final_uid, uid)
+        self._partials = {k: v for k, v in self._partials.items() if k > uid}
+        merged = merge_final(partial, text)
+        if merged != text:
+            log.info("final shorter than partial: utterance %d final %r partial %r -> %r", uid, text, partial, merged)
+            text = merged
         label = self._speaker_label(uid)
-        talk_log.info("TRANSCRIPT(%s): %s", label, text)
+        span = self.ingress.seg_span.get(uid)  # 話者は SPEAKER 行 (窓で測った切り替わり) で別に出す
+        talk_log.info("TEXT(%s): %s", f"{self._frame_time(span[0])}-{self._frame_time(span[1])}" if span else "-", text)
         self.store.add_turn(self.now_ms(), "transcript", f"{label}: {text}", 0, None, uid)  # 会話の履歴には入れない
-        self._emit({"t": "transcript", "speaker": label, "text": text, "ts": self.now_ms()})
+        self._emit({"t": "transcript", "uid": uid, "speaker": label, "text": text, "ts": self.now_ms()})
 
     def _speaker_label(self, uid: int) -> str:
         """名前が分かればその名前、無ければ仮名 (無ければ今の発話の声から付ける)。話者識別なし・判定前は「不明」。"""
         sid = self._speaker
         if self.voices is None or sid is None:
             return UNKNOWN_SPEAKER
-        name = self.voices.name(sid) or self.voices.alias(sid)
-        if name:
-            return name
         seg = self.ingress._segs.get(uid)  # 認識に渡した音 (Ingress は結果を渡し終えてから捨てる)
-        return self.voices.set_alias(sid, voice_word(seg[0]) if seg else "声", self.now_ms())
+        return self._label(sid, seg[0] if seg else b"")
 
     def _speaker_section(self, ask: bool) -> str:
         """今の話し相手の節。名前の分からない登録済みの相手には、ask なら ASK_MAX 回まで名前を尋ねさせる。"""

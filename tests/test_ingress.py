@@ -307,3 +307,32 @@ def test_floor_track_splits_dialogue_over_bgm_at_line_gaps():
         assert events[-len(line) * 5:].count(SPEECH_START) == 5  # 最後まで台詞ごとに拾う
         assert events.count(SPEECH_END) >= events.count(SPEECH_START) - 1  # 台詞の切れ目で区間が終わる
         assert v.current_threshold < 2000
+
+
+def test_split_at_quietest_frame_and_keep_rest():
+    """区間を切る長さに達したら、直近 SPLIT_LOOK_MS で一番静かなフレームの後で切り、残りは次の区間の頭にする。"""
+    seen = []
+    d, ing = make({0: SPEECH_START}, asr=asr_ok(seen))
+    ing.max_seg_ms = 500  # 25 フレーム
+    loud = FRAME * 20  # 20ms
+    quiet = bytes(struct.pack("<h", 10)) * 320
+    frames = [loud] * 20 + [quiet] + [loud] * 4  # 21 フレーム目が静か: そこまでで切り、後の 4 フレームを残す
+    for f in frames:
+        ing.feed(f)
+    assert len(seen) == 1 and seen[0][:21 * 640] == b"".join(frames[:21])
+    assert ing._buf == bytearray(b"".join(frames[21:]))
+    assert not ing.seg_span and ing._start_n - ing._onset_head == 22  # 次の区間の頭はフレーム 22 (認識を終えた区間は消える)
+
+
+def test_split_at_speaker_change():
+    """話者の替わり目のフレームの前後 SPLIT_NEAR_MS で一番静かな所で切る。前後が SPLIT_MIN_MS 未満なら切らない。"""
+    seen = []
+    d, ing = make({0: SPEECH_START}, asr=asr_ok(seen))
+    loud = FRAME * 20
+    quiet = bytes(struct.pack("<h", 10)) * 320
+    frames = [loud] * 60 + [quiet] + [loud] * 69  # 61 フレーム目が静か
+    for f in frames:
+        ing.feed(f)
+    assert not ing.split_at(10) and not ing.split_at(125)  # 頭・終わりに近すぎる
+    assert ing.split_at(65)  # 替わり目 (フレーム 65) の近くの静かなフレーム 61 の後で切る
+    assert seen[0][:61 * 640] == b"".join(frames[:61]) and ing._buf == bytearray(b"".join(frames[61:]))

@@ -132,7 +132,8 @@ class VoiceBook:
         emb = _unit(emb)
         return max((float(r["emb"] @ emb) for r in self._rows.values() if r["name"]), default=None)
 
-    def identify(self, emb: np.ndarray, now_ms: int, enroll: bool = True, threshold: float | None = None) -> int | None:
+    def identify(self, emb: np.ndarray, now_ms: int, enroll: bool = True, threshold: float | None = None,
+                 verbose: bool = True) -> int | None:
         """一致した (または今回登録した) 話者 id。登録前の知らない声なら None。一致したら声の平均を更新する。
         enroll が偽なら知らない声を登録しない (登録の候補にも数えない)。threshold は今回だけ使う閾値 (文字起こし)。"""
         emb = _unit(emb)
@@ -142,7 +143,8 @@ class VoiceBook:
             s = float(row["emb"] @ emb)
             if s > score:
                 best, score = sid, s
-        log.info("voice similarity to nearest: %.2f (speaker %s)", score, best)  # 閾値の調整用
+        log.log(logging.INFO if verbose else logging.DEBUG,  # 閾値の調整用 (0.5 秒ごとの窓は debug)
+                "voice similarity to nearest: %.2f (speaker %s)", score, best)
         if best is not None and score >= threshold:
             row = self._rows[best]
             row["emb"] = _unit(row["emb"] * min(row["n"], MAX_WEIGHT) + emb)

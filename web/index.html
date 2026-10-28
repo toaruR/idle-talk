@@ -104,6 +104,7 @@
   #transcript li { padding: 8px 12px; border-radius: 10px; background: var(--bg); font-size: 14px; overflow-wrap: anywhere; }
   #transcript .who { color: var(--accent); font-weight: 600; margin-right: .5em; }
   #transcript time { color: var(--muted); font-size: 12px; margin-right: .5em; font-variant-numeric: tabular-nums; }
+  #transcript li.partial { color: var(--muted); background: transparent; border: 1px dashed var(--line); }
 </style>
 </head>
 <body>
@@ -210,9 +211,25 @@
 
   // 文字起こしを下に積む (新しいものが下)。MAX_TRANSCRIPT 行を超えたら古い順 (上) から消す。文字列は textContent で入れる
   const MAX_TRANSCRIPT = 500;
+  let finalUid = 0; // 確定した区間の utterance_id の最大。これ以前の区間の仮の文字は出さない
+  // 仮の文字 (話している途中の認識結果) は末尾の 1 行だけ。確定が来たら消して確定の行を足す
+  function showPartial(m) {
+    if (!(m.seg > finalUid)) return;
+    const list = $('transcript');
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 20;
+    let li = list.querySelector('li.partial');
+    if (!li) { li = document.createElement('li'); li.className = 'partial'; list.append(li); }
+    li.dataset.seg = String(m.seg);
+    li.textContent = String(m.text || '');
+    $('transcript_box').hidden = false;
+    if (atBottom) list.scrollTop = list.scrollHeight;
+  }
   function showTranscript(m) {
     const list = $('transcript');
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 20; // 遡って読んでいる間は飛ばさない
+    if (m.uid) finalUid = Math.max(finalUid, m.uid);
+    const partial = list.querySelector('li.partial');
+    if (partial && !(Number(partial.dataset.seg) > finalUid)) partial.remove();
     const li = document.createElement('li');
     const time = document.createElement('time');
     time.textContent = new Date(m.ts || Date.now()).toLocaleTimeString('ja-JP', { hour12: false });
@@ -220,7 +237,8 @@
     who.className = 'who';
     who.textContent = String(m.speaker || '');
     li.append(time, who, String(m.text || ''));
-    list.append(li);
+    const rest = list.querySelector('li.partial'); // 次の区間の仮の文字は確定の行の下に残す
+    if (rest) list.insertBefore(li, rest); else list.append(li);
     while (list.children.length > MAX_TRANSCRIPT) list.firstElementChild.remove();
     $('transcript_box').hidden = false;
     if (atBottom) list.scrollTop = list.scrollHeight;
@@ -341,6 +359,7 @@
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
         onLinks: (m) => showLinks(m.items),
         onTranscript: showTranscript,
+        onPartial: showPartial,
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
           const src = drama || screen || camera;
           const r = src ? await src.snapshot() : { reason: 'not sharing' };
