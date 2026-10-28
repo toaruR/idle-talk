@@ -303,6 +303,8 @@ class VoiceId(NamedTuple):
     on: bool = False
     model: str = "data/models/voxceleb_resnet34_LM.onnx"  # WeSpeaker の話者埋め込みモデル (ONNX)
     threshold: float = 0.6  # 同じ人とみなすコサイン類似度。別人を同じ人と取り違えるなら上げる
+    forget_days: int = 3  # 名前の無い声は最後に一致してからこの日数で起動時に消す (0 なら消さない)
+    forget_few_days: int = 1  # そのうち一致が FEW_N 回以下の声 (物音・テレビの一言) はこの日数で消す (0 なら消さない)
 
 
 def load_voice_id(path: str | Path = SETTINGS_FILE) -> VoiceId:
@@ -315,7 +317,13 @@ def load_voice_id(path: str | Path = SETTINGS_FILE) -> VoiceId:
     th = raw.get("threshold", VoiceId._field_defaults["threshold"])
     if type(th) not in (int, float) or not 0 < th < 1:
         raise ValueError(f"[voice_id].threshold must be a number in (0, 1): {th!r}")
-    return VoiceId(raw.get("on", False), raw.get("model", VoiceId._field_defaults["model"]), float(th))
+    days = {}
+    for key in ("forget_days", "forget_few_days"):
+        v = raw.get(key, VoiceId._field_defaults[key])
+        if type(v) is not int or not 0 <= v <= 365:
+            raise ValueError(f"[voice_id].{key} must be an integer in [0, 365]: {v!r}")
+        days[key] = v
+    return VoiceId(raw.get("on", False), raw.get("model", VoiceId._field_defaults["model"]), float(th), **days)
 
 
 class Transcribe(NamedTuple):

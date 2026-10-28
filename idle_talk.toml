@@ -104,6 +104,10 @@ read_window = true    # 「このページどう思う？」等と頼むと、�
 # 別人を同じ人と取り違えるなら threshold を上げ、同じ人を別人扱いするなら下げる。
 on = true
 model = "data/models/voxceleb_resnet34_LM.onnx"  # WeSpeaker ResNet34 (CC-BY-4.0)。無ければ警告して識別なしで動く
+# 名前の無い声 (文字起こし・ドラマで溜まったテレビの声など) は、最後に一致してから forget_days 日で起動時に消す。
+# 一致が 3 回以下の声 (物音・一言) は forget_few_days 日で消す。0 なら消さない (0〜365)。
+forget_days = 3
+forget_few_days = 1
 threshold = 0.6       # 同じ人とみなす声の近さ (0〜1、既定 0.6)
 
 [transcribe]

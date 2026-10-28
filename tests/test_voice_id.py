@@ -14,6 +14,7 @@ from idle_talk.main import DB_FILE, enable_voice_id
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
 from idle_talk.voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, ENROLL_N, NAME_PROMPT, VoiceBook, fbank,
+                                forget_unnamed,
                                 parse_name)
 
 LONG = 100  # 2s の発話 (MIN_VOICE_MS 以上)
@@ -120,9 +121,25 @@ def test_load_voice_id(tmp_path):
     assert load_voice_id(tmp_path / "none.toml") == VoiceId()
     assert load_voice_id(write(tmp_path, "[voice_id]\non = true\nthreshold = 0.6\n")) == \
         VoiceId(True, VoiceId().model, 0.6)
-    for bad in ("on = 1", "threshold = 1.0", "threshold = 0", 'model = ""', "x = 1"):
+    assert load_voice_id(write(tmp_path, "[voice_id]\nforget_days = 0\nforget_few_days = 2\n"))[3:] == (0, 2)
+    for bad in ("on = 1", "threshold = 1.0", "threshold = 0", 'model = ""', "x = 1", "forget_days = -1",
+                "forget_days = 1.5", "forget_few_days = 366"):
         with pytest.raises(ValueError):
             load_voice_id(write(tmp_path, f"[voice_id]\n{bad}\n"))
+
+
+def test_forget_unnamed(store):
+    day, now = 86_400_000, 10 * 86_400_000
+
+    def add(name, n, age_days):
+        return store.execute("INSERT INTO speakers(name, embedding, n, updated_at) VALUES (?,?,?,?)",
+                             (name, vec(1).tobytes(), n, now - int(age_days * day)))
+    keep = {add("たろう", 2, 30), add(None, 50, 2.5), add(None, 2, 0.5)}
+    add(None, 50, 3.5)  # 3 日を過ぎた
+    add(None, 3, 1.5)  # 一致の少ない声は 1 日で消す
+    assert forget_unnamed(store, now, 3, 1) == 2
+    assert {r[0] for r in store.query("SELECT id FROM speakers")} == keep
+    assert forget_unnamed(store, now + 30 * day, 0, 0) == 0  # 0 なら消さない
 
 
 def test_missing_model_disables_voice_id(tmp_path, store):
@@ -199,6 +216,32 @@ def test_interrupted_question_does_not_take_next_utterance_as_name(tmp_path):
             d._cancel_path("interrupt")  # 再生途中で割り込まれた
             assert d._ask_sid is None and d._asks[d._speaker] == 1
             assert d._speaker_section(ask=True) == ASK_PROMPT  # 次の応答で改めて尋ねる
+        finally:
+            store.close()
+    asyncio.run(run())
+
+
+def test_single_match_to_unnamed_voice_does_not_switch_or_ask(tmp_path):
+    """名前の分かった相手の声が 1 回だけ名前なしの登録に一致しても、切り替えず名前も尋ねない (実機 2026-10-26)。"""
+    async def run():
+        voice = [vec(1)]
+        d, b, store, systems = make(tmp_path, lambda pcm: voice[0])
+        try:
+            me = store.execute("INSERT INTO speakers(name, embedding, n, updated_at) VALUES ('たろう',?,5,0)",
+                               (vec(1).tobytes(),))
+            tv = store.execute("INSERT INTO speakers(name, embedding, n, updated_at) VALUES (NULL,?,5,0)",
+                               (vec(0, 1).tobytes(),))
+            d.voices = VoiceBook(store, 0.5)
+            assert "「たろう」さん" in await turn(d, b, systems)
+            voice[0] = vec(0, 1)
+            system = await turn(d, b, systems)  # 1 回目: 保留
+            assert d._speaker == me and ASK_PROMPT not in system and "「たろう」さん" in system
+            voice[0] = vec(1)
+            await turn(d, b, systems)
+            voice[0] = vec(0, 1)
+            await turn(d, b, systems)
+            assert ASK_PROMPT in await turn(d, b, systems)  # 2 回続けて一致したら切り替えて尋ねる
+            assert d._speaker == tv
         finally:
             store.close()
     asyncio.run(run())

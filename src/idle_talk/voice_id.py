@@ -25,6 +25,8 @@ ENROLL_N = 2  # 知らない声がこの回数続けて互いに一致したら�
 MAX_WEIGHT = 20  # 平均の更新で過去の埋め込みに掛ける重みの上限 (声の変化に追従できるよう頭打ちにする)
 ASK_MAX = 2  # 名前を尋ねるのは 1 人あたり起動中にこの回数まで (答えたくない人にしつこく聞かない)
 NAME_MAX = 12  # 名前として受け付ける長さの上限 (超えたら抜き出しの失敗とみなす)
+FEW_N = 3  # 一致がこの回数以下の名前の無い声は [voice_id].forget_few_days で早めに消す
+DAY_MS = 86_400_000
 
 # 4B は「名前を尋ねて」という指示を無視することが多い (実機 2026-10-14)。質問は返答の後に定型文 ASK_QUESTION で読む
 UNNAMED_PROMPT = "\n\n今話している相手の名前はまだ知りません (知っているふりはしないでください)。"
@@ -100,6 +102,19 @@ class Embedder:
         return _unit(self._sess.run(None, {self._input: feats[None]})[0])
 
 
+def forget_unnamed(store: Store, now_ms: int, days: int, few_days: int) -> int:
+    """最後に一致してから days 日 (一致 FEW_N 回以下なら few_days 日) 経った名前の無い声を消し、消した数を返す。
+    文字起こし・ドラマのテレビの声が溜まると、利用者の声がそれに一致して名前をまた尋ねる (実機 2026-10-26)。"""
+    big = now_ms + DAY_MS  # 0 日 (消さない) は未来の時刻にして何も当たらないようにする
+    where = ("name IS NULL AND (updated_at < ? OR (n <= ? AND updated_at < ?))",
+             (now_ms - days * DAY_MS if days else -big, FEW_N, now_ms - few_days * DAY_MS if few_days else -big))
+    n = store.query(f"SELECT COUNT(*) FROM speakers WHERE {where[0]}", where[1])[0][0]
+    if n:
+        store.execute(f"DELETE FROM speakers WHERE {where[0]}", where[1])
+        log.info("forgot %d unnamed voice(s)", n)
+    return n
+
+
 # ---- 声と名前の対応 (speakers テーブル) ----
 class VoiceBook:
     def __init__(self, store: Store, threshold: float = THRESHOLD) -> None:
@@ -110,6 +125,7 @@ class VoiceBook:
                       "alias": r["alias"]}
             for r in store.query("SELECT id, name, embedding, n, alias FROM speakers")}
         self._pending: list[np.ndarray] = []  # 登録前の知らない声
+        self.enrolled: int | None = None  # 直前の identify で登録した id (ENROLL_N 回続けて一致済み)
 
     def name(self, sid: int | None) -> str | None:
         row = self._rows.get(sid)
@@ -138,6 +154,7 @@ class VoiceBook:
         enroll が偽なら知らない声を登録しない (登録の候補にも数えない)。threshold は今回だけ使う閾値 (文字起こし)。"""
         emb = _unit(emb)
         threshold = self.threshold if threshold is None else threshold
+        self.enrolled = None
         best, score = None, -1.0
         for sid, row in self._rows.items():
             s = float(row["emb"] @ emb)
@@ -164,6 +181,7 @@ class VoiceBook:
         sid = self.store.execute("INSERT INTO speakers(name, embedding, n, updated_at) VALUES (NULL,?,?,?)",
                                  (mean.tobytes(), n, now_ms))
         self._rows[sid] = {"name": None, "emb": mean, "n": n, "alias": None}
+        self.enrolled = sid
         log.info("new voice enrolled: speaker %d (score to nearest %.2f)", sid, score)
         return sid
 

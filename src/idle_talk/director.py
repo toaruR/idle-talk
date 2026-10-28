@@ -274,6 +274,7 @@ class IdleTalkDirector:
         self.voices: VoiceBook | None = None
         self._voice: tuple[int, object] | None = None  # 認識結果待ちの声の特徴 (utterance_id, 埋め込み)
         self._speaker: int | None = None  # 今の話し相手 (speakers.id)。None = 知らない声 / 未判定
+        self._switch_cand: int | None = None  # 1 回だけ一致した名前なしの声 (次も一致したら切り替える)
         self._asks: Counter[int] = Counter()  # 起動してから名前を尋ねた回数 (話者別)
         self._ask_sid: int | None = None  # 名前を尋ねた相手。その人の次の発話から名前を抜き出す
         self._ask_plan: int | None = None  # 名前を尋ねる応答を生成中の相手。最後まで再生されたら _ask_sid にする
@@ -762,6 +763,14 @@ class IdleTalkDirector:
         # ドラマの音と重なった発話からは新しい声を登録しない (ドラマの人物が名前なしで溜まった。2026-10-19)
         sid = self.voices.identify(v[1], self.now_ms(), enroll=self._transcript_bleed is None,
                                    threshold=threshold)
+        cand, self._switch_cand = self._switch_cand, None
+        if (threshold is None and sid is not None and sid != self._speaker and not self.voices.name(sid)
+                and sid != self.voices.enrolled and sid != cand):
+            # 名前の無い登録済みの声への切り替えは 2 回続けて一致してから。利用者の声が 1 回だけ文字起こし・ドラマで
+            # 溜まった名前なしの声に一致し、名前をまた尋ねた (実機 2026-10-19 / 10-26、類似度 0.67)
+            log.info("speaker switch to %s held (1st match)", sid)
+            self._switch_cand = sid
+            return
         if sid != self._speaker:
             log.info("speaker changed: %s -> %s (%s)", self._speaker, sid, self.voices.name(sid) or "名前未登録")
         self._speaker = sid

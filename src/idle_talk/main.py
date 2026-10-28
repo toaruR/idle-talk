@@ -218,12 +218,13 @@ def enable_voice_id(director: IdleTalkDirector, config: str | Path) -> bool:
     if not vid.on:
         return False
     try:
-        from .voice_id import Embedder
+        from .voice_id import Embedder, forget_unnamed
 
         embed = Embedder(vid.model)
     except (ImportError, OSError, RuntimeError) as e:  # モデル未配置・onnxruntime 未導入・モデル不正
         log.warning("voice id disabled: %s", e)
         return False
+    forget_unnamed(director.store, director.now_ms(), vid.forget_days, vid.forget_few_days)  # VoiceBook が読む前に
     director.enable_voice_id(embed, vid.threshold)
     log.info("voice id enabled: %s (threshold %.2f)", vid.model, vid.threshold)
     return True
