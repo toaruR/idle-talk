@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from typing import Any
 
@@ -29,13 +30,53 @@ def has_card(store: Store, source_url: str | None, hook: str) -> bool:
     return bool(store.query("SELECT 1 FROM topic_cards WHERE hook=? LIMIT 1", (hook,)))
 
 
+# 雑談の話題はポジティブな記事を先に使う。暗い記事は他が尽きたときだけ (捨てはしない)
+POSITIVE_WORDS = ("受賞", "優勝", "金メダル", "快挙", "記録更新", "新記録", "誕生", "開業", "開幕", "オープン",
+                  "発売", "公開", "発表会", "発見", "成功", "人気", "話題", "初の", "復活", "見頃", "満開", "紅葉",
+                  "祭", "イベント", "グルメ", "スイーツ", "新作", "新商品", "リニューアル", "楽しめ", "笑顔",
+                  "かわいい", "癒", "感動", "絶景", "上昇", "最高値", "好調", "回復", "便利", "無料")
+NEGATIVE_WORDS = ("死亡", "死去", "死者", "亡くな", "殺", "遺体", "事故", "事件", "逮捕", "容疑", "起訴", "判決",
+                  "被害", "詐欺", "強盗", "窃盗", "暴行", "火災", "火事", "地震", "津波", "豪雨", "台風", "災害",
+                  "避難", "停電", "戦争", "攻撃", "空爆", "ミサイル", "テロ", "紛争", "負傷", "けが", "重体",
+                  "感染", "不祥事", "謝罪", "辞任", "倒産", "破綻", "下落", "急落", "値上げ", "減少", "懸念", "批判",
+                  "違反", "不正", "流出", "行方不明", "中止", "延期")
+
+
+def card_tone(hook: str | None, facts: str | None = None) -> int:
+    """見出し・概要のポジティブ度 (正の語の数 − 負の語の数×2)。暗い語は 1 つでも重く見る。"""
+    text = f"{hook or ''} {facts or ''}"
+    return sum(w in text for w in POSITIVE_WORDS) - 2 * sum(w in text for w in NEGATIVE_WORDS)
+
+
 def select_cards(store: Store, now_ms: int, limit: int = 1) -> list:
-    """未使用かつ未期限切れのカード (expires_at NULL は無期限)。"""
-    return store.query(
+    """未使用かつ未期限切れのカード (expires_at NULL は無期限)。ポジティブ度 (card_tone) の高い順、同じなら新しい順。
+    自発発話はこの上位 PICK_MAX 件から LLM に一番明るいものを選ばせる (director._pick_topic)。"""
+    rows = store.query(
         "SELECT * FROM topic_cards WHERE used_at IS NULL AND (expires_at IS NULL OR expires_at >= ?) "
-        "ORDER BY COALESCE(published_at, 0) DESC, id ASC LIMIT ?",
-        (now_ms, limit),
+        "ORDER BY COALESCE(published_at, 0) DESC, id ASC",
+        (now_ms,),
     )
+    rows.sort(key=lambda r: -card_tone(r["hook"], r["facts"]))  # 安定ソートなので同点は新しい順のまま
+    return rows[:limit]
+
+
+PICK_MAX = 8  # LLM に明るさを比べさせる候補の上限 (見出し 8 件で約 300 トークン。多いと 4B は端を選びがち)
+PICK_PROMPT = ("次のニュースの見出しから、雑談で話して一番明るい気分になれるものを選び、番号だけ答えて。"
+               "どれも暗ければ一番ましなものを選んで。\n{items}")
+
+
+def pick_messages(cards: list) -> list[dict]:
+    """候補の見出しから一番明るいものを番号で答えさせる LLM の要求。"""
+    items = "\n".join(f"{i}. {c['hook']}" for i, c in enumerate(cards, 1))
+    return [{"role": "user", "content": PICK_PROMPT.format(items=items)}]
+
+
+def parse_pick(text: str | None, n: int) -> int | None:
+    """LLM の答えの最初の数字 (1 始まり) を 0 始まりの添字にする。範囲外・数字なしは None。"""
+    m = re.search(r"\d+", (text or "").translate(str.maketrans("０１２３４５６７８９", "0123456789")))
+    if m is None or not 1 <= int(m.group()) <= n:
+        return None
+    return int(m.group()) - 1
 
 
 def mark_used(store: Store, card_id: int, now_ms: int) -> None:

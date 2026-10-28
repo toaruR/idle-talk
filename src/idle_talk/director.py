@@ -48,7 +48,7 @@ from .screen import ScreenWatcher, decode_thumb
 from .server import WsCore
 from .spontaneous import Spontaneous
 from .store import Store
-from .topics import QuestionRatio, mark_used, select_cards
+from .topics import PICK_MAX, QuestionRatio, mark_used, parse_pick, pick_messages, select_cards
 from .silero_vad import SPEECH_ON as SILERO_ON
 from .silero_vad import SileroVad
 from .speaker_track import WINDOW_MS, ChangeDetector, SpeakerTrack
@@ -1172,7 +1172,7 @@ class IdleTalkDirector:
         return None
 
     async def _spontaneous_respond(self) -> None:
-        topic, card = self._pick_topic()
+        topic, card = await self._pick_topic()
         if card is not None and (card["source_url"] or "").startswith(("http://", "https://")):
             # カードで話すニュースは聞かれる前に画面の URL 欄へ出し、「URL を教えて」にも答えられるよう覚えておく
             self.pipeline.links = link_items([{"title": card["hook"], "url": card["source_url"]}])
@@ -1627,14 +1627,29 @@ class IdleTalkDirector:
         else:
             deliver()
 
-    def _pick_topic(self) -> tuple[str, dict | None]:
-        """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。"""
-        cards = select_cards(self.store, self.now_ms(), limit=2)
+    async def _pick_topic(self) -> tuple[str, dict | None]:
+        """(話題, 使ったカード)。未使用・未期限切れの話題カードがあれば使用済みにしてニュースを返す。無ければ SPONT_TOPICS から選ぶ。
+        候補が 2 枚以上なら上位 PICK_MAX 件から LLM に一番明るいものを選ばせ、失敗・番号なしは語の点数の 1 位を使う。"""
+        cards = select_cards(self.store, self.now_ms(), limit=PICK_MAX)
         if len(cards) < 2 and self.topic_worker is not None:  # これで在庫切れ: 次の発話までにニュースを仕入れる
             self.topic_worker.request_refill()
         if not cards:
             return f"「{random.choice(SPONT_TOPICS)}」", None
         card = cards[0]
+        if len(cards) > 1:
+            stop = threading.Event()
+            try:
+                text = await asyncio.to_thread(self._collect, pick_messages(cards), stop)
+            except asyncio.CancelledError:
+                stop.set()  # 取消 (利用者が話し始めた): llama-server を応答に譲る
+                raise
+            except Exception as e:  # noqa: BLE001  選べなくても語の点数で話せる
+                log.warning("topic pick failed: %s", e)
+                text = None
+            i = parse_pick(text, len(cards))
+            if i is not None:
+                card = cards[i]
+            log.info("topic pick: %s of %d (llm %r)", "fallback" if i is None else i + 1, len(cards), (text or "")[:20])
         mark_used(self.store, card["id"], self.now_ms())
         facts = re.sub(r"<[^>]+>", "", card["facts"] or "").strip()[:CARD_FACTS_MAX]
         label = "X で話題になっている「{}」" if card["angle"] == X_TREND else "最近見かけたニュース「{}」"

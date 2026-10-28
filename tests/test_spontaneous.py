@@ -364,6 +364,64 @@ def test_spontaneous_uses_topic_card_once(tmp_path):
     asyncio.run(run())
 
 
+def test_llm_picks_brightest_card(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        topics.add_card(store, "円相場の動き", published_at=200, expires_at=10_000)
+        topics.add_card(store, "イルカの赤ちゃんがお披露目", published_at=100, expires_at=10_000)
+        picks = []
+        d._llm = lambda m: picks.append(m) or iter(["2"])  # 語の点数はどちらも 0 で新しい順なら 1 番目
+        seen = []
+        d.pipeline._llm = lambda m: seen.append(m) or iter(["かわいいね。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        assert "1. 円相場の動き\n2. イルカの赤ちゃんがお披露目" in picks[0][-1]["content"]
+        assert "イルカの赤ちゃん" in seen[0][-1]["content"]
+        assert [r["hook"] for r in topics.select_cards(store, 1000, limit=5)] == ["円相場の動き"]
+    asyncio.run(run())
+
+
+def test_unparsable_pick_falls_back_to_tone_order(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        topics.add_card(store, "事故で渋滞", published_at=200, expires_at=10_000)
+        topics.add_card(store, "紅葉が見頃", published_at=100, expires_at=10_000)
+        d._llm = lambda m: iter(["どれも良いですね"])
+        seen = []
+        d.pipeline._llm = lambda m: seen.append(m) or iter(["きれいだね。"])
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(lambda: not d.spontaneous.pending)
+        assert "紅葉が見頃" in seen[0][-1]["content"]
+    asyncio.run(run())
+
+
+def test_cancel_during_pick_keeps_cards_unused(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path)
+        topics.add_card(store, "a", expires_at=10_000)
+        topics.add_card(store, "b", expires_at=10_000)
+        started, release = threading.Event(), threading.Event()
+
+        def slow(m):
+            started.set()
+            release.wait(5)
+            yield "1"
+        d._llm = slow
+        d.core.on_text(b, json.dumps({"t": "ui", "on": True}))
+        d.clock_.advance(1200)
+        assert d.spontaneous_tick() == "spontaneous"
+        await until(started.is_set)
+        d._cancel_spontaneous()  # 選んでいる最中に利用者が話し始めた
+        release.set()
+        await until(lambda: d._spont_task.done())
+        assert len(topics.select_cards(store, 1000, limit=5)) == 2
+    asyncio.run(run())
+
+
 def test_spontaneous_x_trend_card_is_not_called_news(tmp_path):
     async def run():
         d, b, store = make(tmp_path)

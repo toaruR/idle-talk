@@ -26,6 +26,33 @@ def test_used_excluded_and_mark_used(store):
     assert topics.select_cards(store, 400) == []
 
 
+def test_positive_card_selected_before_newer_negative(store):
+    topics.add_card(store, "高速道路で事故 3人死亡", published_at=300, expires_at=10_000)
+    topics.add_card(store, "円相場の動き", published_at=200, expires_at=10_000)
+    topics.add_card(store, "新しい水族館が開業 イルカの赤ちゃん誕生", published_at=100, expires_at=10_000)
+    hooks = [r["hook"] for r in topics.select_cards(store, 0, limit=3)]
+    assert hooks == ["新しい水族館が開業 イルカの赤ちゃん誕生", "円相場の動き", "高速道路で事故 3人死亡"]
+
+
+def test_same_tone_keeps_newest_first(store):
+    topics.add_card(store, "古い話", published_at=100)
+    topics.add_card(store, "新しい話", published_at=200)
+    assert topics.select_cards(store, 0)[0]["hook"] == "新しい話"
+
+
+def test_card_tone_uses_facts():
+    assert topics.card_tone("駅前の話", "地震で停電") < 0 < topics.card_tone("駅前の話", "桜が満開")
+
+
+def test_parse_pick():
+    assert topics.parse_pick("3", 4) == 2
+    assert topics.parse_pick("番号は２です", 4) == 1
+    assert topics.parse_pick("5", 4) is None
+    assert topics.parse_pick("0", 4) is None
+    assert topics.parse_pick("なし", 4) is None
+    assert topics.parse_pick(None, 4) is None
+
+
 def test_user_reaction_saved(store):
     cid = topics.add_card(store, "h")
     topics.set_reaction(store, cid, "liked")
