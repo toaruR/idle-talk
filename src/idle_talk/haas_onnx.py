@@ -154,6 +154,8 @@ class HaasRecognizer:
     """1 発話 (16kHz mono float32) を文字列にする。"""
 
     def __init__(self, model_dir: str | Path, gpu: int = 0, threads: int = 2, session=None):
+        if session is None:
+            import onnxruntime as ort  # 未導入なら ImportError (モデルの有無より先に知らせる)
         d = Path(model_dir)
         if not (d / "config.json").is_file():
             raise FileNotFoundError(f"{d} に Haas-ja のモデル (config.json など) がありません")
@@ -167,8 +169,6 @@ class HaasRecognizer:
         self.max_symbols = self.conf["max_symbols"]
         self.start = self.pred.step(self.blank, self.pred.initial_state())  # 開始記号の出力は毎回同じ
         if session is None:
-            import onnxruntime as ort
-
             providers = _providers(gpu, ort.get_available_providers())
             on_gpu = providers[0] != "CPUExecutionProvider"
             enc = d / ("encoder.fp16.onnx" if on_gpu and (d / "encoder.fp16.onnx").is_file() else "encoder.onnx")

@@ -1,7 +1,8 @@
 """ASR ワーカー (設計書 12.1)。req 検証・ハルシネーション除外・HTTP ハンドラ・認識エンジン呼び出し。
 
 エンジンは [asr].engine で選ぶ。reazon (既定) は ReazonSpeech を sherpa-onnx で CPU 実行し、
-faster-whisper と同じ形のセグメント (text / no_speech_prob / compression_ratio) を返す。
+haas は Haas-ja-v1.0 を onnxruntime で GPU ([asr].gpu) 実行する (idle_talk.haas_onnx)。
+どちらも faster-whisper と同じ形のセグメント (text / no_speech_prob / compression_ratio) を返す。
 """
 from __future__ import annotations
 
@@ -91,27 +92,48 @@ def compression_ratio(text: str) -> float:
     return len(b) / len(zlib.compress(b)) if b else 0.0
 
 
-class ReazonModel:
-    """ReazonSpeech (sherpa-onnx の transducer) を faster-whisper の transcribe と同じ形で呼べるようにする。
+class ChunkedModel:
+    """1 発話ずつ文字列にする認識器 (recognize) を faster-whisper の transcribe と同じ形で呼べるようにする。
 
-    no_speech_prob は出ないので 0 とし、語が出ない・物音の聞き違い (_REAZON_NOISE) ならセグメントを返さない (呼出側で語なしとして破棄)。"""
+    no_speech_prob は出ないので 0 とし、語が出ない・物音の聞き違い (_REAZON_NOISE) ならセグメントを返さない (呼出側で語なしとして破棄)。
+    約 30 秒までしか扱えないモデルのため、長い区間は REAZON_MAX_S 秒ごとに切る。"""
 
     RATE = 16000
 
-    def __init__(self, recognizer):
-        self.rec = recognizer
+    def recognize(self, audio) -> str:
+        raise NotImplementedError
 
     def transcribe(self, audio, language="ja"):
         segs = []
         step = REAZON_MAX_S * self.RATE
         for i in range(0, max(len(audio), 1), step):
-            s = self.rec.create_stream()
-            s.accept_waveform(self.RATE, audio[i:i + step])
-            self.rec.decode_stream(s)
-            text = s.result.text.strip()
+            text = self.recognize(audio[i:i + step]).strip()
             if text and not _REAZON_NOISE.fullmatch(text):
                 segs.append(SimpleNamespace(text=text, no_speech_prob=0.0, compression_ratio=compression_ratio(text)))
         return iter(segs), None
+
+
+class ReazonModel(ChunkedModel):
+    """ReazonSpeech (sherpa-onnx の transducer)。"""
+
+    def __init__(self, recognizer):
+        self.rec = recognizer
+
+    def recognize(self, audio) -> str:
+        s = self.rec.create_stream()
+        s.accept_waveform(self.RATE, audio)
+        self.rec.decode_stream(s)
+        return s.result.text
+
+
+class HaasModel(ChunkedModel):
+    """Haas-ja-v1.0 (idle_talk.haas_onnx.HaasRecognizer、または 16kHz の音声を受け取って文字列を返す関数)。"""
+
+    def __init__(self, recognizer):
+        self.rec = recognizer
+
+    def recognize(self, audio) -> str:
+        return self.rec(audio) if len(audio) else ""
 
 
 def _pick_onnx(d: Path, stem: str) -> str:
@@ -134,12 +156,31 @@ def load_reazon_model(asr: Asr) -> ReazonModel:
         feature_dim=80, decoding_method="greedy_search"))
 
 
+def load_haas_model(asr: Asr) -> HaasModel:
+    """Haas-ja を読み込む (onnxruntime 未導入なら ImportError、モデルが無ければ FileNotFoundError)。
+
+    読み込み後に 1 秒の無音を 1 回認識しておく (GPU の初期化を最初の発話に持ち越さない)。"""
+    import numpy as np
+
+    from .haas_onnx import HaasRecognizer
+
+    rec = HaasRecognizer(asr.haas_dir, gpu=asr.gpu, threads=asr.threads)
+    rec(np.zeros(HaasModel.RATE, np.float32))
+    print(f"asr_worker: haas on {rec.device}", file=sys.stderr)
+    return HaasModel(rec)
+
+
+_LOADERS = {"reazon": load_reazon_model, "haas": load_haas_model, "whisper": lambda asr: load_whisper_model()}
+
+
 def load_asr_model(asr: Asr):
-    return load_reazon_model(asr) if asr.engine == "reazon" else load_whisper_model()
+    return _LOADERS[asr.engine](asr)
 
 
 _INSTALL_HINT = {"reazon": "sherpa_onnx is not installed ({e}); pip install sherpa-onnx",
+                 "haas": "onnxruntime is not installed ({e}); pip install onnxruntime-gpu (または onnxruntime-directml)",
                  "whisper": "faster_whisper is not installed ({e}); pip install faster-whisper"}
+_MODEL_KEY = {"reazon": "model_dir", "haas": "haas_dir", "whisper": "model_dir"}
 
 
 def make_transcribe(model, cfg: Config | None = None) -> Callable[[int, str], dict]:
@@ -181,7 +222,7 @@ def main(argv: list[str] | None = None, load_model: Callable[[], object] | None 
             print("asr_worker: " + _INSTALL_HINT[asr.engine].format(e=e), file=sys.stderr)
             return 2
         except FileNotFoundError as e:
-            print(f"asr_worker: {e} ([asr].model_dir を確認)", file=sys.stderr)
+            print(f"asr_worker: {e} ([asr].{_MODEL_KEY[asr.engine]} を確認)", file=sys.stderr)
             return 2
         print(f"asr_worker: engine {asr.engine}", file=sys.stderr)
         server = make_server(make_transcribe(model), "127.0.0.1", port)

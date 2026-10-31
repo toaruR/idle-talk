@@ -8,11 +8,17 @@ tts = 10101  # AivisSpeech
 web = 8000   # web/ の配信 (main が起動。ブラウザは http://127.0.0.1:8000/ を開く)
 
 [asr]
-# 音声認識のエンジン。reazon = ReazonSpeech (CPU、日本語の精度が高い。pip install sherpa-onnx とモデルが要る)、
-# whisper = faster-whisper small (GPU0)。変えたら idle-talk.cmd restart。
+# 音声認識のエンジン。idle-talk.cmd asr reazon / idle-talk.cmd asr haas で、会話を止めずに切り換えられる。
+#   reazon = ReazonSpeech (CPU。pip install sherpa-onnx とモデルが要る)
+#   haas   = Haas-ja-v1.0 (GPU。ReazonSpeech より誤りが少なく、感情のこもった声や文頭の「はぁ？」「えー」を落としにくい。
+#            pip install onnxruntime-gpu と、tools/haas_export_onnx.py で書き出したモデルが要る。docs/asr-comparison-haas-ja.md)
+#   whisper = faster-whisper small (GPU0)
+# このファイルを手で変えたら idle-talk.cmd restart。
 engine = "reazon"
 model_dir = "data/models/reazonspeech"  # reazon のモデル (sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01, Apache-2.0)
-threads = 2           # reazon の CPU スレッド数 (1〜32)。AivisSpeech の声が遅れるなら下げる
+threads = 2           # reazon の CPU スレッド数 (1〜32)。AivisSpeech の声が遅れるなら下げる。haas を CPU で動かすときにも使う
+haas_dir = "data/models/haas-ja"  # haas のモデル (Haas-ja-v1.0 を ONNX にしたもの, Apache-2.0)
+gpu = 0               # haas を載せる GPU の番号 (nvidia-smi と同じ順)。-1 で CPU (遅い)。重みだけで VRAM 約 2.4GB
 # 食器の音・咳などを「はい」「誰」「ハハ」と聞き違える対策: short_chars 字以下の認識結果は、
 # AI の声の最中か、話し終えてから short_reply_s 秒以内 (返事・相槌) のときだけ使う。short_chars=0 で無効。
 # AI が話し続けると文脈の条件が常に成り立つので、short_reply_s=0 なら AI の声の最中も含めて常に捨てる
