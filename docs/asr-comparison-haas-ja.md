@@ -119,21 +119,30 @@ ReazonSpeech は感嘆詞の直後の文を落としやすい。雑談では「�
 
 クリップ別に比べると、Haas-ja が良いのは 13 件、同じが 48 件、ReazonSpeech が良いのは 19 件。
 
-## 導入するなら
+## 導入 (2026-10-31)
+
+idle-talk には 3 つ目の案 (ONNX) で入れた。`idle-talk.cmd asr haas` / `idle-talk.cmd asr reazon` で切り換える (README「音声認識の切り換え」)。
+
+- NeMo・PyTorch・Triton は使わない。実行時に要るのは onnxruntime-gpu と numpy だけで、Windows でもそのまま動く。
+- 重いエンコーダ (609M) だけを ONNX にして GPU で動かす。
+- 予測ネットワーク (KDA)・joint・TDT 貪欲デコード・特徴量は numpy で書き直した ([src/idle_talk/haas_onnx.py](../src/idle_talk/haas_onnx.py))。どれも小さく、CPU の負荷はわずか。
+- 書き出しは [tools/haas_export_onnx.py](../tools/haas_export_onnx.py) で行う (Linux / WSL2 で 1 回だけ、GPU は不要)。
+- 配布用には [tools/haas_pack.py](../tools/haas_pack.py) で約 1.2GB に詰められる。重みは元々 bf16 なので、復元するとバイト単位で元に戻る。
+
+NeMo との一致は次のとおり確かめた。
+
+- 同じ特徴量を入れたとき、ONNX のエンコーダ出力は NeMo と完全に一致した。
+- 特徴量は NeMo の前処理と最大 7e-5 の差だった。
+- 認識結果をベンチマーク全体で NeMo と比べた (下の表)。
 
 | | ReazonSpeech | Haas-ja |
 |---|---|---|
-| 動く環境 | CPU (Windows で動作中) | 公式は Linux + NVIDIA GPU。Windows の公式対応はない |
-| モデルの大きさ | 約 160MB (int8 ONNX) | 約 1.2GB (.nemo)、パラメータ 616M |
-| 依存 | sherpa-onnx | NeMo 2.7 (torch、lightning など多数)、flash-linear-attention、Triton |
+| 動く環境 | CPU | GPU (onnxruntime-gpu の CUDA、または onnxruntime-directml)。`[asr].gpu = -1` で CPU |
+| モデルの大きさ | 約 160MB (int8 ONNX) | 約 2.4GB (fp32 ONNX、配布時は 1.2GB) |
 | 出力 | 句読点なし | 句読点あり (、。?!)。フィラーは省きがち |
 | ライセンス | Apache-2.0 | Apache-2.0 |
 
-idle-talk で使う道は、どれも未検証。
-
-1. **WSL2 + GPU。** 公式の動かし方にいちばん近い。ただし GPU を Gemma 4 12B と分け合う (RTX 3060 12GB)。Haas-ja の bf16 は重みだけで約 1.2GB。
-2. **Windows の CPU で、このリポジトリの置き換えを使う。** 精度は同じで、遅延は上の 1.3 秒前後 (実機の CPU による)。NeMo と Triton が Windows に入るかが分からない。
-3. **ONNX に書き出して sherpa-onnx / onnxruntime で動かす。** 今の asr_worker の作りに近い。ただし予測ネットワークが LSTM でなく KDA なので、書き出しとデコードを自分で作る必要がある。
+GPU での遅延と VRAM は、実機 (RTX 3060) ではまだ測っていない。
 
 ## 再現
 

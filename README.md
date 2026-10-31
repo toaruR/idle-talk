@@ -26,6 +26,7 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) の `llama-server` | 会話 | 同梱の設定は Gemma 4 12B（QAT Q4_0、gguf）。軽くしたいなら Qwen3.5-4B Q4_K_M |
 | [AivisSpeech](https://aivis-project.com/) | 声 | idle-talk が AivisSpeech Engine を起動できます（`127.0.0.1:10101`） |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) + ReazonSpeech | 音声認識（CPU） | モデルは約 680MB（Apache-2.0）。`[asr].engine = "whisper"` で faster-whisper `small`（GPU）に戻せます |
+| onnxruntime-gpu + [Haas-ja-v1.0](https://huggingface.co/third-intelligence/Haas-ja-v1.0)（任意） | 音声認識（GPU） | ReazonSpeech と切り換えて使えます。誤りが少なく、感情のこもった声や文頭の「はぁ？」「えー」を落としにくい（[比較](docs/asr-comparison-haas-ja.md)）。モデルは約 2.4GB（Apache-2.0） |
 | onnxruntime + [WeSpeaker ResNet34](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | 声で相手を見分ける（任意） | モデルは約 26MB（CC-BY-4.0）。無ければ見分けずに動きます |
 | Chrome などのブラウザ | マイク・再生・画面 | |
 
@@ -42,6 +43,7 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
    tar -xjf reazonspeech.tar.bz2 -C data/models
    move data\models\sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01 data\models\reazonspeech
    ```
+   - **（任意）Haas-ja も使うなら**、GPU 版の onnxruntime とモデルを入れる（下の「音声認識の切り換え」）。
 3. **[idle_talk.toml](idle_talk.toml) の `[llm]` を自分の環境に合わせる**
    ```toml
    [llm]
@@ -67,6 +69,37 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
    ```
    `idle_talk.toml` の `[voice_id]` で `on = true` にします。
 
+### 音声認識の切り換え（ReazonSpeech / Haas-ja）
+
+Haas-ja-v1.0 は GPU で動く音声認識です。ReazonSpeech と切り換えて使えます。
+
+1. **GPU 版の onnxruntime を入れる**（CPU 版と入れ替える。話者識別もそのまま動きます）
+   ```
+   pip uninstall -y onnxruntime
+   pip install onnxruntime-gpu[cuda,cudnn]
+   ```
+   - CUDA が使えない場合は、`pip install onnxruntime-directml` でも動きます（DirectML）。
+2. **モデルを `data/models/haas-ja/` に置く**（約 2.4GB）
+   - 配布用に詰めたファイル（`encoder.pack.000`〜、`manifest.json` など）がある場合は、元に戻す:
+     ```
+     python tools/haas_pack.py unpack <詰めたファイルのフォルダ> data/models/haas-ja
+     ```
+     （SHA-256 で元のファイルと同じか確かめます）
+   - 無い場合は、Linux / WSL2 で書き出す（1 回だけ、GPU は不要）:
+     ```
+     pip install "nemo-toolkit[asr]>=2.7.3,<2.8" onnx
+     python tools/haas_export_onnx.py --out data/models/haas-ja
+     ```
+3. **切り換える**（起動中なら音声認識だけ入れ替わり、会話は止まりません）
+   ```
+   idle-talk.cmd asr haas     # Haas-ja にする
+   idle-talk.cmd asr reazon   # ReazonSpeech に戻す
+   idle-talk.cmd asr          # 今のエンジンを表示
+   ```
+   - 使う GPU は `[asr].gpu`（既定 0、`nvidia-smi` の番号）。重みだけで VRAM を約 2.4GB 使います。
+   - 実際に GPU で動いているかは `data/asr_worker.log` の `haas on CUDAExecutionProvider` で確かめられます。
+     `CPUExecutionProvider` と出たら GPU 版の onnxruntime が読めていません（CPU でも動きますが、1 発話に 1〜2 秒かかります）。
+
 ## 起動と停止
 
 リポジトリ直下で:
@@ -76,6 +109,7 @@ idle-talk.cmd start     # 起動（AivisSpeech Engine・音声認識・本体を
 idle-talk.cmd stop      # 停止
 idle-talk.cmd restart   # 再起動
 idle-talk.cmd status    # 動いているかを表示
+idle-talk.cmd asr haas  # 音声認識を Haas-ja に切り換え（reazon で戻す）
 ```
 
 起動したら、ブラウザで **http://127.0.0.1:8000/** を開きます。

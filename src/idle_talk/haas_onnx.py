@@ -170,6 +170,11 @@ class HaasRecognizer:
         self.start = self.pred.step(self.blank, self.pred.initial_state())  # 開始記号の出力は毎回同じ
         if session is None:
             providers = _providers(gpu, ort.get_available_providers())
+            if providers[0][0] == "CUDAExecutionProvider" and hasattr(ort, "preload_dlls"):
+                try:  # pip の onnxruntime-gpu[cuda,cudnn] で入れた CUDA / cuDNN の DLL を読む (CUDA を別に入れなくてよい)
+                    ort.preload_dlls()
+                except Exception:  # noqa: BLE001 (読めなくても、システムの CUDA があれば動く)
+                    pass
             on_gpu = providers[0] != "CPUExecutionProvider"
             enc = d / ("encoder.fp16.onnx" if on_gpu and (d / "encoder.fp16.onnx").is_file() else "encoder.onnx")
             so = ort.SessionOptions()

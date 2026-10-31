@@ -15,6 +15,7 @@
 - 2026-10-14：ドラマモードに総合的な感想を追加（§6.5）。台詞が長く途切れたら、裏で要約したあらすじメモをもとにそれまでの感想を話す。
 - 2026-10-14：ペルソナを追加（§6.6）。人物設定を `personas.toml` に書き、画面で切り替える（`ui.persona`）。
 - 2026-10-14：ASR を faster-whisper small（GPU0）から ReazonSpeech（sherpa-onnx、CPU）に変更（§2.2、§8.1）。放送字幕を正解にした 80 クリップで CER 29.1% → 10.8%、遅延 p50 334 → 212ms（`tools/asr_bench.py`）。`no_speech_prob` は出ないので幻聴除外は `compression_ratio`（本文から計算）と語なし判定に頼る。`[asr].engine = "whisper"` で戻せる。
+- 2026-10-31：ASR に Haas-ja-v1.0（onnxruntime、GPU は `[asr].gpu`）を追加し、`idle-talk.cmd asr reazon|haas` で ReazonSpeech と切り換えられるようにした（既定は reazon のまま）。asr-ja-bench の JSUT・JVNV・FLEURS で CER strict 7.36% → 4.79%、文の取りこぼしは JVNV で 27 → 1 件。NeMo を使わず、エンコーダだけ ONNX、予測ネットワーク（KDA）と TDT デコードは numpy（`src/idle_talk/haas_onnx.py`、`docs/asr-comparison-haas-ja.md`）。
 - 2026-10-15：`[drama].log_prompt` を追加（§7）。オンなら一言・感想・要約に使った台詞とメモを talk.log に残す（何を見て一言を言ったかを後で確かめるため）。既定オフで、オフなら従来どおり台詞を保存しない。
 - 2026-10-16：`[drama].keep_snaps` を追加（§7）。1 以上なら一言・感想に使った画面を `data/snaps` に新しい方からその枚数だけ残す（LLM が何を見たかを確かめるため）。既定 0 で、0 なら従来どおり画面を保存しない。
 - 2026-10-15：文脈の無い短い認識結果を捨てる（§5.1）。食器・咳を「はい」「誰」「ハハ」と聞き違えて応答・取消が続いた。
