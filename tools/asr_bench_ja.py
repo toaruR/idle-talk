@@ -2,6 +2,7 @@
 
 python tools/asr_bench_ja.py --bench <dir> --engine reazon [--reazon-dir data/models/reazonspeech] [--threads 2]
 python tools/asr_bench_ja.py --bench <dir> --engine haas   [--device cuda|cpu] [--batch-size 16]
+python tools/asr_bench_ja.py --bench <dir> --engine haas_onnx [--haas-dir data/models/haas-ja] [--gpu -1]
 
 <dir> は asr-ja-bench (https://huggingface.co/datasets/third-intelligence/asr-ja-bench) の rebuild.py が
 書き出すディレクトリ (<subset>.jsonl と audio/)。Haas-ja のモデルカードと同じ jacer で CER strict / flex / kana を出す
@@ -90,10 +91,32 @@ def haas_engine(args):
     return run, args.batch_size
 
 
+def haas_onnx_engine(args):
+    """idle-talk の [asr].engine = "haas" と同じ実装 (idle_talk.haas_onnx、onnxruntime + numpy) で 1 発話ずつ認識する。"""
+    sys.path.insert(0, str(ROOT / "src"))
+    from idle_talk.haas_onnx import HaasRecognizer
+
+    rec = HaasRecognizer(args.haas_dir, gpu=args.gpu, threads=args.threads)
+    print(f"haas_onnx: {rec.device}", file=sys.stderr)
+
+    def run(audios: list[np.ndarray]) -> tuple[list[str], list[float]]:
+        texts, secs = [], []
+        for a in audios:
+            t0 = time.perf_counter()
+            texts.append(rec(a))
+            secs.append(time.perf_counter() - t0)
+        return texts, secs
+
+    return run, 1
+
+
+ENGINES = {"reazon": reazon_engine, "haas": haas_engine, "haas_onnx": haas_onnx_engine}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--bench", type=Path, required=True)
-    ap.add_argument("--engine", choices=("reazon", "haas"), required=True)
+    ap.add_argument("--engine", choices=tuple(ENGINES), required=True)
     ap.add_argument("--subset", action="append", choices=SUBSETS)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--out", type=Path, default=Path("data/asr_bench_ja"))
@@ -102,12 +125,14 @@ def main(argv=None) -> int:
     ap.add_argument("--haas-model", default="third-intelligence/Haas-ja-v1.0")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--haas-dir", type=Path, default=ROOT / "data/models/haas-ja", help="haas_onnx のモデル")
+    ap.add_argument("--gpu", type=int, default=-1, help="haas_onnx の GPU 番号 (-1 で CPU)")
     args = ap.parse_args(argv)
 
     import jacer
 
     subsets = tuple(args.subset or [s for s in SUBSETS if (args.bench / f"{s}.jsonl").is_file()])
-    run, batch = (reazon_engine if args.engine == "reazon" else haas_engine)(args)
+    run, batch = ENGINES[args.engine](args)
     out = args.out / args.engine
     out.mkdir(parents=True, exist_ok=True)
 
