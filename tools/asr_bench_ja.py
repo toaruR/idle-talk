@@ -29,7 +29,7 @@ import numpy as np
 import soundfile as sf
 
 ROOT = Path(__file__).resolve().parent.parent
-SUBSETS = ("jsut", "jvnv", "tedxjp10k", "fleurs", "speech-bsd")
+SUBSETS = ("jsut", "jvnv", "tedxjp10k", "fleurs", "speech-bsd", "tv")
 RATE = 16000
 
 
