@@ -95,7 +95,8 @@ def test_load_asr_short_settings(tmp_path):
     f = tmp_path / "s.toml"
     assert (Asr().short_chars, Asr().short_reply_s) == (2, 20)
     f.write_text("[asr]\nshort_chars = 0\nshort_reply_s = 60\n", encoding="utf-8")
-    assert load_asr(f)[-2:] == (0, 60)
+    a = load_asr(f)
+    assert (a.short_chars, a.short_reply_s) == (0, 60)
     for bad in ("short_chars = -1", "short_chars = 11", 'short_reply_s = "20"', "short_reply_s = 3601"):
         f.write_text(f"[asr]\n{bad}\n", encoding="utf-8")
         with pytest.raises(ValueError):

@@ -129,3 +129,47 @@ def test_start_aivis_skips_without_engine(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ctl, "spawn_exe", lambda *a: pytest.fail("must not spawn"))
     ctl.start_aivis(ctl.argparse.Namespace(config=tmp_path / "none.toml"), tmp_path)
     assert "start it manually" in capsys.readouterr().out
+
+
+def test_set_asr_engine_rewrites_only_asr_section_and_keeps_crlf(tmp_path):
+    f = tmp_path / "s.toml"
+    f.write_bytes('[aivis]\r\nengine = "C:/AivisSpeech/run.exe"\r\n\r\n[asr]  # 音声認識\r\n'
+                  'engine = "reazon"  # 既定\r\nthreads = 2\r\n\r\n[tts]\r\nspeaker = 1\r\n'.encode("utf-8"))
+    ctl.set_asr_engine(f, "haas")
+    assert f.read_bytes().decode("utf-8") == (
+        '[aivis]\r\nengine = "C:/AivisSpeech/run.exe"\r\n\r\n[asr]  # 音声認識\r\n'
+        'engine = "haas"  # 既定\r\nthreads = 2\r\n\r\n[tts]\r\nspeaker = 1\r\n')
+
+
+def test_set_asr_engine_adds_key_or_section(tmp_path):
+    f = tmp_path / "s.toml"
+    f.write_text("[asr]\nthreads = 4\n", encoding="utf-8")
+    ctl.set_asr_engine(f, "haas")
+    assert f.read_text(encoding="utf-8") == '[asr]\nengine = "haas"\nthreads = 4\n'
+    g = tmp_path / "t.toml"
+    g.write_text("[tts]\nspeaker = 1", encoding="utf-8")
+    ctl.set_asr_engine(g, "haas")
+    assert g.read_text(encoding="utf-8") == '[tts]\nspeaker = 1\n\n[asr]\nengine = "haas"\n'
+
+
+def test_asr_command_shows_and_switches_without_starting_when_stopped(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "s.toml"
+    f.write_text('[asr]\nengine = "reazon"\n', encoding="utf-8")
+    monkeypatch.setattr(ctl, "start_one", lambda *a: pytest.fail("started while stopped"))
+    args = ["--data-dir", str(tmp_path), "--config", str(f)]
+    assert ctl.main(["asr", *args]) == 0
+    assert "asr: reazon (asr_worker stopped)" in capsys.readouterr().out
+    assert ctl.main(["asr", "haas", *args]) == 0
+    assert "reazon -> haas" in capsys.readouterr().out
+    assert 'engine = "haas"' in f.read_text(encoding="utf-8")
+
+
+def test_asr_command_restarts_running_worker(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "s.toml"
+    f.write_text('[asr]\nengine = "reazon"\n', encoding="utf-8")
+    (tmp_path / ctl.ASR_PID_FILE).write_text(str(os.getpid()))
+    calls = []
+    monkeypatch.setattr(ctl, "stop_asr_worker", lambda d: calls.append("stop"))
+    monkeypatch.setattr(ctl, "start_one", lambda name, module, args, pid_file, log: calls.append(module) or 1)
+    assert ctl.main(["asr", "haas", "--data-dir", str(tmp_path), "--config", str(f)]) == 0
+    assert calls == ["stop", "idle_talk.asr_worker"]

@@ -270,7 +270,8 @@ def load_search(path: str | Path = SETTINGS_FILE) -> Search:
 
 
 class Asr(NamedTuple):
-    """[asr]: 音声認識のエンジン。reazon は ReazonSpeech (sherpa-onnx, CPU)、whisper は faster-whisper small (GPU)。"""
+    """[asr]: 音声認識のエンジン。reazon は ReazonSpeech (sherpa-onnx, CPU)、haas は Haas-ja-v1.0 (onnxruntime, GPU)、
+    whisper は faster-whisper small (GPU)。"""
     engine: str = "reazon"
     model_dir: str = "data/models/reazonspeech"  # reazon の encoder/decoder/joiner*.onnx と tokens.txt
     threads: int = 2  # reazon の CPU スレッド数 (AivisSpeech・話者識別と CPU を分け合う)
@@ -278,9 +279,11 @@ class Asr(NamedTuple):
     # ReazonSpeech は食器・咳を「はい」「誰」「ハハ」と聞き違えるが、音では本物の返事と見分けられなかった (2026-10-15)
     short_chars: int = 2  # 0 で無効
     short_reply_s: int = 20  # 0 なら AI の声の最中も含めて常に捨てる
+    haas_dir: str = "data/models/haas-ja"  # haas のモデル (tools/haas_export_onnx.py の出力)
+    gpu: int = 0  # haas のエンコーダを載せる GPU の番号 (nvidia-smi と同じ順)。-1 で CPU
 
 
-ASR_ENGINES = ("reazon", "whisper")
+ASR_ENGINES = ("reazon", "haas", "whisper")
 
 
 def load_asr(path: str | Path = SETTINGS_FILE) -> Asr:
@@ -288,8 +291,11 @@ def load_asr(path: str | Path = SETTINGS_FILE) -> Asr:
     raw = _read_section(path, "asr", Asr._fields)
     if "engine" in raw and raw["engine"] not in ASR_ENGINES:
         raise ValueError(f"[asr].engine must be one of {list(ASR_ENGINES)}: {raw['engine']!r}")
-    if "model_dir" in raw and (type(raw["model_dir"]) is not str or not raw["model_dir"]):
-        raise ValueError(f"[asr].model_dir must be a non-empty string: {raw['model_dir']!r}")
+    for k in ("model_dir", "haas_dir"):
+        if k in raw and (type(raw[k]) is not str or not raw[k]):
+            raise ValueError(f"[asr].{k} must be a non-empty string: {raw[k]!r}")
+    if "gpu" in raw and (type(raw["gpu"]) is not int or not -1 <= raw["gpu"] <= 15):
+        raise ValueError(f"[asr].gpu must be an int in [-1, 15]: {raw['gpu']!r}")
     if "threads" in raw and (type(raw["threads"]) is not int or not 1 <= raw["threads"] <= 32):
         raise ValueError(f"[asr].threads must be an int in [1, 32]: {raw['threads']!r}")
     for k, hi in (("short_chars", 10), ("short_reply_s", 3600)):

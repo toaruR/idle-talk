@@ -1,4 +1,4 @@
-"""起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status|memories|speakers。
+"""起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status|memories|speakers|asr。
 
 asr_worker と main をバックグラウンドで起動し、出力は data_dir の asr_worker.log / idle_talk.log に追記する。
 [aivis].engine があれば、その前に AivisSpeech Engine を起動して応答を待つ (main の起動時の空合成と声の一覧取得に間に合わせる)。
@@ -8,11 +8,14 @@ asr_worker と main をバックグラウンドで起動し、出力は data_dir
 STOP_TIMEOUT_S 内に終わらなければ強制終了する。asr_worker は保存する状態が無いので即終了する。
 memories は保存された記憶の一覧表示と削除 (--delete ID / --clear)。起動中でも使える (WAL)。
 speakers は覚えた声 (話者識別、設計書 6.4) の一覧表示と削除 (--delete ID / --clear)。起動中の削除は再起動後に効く。
+asr は音声認識のエンジンの表示と切り換え (asr reazon / asr haas)。設定ファイルの [asr].engine を書き換え、
+asr_worker だけを再起動する (会話・LLM は止めない。再起動中の数秒は認識できない)。
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -22,7 +25,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from .config import SETTINGS_FILE, load_aivis_launch, load_ports
+from .config import ASR_ENGINES, SETTINGS_FILE, load_aivis_launch, load_asr, load_ports
 from .errors import EXIT_DUPLICATE_LAUNCH
 from .main import DB_FILE, PID_FILE, STOP_FILE
 from .portlock import pid_alive
@@ -168,14 +171,10 @@ def cmd_stop(args: argparse.Namespace, data_dir: Path) -> int:
             kill(pid)
             print(f"idle-talk: killed after {STOP_TIMEOUT_S:.0f}s (pid {pid}); llama-server may be left running")
     stop_file.unlink(missing_ok=True)
-    asr_pid = read_pid(data_dir / ASR_PID_FILE)
-    if asr_pid is None:
+    if read_pid(data_dir / ASR_PID_FILE) is None:
         print("asr_worker: not running")
     else:
-        kill(asr_pid)
-        wait_until(lambda: not pid_alive(asr_pid), STOP_TIMEOUT_S)
-        (data_dir / ASR_PID_FILE).unlink(missing_ok=True)
-        print(f"asr_worker: stopped (pid {asr_pid})")
+        stop_asr_worker(data_dir)
     aivis_pid = read_pid(data_dir / AIVIS_PID_FILE)
     if aivis_pid is not None:
         kill_tree(aivis_pid)
@@ -185,11 +184,65 @@ def cmd_stop(args: argparse.Namespace, data_dir: Path) -> int:
     return 0
 
 
+def set_asr_engine(path: Path, engine: str) -> None:
+    """設定ファイルの [asr].engine を書き換える (他の行・コメントはそのまま)。無ければ [asr] に足す。"""
+    raw = path.read_bytes() if path.is_file() else b""
+    newline = "\r\n" if b"\r\n" in raw else "\n"  # 元の改行 (Windows のメモ帳なら CRLF) を保つ
+    text = raw.decode("utf-8").replace("\r\n", "\n")
+    line = f'engine = "{engine}"'
+    m = re.search(r"(?m)^\[asr\][ \t]*(#.*)?$", text)
+    if m is None:
+        text = text + ("" if text.endswith("\n") or not text else "\n") + f"\n[asr]\n{line}\n"
+    else:
+        nxt = re.search(r"(?m)^\[", text[m.end():])
+        body_end = m.end() + (nxt.start() if nxt else len(text) - m.end())
+        body = text[m.end():body_end]
+        new_body, n = re.subn(r'(?m)^engine[ \t]*=[ \t]*"[^"\n]*"', line, body, count=1)
+        if n == 0:
+            new_body = "\n" + line + body
+        text = text[:m.end()] + new_body + text[body_end:]
+    path.write_bytes(text.replace("\n", newline).encode("utf-8"))
+
+
+def stop_asr_worker(data_dir: Path) -> None:
+    asr_pid = read_pid(data_dir / ASR_PID_FILE)
+    if asr_pid is None:
+        return
+    kill(asr_pid)
+    wait_until(lambda: not pid_alive(asr_pid), STOP_TIMEOUT_S)
+    (data_dir / ASR_PID_FILE).unlink(missing_ok=True)
+    print(f"asr_worker: stopped (pid {asr_pid})")
+
+
+def cmd_asr(args: argparse.Namespace, data_dir: Path) -> int:
+    """引数なしなら今のエンジンを表示。エンジンを指定したら設定を書き換え、起動中の asr_worker を入れ替える。"""
+    current = load_asr(args.config).engine
+    if args.engine is None:
+        running = read_pid(data_dir / ASR_PID_FILE)
+        print(f"asr: {current} (asr_worker {'running' if running else 'stopped'})")
+        print(f"切り換え: idle-talk.cmd asr {'|'.join(ASR_ENGINES)}")
+        return 0
+    if args.engine != current:
+        set_asr_engine(args.config, args.engine)
+        load_asr(args.config)  # 書き換えた設定を検証する
+        print(f"asr: {current} -> {args.engine} ({args.config})")
+    else:
+        print(f"asr: {current}")
+    if read_pid(data_dir / PID_FILE) is None and read_pid(data_dir / ASR_PID_FILE) is None:
+        return 0  # 止まっていれば次の start で効く
+    stop_asr_worker(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    pid = start_one("asr_worker", "idle_talk.asr_worker",
+                    ["--config", str(args.config), "--pid-file", str(data_dir / ASR_PID_FILE)],
+                    data_dir / ASR_PID_FILE, data_dir / "asr_worker.log")
+    return 0 if pid is not None else 1
+
+
 def cmd_status(args: argparse.Namespace, data_dir: Path) -> int:
     pid = read_pid(data_dir / PID_FILE)
     asr_pid = read_pid(data_dir / ASR_PID_FILE)
     print(f"idle-talk: {f'running (pid {pid})' if pid else 'stopped'}")
-    print(f"asr_worker: {f'running (pid {asr_pid})' if asr_pid else 'stopped'}")
+    print(f"asr_worker: {f'running (pid {asr_pid})' if asr_pid else 'stopped'} ({load_asr(args.config).engine})")
     aivis = tts_ready(f"http://127.0.0.1:{load_ports(args.config).tts}")
     print(f"aivisspeech: {'running' if aivis else 'stopped'}")
     if pid:
@@ -257,7 +310,8 @@ def cmd_speakers(args: argparse.Namespace, data_dir: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="idle-talk-ctl")
-    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories", "speakers"))
+    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories", "speakers", "asr"))
+    p.add_argument("engine", nargs="?", choices=ASR_ENGINES, help="asr: 切り換え先の音声認識エンジン")
     p.add_argument("--config", default=SETTINGS_FILE)
     p.add_argument("--data-dir", default="data")
     p.add_argument("--delete", type=int, metavar="ID", help="memories / speakers: 指定 id を削除")
@@ -269,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd_stop(args, data_dir)
         return cmd_start(args, data_dir)
     return {"start": cmd_start, "stop": cmd_stop, "status": cmd_status,
-            "memories": cmd_memories, "speakers": cmd_speakers}[args.command](args, data_dir)
+            "memories": cmd_memories, "speakers": cmd_speakers, "asr": cmd_asr}[args.command](args, data_dir)
 
 
 if __name__ == "__main__":

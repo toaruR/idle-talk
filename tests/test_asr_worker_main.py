@@ -79,7 +79,8 @@ def test_default_port_is_8090(monkeypatch):
 
 
 @pytest.mark.parametrize("engine,module,msg", [("whisper", "faster_whisper", "faster_whisper is not installed"),
-                                                ("reazon", "sherpa_onnx", "sherpa_onnx is not installed")])
+                                                ("reazon", "sherpa_onnx", "sherpa_onnx is not installed"),
+                                                ("haas", "onnxruntime", "onnxruntime is not installed")])
 def test_missing_engine_package_exits_nonzero_with_message(monkeypatch, capsys, tmp_path, engine, module, msg):
     monkeypatch.setitem(sys.modules, module, None)  # import を ImportError にする
     f = tmp_path / "s.toml"
@@ -97,6 +98,33 @@ def test_reazon_missing_model_dir_exits_nonzero(monkeypatch, capsys, tmp_path):
     rc = asr_worker.main(["--config", str(f), "--port", "0"],
                          run=lambda s: (_ for _ in ()).throw(AssertionError("served")))
     assert rc != 0 and "model_dir" in capsys.readouterr().err
+
+
+def test_haas_missing_model_dir_exits_nonzero(monkeypatch, capsys, tmp_path):
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace())
+    f = tmp_path / "s.toml"
+    f.write_text(f'[asr]\nengine = "haas"\nhaas_dir = "{(tmp_path / "none").as_posix()}"\n', encoding="utf-8")
+    rc = asr_worker.main(["--config", str(f), "--port", "0"],
+                         run=lambda s: (_ for _ in ()).throw(AssertionError("served")))
+    assert rc != 0 and "haas_dir" in capsys.readouterr().err
+
+
+def test_haas_model_filters_noise_and_splits_long_audio():
+    seen = []
+
+    def rec(audio):
+        seen.append(len(audio))
+        return ["あ。", "うん。", "はぁ?またお説教ですか?"][len(seen) - 1]
+
+    n = asr_worker.REAZON_MAX_S * 16000
+    m = asr_worker.HaasModel(rec)
+    segs, _ = m.transcribe(np.zeros(2 * n + 50, np.float32))
+    assert [s.text for s in segs] == ["うん。", "はぁ?またお説教ですか?"] and seen == [n, n, 50]
+
+
+def test_load_asr_model_dispatches_haas(monkeypatch):
+    monkeypatch.setattr(asr_worker, "_LOADERS", {**asr_worker._LOADERS, "haas": lambda asr: ("haas", asr.gpu)})
+    assert asr_worker.load_asr_model(Asr(engine="haas", gpu=1)) == ("haas", 1)
 
 
 class FakeRecognizer:
@@ -159,7 +187,11 @@ def test_load_asr_defaults_and_validation(tmp_path):
     assert load_asr(f) == Asr("reazon", "data/models/reazonspeech", 2)
     f.write_text('[asr]\nengine = "whisper"\nthreads = 4\n', encoding="utf-8")
     assert load_asr(f) == Asr("whisper", "data/models/reazonspeech", 4)
-    for bad in ('engine = "vosk"', "threads = 0", 'threads = "2"', 'model_dir = ""', "foo = 1"):
+    f.write_text('[asr]\nengine = "haas"\nhaas_dir = "D:/m/haas"\ngpu = 1\n', encoding="utf-8")
+    assert load_asr(f) == Asr("haas", haas_dir="D:/m/haas", gpu=1)
+    assert Asr().haas_dir == "data/models/haas-ja" and Asr().gpu == 0
+    for bad in ('engine = "vosk"', "threads = 0", 'threads = "2"', 'model_dir = ""', "foo = 1",
+                'haas_dir = ""', "gpu = -2", 'gpu = "0"', "gpu = 16"):
         f.write_text(f"[asr]\n{bad}\n", encoding="utf-8")
         with pytest.raises(ValueError):
             load_asr(f)
