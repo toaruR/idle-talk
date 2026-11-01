@@ -14,7 +14,7 @@ web = 8000   # web/ の配信 (main が起動。ブラウザは http://127.0.0.1
 #            pip install onnxruntime-gpu と、tools/haas_export_onnx.py で書き出したモデルが要る。docs/asr-comparison-haas-ja.md)
 #   whisper = faster-whisper small (GPU0)
 # このファイルを手で変えたら idle-talk.cmd restart。
-engine = "reazon"
+engine = "haas"
 model_dir = "data/models/reazonspeech"  # reazon のモデル (sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01, Apache-2.0)
 threads = 2           # reazon の CPU スレッド数 (1〜32)。AivisSpeech の声が遅れるなら下げる。haas を CPU で動かすときにも使う
 haas_dir = "data/models/haas-ja"  # haas のモデル (Haas-ja-v1.0 を ONNX にしたもの, Apache-2.0)

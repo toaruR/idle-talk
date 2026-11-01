@@ -133,7 +133,7 @@ NeMo との一致は次のとおり確かめた。
 
 - 同じ特徴量を入れたとき、ONNX のエンコーダ出力は NeMo と完全に一致した。
 - 特徴量は NeMo の前処理と最大 7e-5 の差だった。
-- 認識結果をベンチマーク全体で NeMo と比べた (下の表)。
+- 認識結果は、asr-ja-bench の 7,025 件 (JSUT・JVNV・FLEURS) すべてで NeMo 版と一字一句同じだった (`tools/asr_bench_ja.py --engine haas_onnx`、CPU で確認)。
 
 | | ReazonSpeech | Haas-ja |
 |---|---|---|
