@@ -174,17 +174,18 @@ def test_start_web_serves_dir_and_ws_port(tmp_path):
 def test_start_web_refetches_speakers_until_available(tmp_path):
     import http.client
     from idle_talk.main import SpeakerChoices, start_web
-    answers = [[], [{"id": 1, "name": "a b"}], [{"id": 2, "name": "c d"}]]  # AivisSpeech が後から起動
+    a, b = {"id": 1, "name": "a b"}, {"id": 2, "name": "c d"}
+    answers = [[], [a], [a, b], []]  # AivisSpeech が後から起動し、声が足され、最後は取得に失敗
     choices = SpeakerChoices(lambda: answers.pop(0))
     httpd = start_web(0, 9123, {}, choices, root=tmp_path)
     try:
         c = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
         got = []
-        for _ in range(3):
+        for _ in range(4):
             c.request("GET", "/config.json")
             got.append(json.loads(c.getresponse().read())["speakers"])
-        assert got == [[], [{"id": 1, "name": "a b"}], [{"id": 1, "name": "a b"}]]  # 取れたら覚える
-        assert 1 in choices and 2 not in choices and choices
+        assert got == [[], [a], [a, b], [a, b]]  # 読込ごとに取り直し、失敗なら前の一覧
+        assert 1 in choices and 2 in choices and 3 not in choices and choices
     finally:
         httpd.shutdown()
         httpd.server_close()

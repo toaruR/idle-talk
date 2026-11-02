@@ -75,9 +75,9 @@ def git_commit() -> str:
 
 
 class SpeakerChoices:
-    """画面の声の選択肢 (AivisSpeech の話者一覧)。取れるまで get() のたびに取り直し、取れたら覚える。
+    """画面の声の選択肢 (AivisSpeech の話者一覧)。get() のたびに取り直し、取れなければ前に取れた一覧を使う。
 
-    idle-talk が AivisSpeech より先に起動しても、画面を読み直せば声の選択欄が出る。
+    idle-talk が AivisSpeech より先に起動しても、AivisSpeech に声を足しても、画面を読み直せば選択欄に出る。
     in / bool は取り直さない (取れていなければ空。set_speaker の検査を飛ばす)。"""
 
     def __init__(self, fetch: Callable[[], list[dict]]) -> None:
@@ -87,8 +87,7 @@ class SpeakerChoices:
 
     def get(self) -> list[dict]:
         with self._lock:
-            if not self._items:
-                self._items = self._fetch()
+            self._items = self._fetch() or self._items
             return self._items
 
     def __contains__(self, speaker: object) -> bool:
