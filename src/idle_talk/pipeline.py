@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from collections.abc import Callable, Iterable
@@ -13,13 +14,14 @@ from .clause import ClauseSplitter, is_synthesizable
 from .clients import ClientError
 from .epoch import Epoch
 from .errors import ERR_LLM_TIMEOUT, ERR_TTS_FAILED
-from .llm_supervisor import FALLBACK_PHRASE
+from .persona import FALLBACK_END, FALLBACK_START
 from .web_search import (ANSWER_TURNS, LINK_NOTICE, SEARCH_INCOMPLETE_NOTICE, SEARCH_MAX_ROUNDS, SEARCH_NOTICE,
                          SEARCH_WAIT_NOTICE, SEARCH_WAIT_S, find_mark, link_items, parse_query,
                          research_messages, with_link_rule, with_search_rule)
 
 log = logging.getLogger("idle_talk.pipeline")
 _END = object()
+_NOTICES = frozenset({SEARCH_NOTICE, SEARCH_WAIT_NOTICE, PAGE_NOTICE})  # 返答の前のお知らせ (話したに数えない)
 
 
 class ResponsePipeline:
@@ -40,6 +42,8 @@ class ResponsePipeline:
         self._utt = 0
         self.discarded = 0
         self.links: list[dict] = []  # 直近の検索結果の [{title, url}]。「URL を教えて」で画面に出す
+        # LLM が失敗したときの一言 (引数は途中まで話したか)。Director がペルソナのものに差し替える
+        self.fallback: Callable[[bool], str] = lambda spoke: random.choice(FALLBACK_END if spoke else FALLBACK_START)
 
     # ---- cancel (不変条件 1: LLM/ASR の完了を待たない) ----
     async def cancel(self) -> int:
@@ -84,45 +88,54 @@ class ResponsePipeline:
     def _llm_clauses(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
                      emit: Callable[[dict], None] | None = None, page: Callable[[], dict | None] | None = None,
                      shot: Callable[[], tuple[str, str] | None] | None = None):
-        """LLM 出力を節にする (別スレッドで回る)。emit はイベントループへ渡すメッセージ送出。"""
+        """LLM 出力を節にする (別スレッドで回る)。emit はイベントループへ渡すメッセージ送出。
+        LLM が失敗したら 5001 を送り、途中まで話したか (お知らせの定型文は数えない) で選んだ一言を読む。"""
         emit = emit or self._emit
-        sp = ClauseSplitter()
-        ep = self.epoch.current
+        spoke = False
         try:
-            last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-            summarize = getattr(page, "summarize", None)
-            if summarize is not None and isinstance(last, str) and wants_summary(last):
-                yield from self._summary_clauses(summarize, ep, emit)
-                return
-            if page is not None and isinstance(last, str) and wants_page(last):
-                yield from self._page_clauses(messages, page, shot, ep, emit)
-                return
-            links = list(self.links) if search is not None else []
-            first = messages
-            if search is not None:
-                first = with_search_rule(with_link_rule(messages) if links else messages)
-            toks = iter(self._llm(first))
-            if search is None:
-                for tok in toks:
-                    yield from sp.feed(tok)
-                yield from sp.flush()
-                return
-            # 「検索:」「リンク:」は返答の先頭とは限らない (末尾に書くこともある)。節ごとに探し、前の文だけ読み上げる
-            for tok in toks:
-                for clause in sp.feed(tok):
-                    kind, after = yield from self._before_mark(clause, links)
-                    if kind is not None:
-                        getattr(toks, "close", lambda: None)()
-                        yield from self._mark_clauses(kind, after, messages, links, search, ep, emit)
-                        return
-            for clause in sp.flush():
-                kind, after = yield from self._before_mark(clause, links)
-                if kind is not None:
-                    yield from self._mark_clauses(kind, after, messages, links, search, ep, emit)
-        except (ClientError, OSError, ValueError, TimeoutError) as e:  # LlmTimeout 等/接続断。5001 + 定型句にフォールバック
+            for clause in self._llm_body(messages, search, emit, page, shot):
+                spoke = spoke or clause not in _NOTICES
+                yield clause
+        except (ClientError, OSError, ValueError, TimeoutError) as e:  # LlmTimeout 等/接続断
             log.warning("llm failed: %s", e)
             emit({"t": "error", "code": ERR_LLM_TIMEOUT, "message": str(e)[:200]})
-            yield FALLBACK_PHRASE
+            yield self.fallback(spoke)
+
+    def _llm_body(self, messages: list[dict], search: Callable[[str], list[dict]] | None,
+                  emit: Callable[[dict], None], page: Callable[[], dict | None] | None,
+                  shot: Callable[[], tuple[str, str] | None] | None):
+        sp = ClauseSplitter()
+        ep = self.epoch.current
+        last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        summarize = getattr(page, "summarize", None)
+        if summarize is not None and isinstance(last, str) and wants_summary(last):
+            yield from self._summary_clauses(summarize, ep, emit)
+            return
+        if page is not None and isinstance(last, str) and wants_page(last):
+            yield from self._page_clauses(messages, page, shot, ep, emit)
+            return
+        links = list(self.links) if search is not None else []
+        first = messages
+        if search is not None:
+            first = with_search_rule(with_link_rule(messages) if links else messages)
+        toks = iter(self._llm(first))
+        if search is None:
+            for tok in toks:
+                yield from sp.feed(tok)
+            yield from sp.flush()
+            return
+        # 「検索:」「リンク:」は返答の先頭とは限らない (末尾に書くこともある)。節ごとに探し、前の文だけ読み上げる
+        for tok in toks:
+            for clause in sp.feed(tok):
+                kind, after = yield from self._before_mark(clause, links)
+                if kind is not None:
+                    getattr(toks, "close", lambda: None)()
+                    yield from self._mark_clauses(kind, after, messages, links, search, ep, emit)
+                    return
+        for clause in sp.flush():
+            kind, after = yield from self._before_mark(clause, links)
+            if kind is not None:
+                yield from self._mark_clauses(kind, after, messages, links, search, ep, emit)
 
     def _summary_clauses(self, summarize: Callable[[], dict | None], ep: int, emit: Callable[[dict], None]):
         """見ているページの要約は ChatGPT のタブで開く (LLM は呼ばない)。"""

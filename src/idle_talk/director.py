@@ -266,6 +266,7 @@ class IdleTalkDirector:
         self._mem_stop = threading.Event()  # 取消時に抽出スレッドの LLM 受信を打ち切る (llama-server を応答に譲る)
         self.set_speaker: Callable[[int], None] | None = None  # 画面で選んだ話者 ID を TTS へ (main が結線)
         self.personas = PersonaBook()  # ペルソナ (設計書 6.6)。main が personas.toml を読んだものに差し替える
+        self.pipeline.fallback = lambda spoke: self.personas.fallback(spoke)  # 差し替え後も今のペルソナで選ぶ
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
         self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
         self.page_reader: Callable[[], dict | None] | None = None  # 「このページどう思う？」で見ているページを読む (main が結線)

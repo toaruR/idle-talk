@@ -18,7 +18,6 @@ from idle_talk.clients import LlmClient, TtsClient
 from idle_talk.config import Config, load_llm_launch, load_ports, load_speaker
 from idle_talk.epoch import Epoch
 from idle_talk.llm_supervisor import (
-    FALLBACK_PHRASE,
     WATCH_INTERVAL_S,
     LlmSupervisor,
     build_llama_argv,
@@ -27,6 +26,7 @@ from idle_talk.llm_supervisor import (
     watch,
 )
 from idle_talk.main import LLM_READY_TIMEOUT_S
+from idle_talk.persona import FALLBACK_START
 from idle_talk.pipeline import ResponsePipeline
 
 pytestmark = pytest.mark.integration
@@ -130,7 +130,7 @@ def test_e7_real_llama_kill_gives_fallback_then_restart_answers_next_turn(tmp_pa
     proc.kill()
     t0 = time.monotonic()
     asyncio.run(pipe.respond(MSGS))
-    assert audio and audio[0][1] == FALLBACK_PHRASE
+    assert audio and audio[0][1] in FALLBACK_START
     assert audio[0][0] - t0 <= CFG.HTTP_TIMEOUT.llm_first
     assert any(m.get("t") == "error" and m.get("code") == 5001 for m in emitted)
 
@@ -152,5 +152,5 @@ def test_e7_real_llama_kill_gives_fallback_then_restart_answers_next_turn(tmp_pa
     emitted.clear()
     audio.clear()
     asyncio.run(pipe.respond(MSGS))  # 次ターン
-    assert audio and audio[0][1] != FALLBACK_PHRASE, audio
+    assert audio and audio[0][1] not in FALLBACK_START, audio
     assert not any(m.get("t") == "error" for m in emitted), emitted

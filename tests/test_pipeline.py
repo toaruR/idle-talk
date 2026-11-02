@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 
 from idle_talk.clause import ClauseSplitter
-from idle_talk.clients import TtsFailed
-from idle_talk.llm_supervisor import FALLBACK_PHRASE
+from idle_talk.clients import LlmTimeout, TtsFailed
+from idle_talk.persona import FALLBACK_END, FALLBACK_START
 from idle_talk.pipeline import ResponsePipeline
 
 
@@ -153,7 +153,32 @@ def test_llm_failure_5001_with_fallback_phrase():
     p, audio, emits, _ = make(llm)
     asyncio.run(p.respond([]))
     assert [e["code"] for e in emits if e["t"] == "error"] == [5001]
-    assert audio[0][3] == FALLBACK_PHRASE
+    assert audio[0][3] in FALLBACK_START
+
+
+def test_llm_failure_after_speaking_uses_end_filler():
+    """途中まで話してから時間切れなら「もう一度」ではなく締めの一言にする。"""
+    def llm(m):
+        yield "今日は晴れだね。"
+        raise LlmTimeout("llm total > 20s")
+
+    p, audio, emits, _ = make(llm)
+    asyncio.run(p.respond([]))
+    assert [e["code"] for e in emits if e["t"] == "error"] == [5001]
+    assert audio[0][3] == "今日は晴れだね。"
+    assert audio[1][3] in FALLBACK_END
+
+
+def test_llm_failure_fallback_is_replaceable():
+    def llm(m):
+        raise LlmTimeout("llm first token > 5s")
+        yield
+
+    p, audio, _, _ = make(llm)
+    got = []
+    p.fallback = lambda spoke: got.append(spoke) or "うーん。"
+    asyncio.run(p.respond([]))
+    assert got == [False] and audio[0][3] == "うーん。"
 
 
 def test_tts_failure_5002_skips_sentence_text_only():

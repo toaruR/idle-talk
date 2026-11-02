@@ -11,7 +11,14 @@ from mocks_browser import MockBrowser
 
 from idle_talk.clients import AsrClient
 from idle_talk.director import IdleTalkDirector
-from idle_talk.persona import DEFAULT, NAME_PROMPT, PersonaBook, parse_personas
+from idle_talk.persona import (
+    DEFAULT,
+    FALLBACK_END,
+    FALLBACK_START,
+    NAME_PROMPT,
+    PersonaBook,
+    parse_personas,
+)
 from idle_talk.protocol import validate_message
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
@@ -61,6 +68,31 @@ def test_book_without_file_uses_builtin(tmp_path):
     book = PersonaBook(tmp_path / "none.toml")
     assert book.current == DEFAULT and book.choices() == [{"id": "default", "name": DEFAULT.label}]
     assert book.system_prompt() == DEFAULT.prompt
+
+
+def test_fallback_persona_over_common_over_builtin(tmp_path):
+    f = tmp_path / "personas.toml"
+    write(f, 'fallback_start = ["共通の頭"]\n'
+             '[a]\nprompt = "p"\nfallback_end = ["エーの締め"]\n'
+             '[b]\nprompt = "q"\n', 1)
+    book = PersonaBook(f)
+    assert book.fallback(False) == "共通の頭"  # ペルソナに無ければ共通
+    assert book.fallback(True) == "エーの締め"
+    book.select("b")
+    assert book.fallback(True) in FALLBACK_END  # 共通にも無ければ組み込み
+    assert PersonaBook(tmp_path / "none.toml").fallback(False) in FALLBACK_START
+
+
+@pytest.mark.parametrize("text", [
+    'fallback_start = "一言"\n[a]\nprompt = "p"\n',  # 配列でない
+    'fallback_start = []\n[a]\nprompt = "p"\n',
+    '[a]\nprompt = "p"\nfallback_end = [""]\n',
+    '[a]\nprompt = "p"\nfallback_end = [1]\n',
+    f'[a]\nprompt = "p"\nfallback_end = ["{"x" * 101}"]\n',
+])
+def test_fallback_rejects(text):
+    with pytest.raises(ValueError):
+        parse_personas(tomllib.loads(text))
 
 
 def test_book_select_and_reload(tmp_path):
@@ -201,7 +233,12 @@ def test_question_note_after_recent_question(tmp_path):
 def test_mode_section_in_system(tmp_path):
     """通常応答の system に今のモード (画面・カメラ・ドラマ・ブラウザ補正なし) を添える。"""
     from idle_talk.camera import Cameras, Source
-    from idle_talk.director import (MODE_CAMERA_PROMPT, MODE_DRAMA_PROMPT, MODE_PC_PROMPT, MODE_SCREEN_PROMPT)
+    from idle_talk.director import (
+        MODE_CAMERA_PROMPT,
+        MODE_DRAMA_PROMPT,
+        MODE_PC_PROMPT,
+        MODE_SCREEN_PROMPT,
+    )
     clock = FakeClock()
     store = Store(tmp_path / "t.db", db_backup=False)
     d = IdleTalkDirector(store, lambda m: iter(()), lambda text: b"RIFF....WAVE", lambda: None, EnergyVad(),

@@ -11,7 +11,8 @@ from idle_talk.config import Config
 from idle_talk.director import IdleTalkDirector
 from idle_talk.errors import ERR_LLM_TIMEOUT, ERR_MIC_LOST
 from idle_talk.fsm import Ev, Event
-from idle_talk.llm_supervisor import FALLBACK_PHRASE, LlmSupervisor
+from idle_talk.llm_supervisor import LlmSupervisor
+from idle_talk.persona import FALLBACK_START
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
 
@@ -175,7 +176,7 @@ def test_e7_llm_kill_gives_fallback_then_restart_and_next_turn_replies(tmp_path)
             await until(lambda: len(b.chunks) == 1)
             assert time.monotonic() - t0 <= CFG.HTTP_TIMEOUT.llm_first
             assert [e["code"] for e in b.of("error")] == [ERR_LLM_TIMEOUT]
-            assert b.of("text")[0]["text"] == FALLBACK_PHRASE
+            assert b.of("text")[0]["text"] in FALLBACK_START
             assert starts == [1] and sleeps == [CFG.LLM_RETRY.backoff_s[0]]  # 初回バックオフ 1s 内に再起動
             await until(lambda: state(d) == "idle")
             b.speak()

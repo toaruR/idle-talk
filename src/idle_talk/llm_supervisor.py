@@ -15,7 +15,6 @@ from .config import Config, LlmLaunch
 
 log = logging.getLogger("idle_talk.llm_supervisor")
 
-FALLBACK_PHRASE = "ちょっと考え込んじゃいました。もう一度お願いします。"
 NO_THINK_KWARGS = '{"enable_thinking":false}'
 
 

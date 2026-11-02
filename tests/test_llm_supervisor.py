@@ -5,7 +5,6 @@ from mocks import FakeClock
 
 from idle_talk.config import LlmLaunch
 from idle_talk.llm_supervisor import (
-    FALLBACK_PHRASE,
     NO_THINK_KWARGS,
     LlmSupervisor,
     build_llama_argv,
@@ -13,6 +12,7 @@ from idle_talk.llm_supervisor import (
     wait_ready,
     watch,
 )
+from idle_talk.persona import FALLBACK_START
 from idle_talk.pipeline import ResponsePipeline
 
 
@@ -55,7 +55,7 @@ def test_kill_gives_fallback_phrase_within_http_timeout():
     p = ResponsePipeline(llm, lambda t: b"w", lambda: None,
                          lambda ep, u, c, t, w: audio.append((t, clock())), emits.append)
     asyncio.run(p.respond([]))
-    assert audio[0][0] == FALLBACK_PHRASE
+    assert audio[0][0] in FALLBACK_START
     assert audio[0][1] <= 5  # HTTP_TIMEOUT.llm_first
     assert any(e["t"] == "error" and e["code"] == 5001 for e in emits)
 
