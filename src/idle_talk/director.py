@@ -114,6 +114,7 @@ def merge_final(partial: str, final: str) -> str:
     matched = sum(b.size for b in difflib.SequenceMatcher(None, p, f, autojunk=False).get_matching_blocks())
     return partial if matched >= PARTIAL_COVER * len(f) else f"{partial} {final}"
 UNKNOWN_SPEAKER = "不明"  # 文字起こしで話者が分からない (話者識別なし・最初の発話が短い) ときのラベル
+HEARD_SPEAKER = "あなた"  # 会話中に聞き取った発話のラベル (名前が分からないとき)
 DRAMA_HOLD_S = 8.0  # 一言の生成中に台詞が再開したら、次の切れ目をこれだけ待つ (来なければ古くなったので黙る)
 # 一言には会話履歴も前の一言も渡さず、前の一言以降の台詞 (今の場面) だけを見せる。
 # 履歴や 3 分ぶんの台詞を渡すと、4B は前の一言や古い台詞の目立つ語 (「噛み詰め」等) を毎回繰り返した (実機 2026-10-14)
@@ -716,6 +717,7 @@ class IdleTalkDirector:
             return False  # 応答しない (Ingress が DISCARDED を送り、待機に戻る)
         self._text = text
         self._identify(uid)
+        self._show_heard(uid, text)
         self._m_mark("asr_done")
         self._release_spont_hold(speech=True)
         if self.fsm.ctx.state is State.INTERRUPT_CHECK and self._judge_interrupt(text) == "backchannel":
@@ -944,6 +946,13 @@ class IdleTalkDirector:
         span = self.ingress.seg_span.get(uid)  # 話者は SPEAKER 行 (窓で測った切り替わり) で別に出す
         talk_log.info("TEXT(%s): %s", f"{self._frame_time(span[0])}-{self._frame_time(span[1])}" if span else "-", text)
         self.store.add_turn(self.now_ms(), "transcript", f"{label}: {text}", 0, None, uid)  # 会話の履歴には入れない
+        self._emit({"t": "transcript", "uid": uid, "speaker": label, "text": text, "ts": self.now_ms()})
+
+    def _show_heard(self, uid: int, text: str) -> None:
+        """文字起こしモード以外でも、使った認識結果を画面の文字起こし欄に出す (画面だけ。turns・talk.log は従来どおり)。
+        話者は名前が分かれば名前、ブラウザ補正なしモードは PC、それ以外は HEARD_SPEAKER (仮名は付けない)。"""
+        name = self.voices.name(self._speaker) if self.voices is not None and self._speaker is not None else None
+        label = "PC" if self.pc_on else name or HEARD_SPEAKER
         self._emit({"t": "transcript", "uid": uid, "speaker": label, "text": text, "ts": self.now_ms()})
 
     def _speaker_label(self, uid: int) -> str:

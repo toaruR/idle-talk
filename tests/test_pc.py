@@ -199,6 +199,7 @@ def test_pc_mode_plays_on_monitor_and_logs_pc(tmp_path):
         assert "".join(m["text"] for m in b.of("text")) == "和食が好きだよ。"  # 文字は画面に出す
         assert [tuple(r) for r in store.query("SELECT role, text FROM turns WHERE role!='ai'")] == [("pc", "好きな食べ物は何ですか")]
         assert "PC: 好きな食べ物は何ですか" in h.lines
+        assert [(m["speaker"], m["text"]) for m in b.of("transcript")] == [("PC", "好きな食べ物は何ですか")]  # 文字起こし欄にも出す
         assert d._mem_pending == [] and d._mem_task is None  # PC の発言は記憶にしない
         assert d.seen_[0][-1] == {"role": "user", "content": "好きな食べ物は何ですか"}
         pc_on(d, b, False)
@@ -217,6 +218,7 @@ def test_pc_mode_off_plays_in_browser(tmp_path):
         await until(lambda: ai_turns(store) == 1)
         assert b.chunks and d.stream_.data == []
         assert [tuple(r) for r in store.query("SELECT role FROM turns WHERE role!='ai'")] == [("user",)]
+        assert [(m["speaker"], m["text"]) for m in b.of("transcript")] == [("あなた", "こんにちは")]  # 会話でも文字起こし欄に出す
     asyncio.run(run())
 
 
