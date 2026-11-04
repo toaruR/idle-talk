@@ -91,7 +91,7 @@ LLM は Qwen3.5 Q4_K_M（既定 4B、ctx 4k、思考無効はテンプレート�
 |D→B|`state`|§12.1|UI 表示用|
 |D→B|`search`|`{"t":"search","query":str,"active":bool}`|Web 検索の開始/終了（§6.3。UI 表示用、§12.1 のスキーマ外）|
 |D→B|`links`|`{"t":"links","items":[{"title":str,"url":str}]}`|調べたページの URL を画面の URL 欄に出す（§6.3。§12.1 のスキーマ外）|
-|D→B|`transcript`|`{"t":"transcript","speaker":str,"text":str,"ts":int}`|文字起こしの 1 発話（§6.10。§12.1 のスキーマ外）。文字起こしモード以外でも、応答に使った認識結果を送る（話者は名前、無ければ「あなた」、ブラウザ補正なしモードは「PC」。画面だけで、turns・talk.log は従来どおり。2026-11-04）|
+|D→B|`transcript`|`{"t":"transcript","speaker":str,"text":str,"ts":int}`|文字起こしの 1 発話（§6.10。§12.1 のスキーマ外）。文字起こしモード以外でも、応答に使った認識結果を送る（話者は名前、無ければ「あなた」、ブラウザ補正なしモードは「PC」。画面だけで、turns・talk.log は従来どおり。2026-11-04）。ドラマモードではタブの台詞も「ドラマ」で送る（AI の声として捨てた分は除く。`uid` なし。保存はしない）|
 |D→B|`snap`|`{"t":"snap","id":u32}`|今の画面を 1 枚求める（§6.5）|
 |B→D|`snap`|`{"t":"snap","id":u32,"jpeg"?:base64,"thumb"?:base64,"reason"?:str}`|求められた画面（640×360 に収めた JPEG、base64 で最大 1MiB）。`thumb` は 32×18 の明るさ 1 バイトずつの縮小画像（§6.7 の変化の判定用）。映像が無い・描けなければ `jpeg` を省き、理由（200 字まで）を `reason` に入れる（Director がログに残す）|
 |共通|`error`|§12.1||

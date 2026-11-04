@@ -115,6 +115,7 @@ def merge_final(partial: str, final: str) -> str:
     return partial if matched >= PARTIAL_COVER * len(f) else f"{partial} {final}"
 UNKNOWN_SPEAKER = "不明"  # 文字起こしで話者が分からない (話者識別なし・最初の発話が短い) ときのラベル
 HEARD_SPEAKER = "あなた"  # 会話中に聞き取った発話のラベル (名前が分からないとき)
+DRAMA_SPEAKER = "ドラマ"  # ドラマモードで共有したタブの台詞のラベル
 DRAMA_HOLD_S = 8.0  # 一言の生成中に台詞が再開したら、次の切れ目をこれだけ待つ (来なければ古くなったので黙る)
 # 一言には会話履歴も前の一言も渡さず、前の一言以降の台詞 (今の場面) だけを見せる。
 # 履歴や 3 分ぶんの台詞を渡すと、4B は前の一言や古い台詞の目立つ語 (「噛み詰め」等) を毎回繰り返した (実機 2026-10-14)
@@ -1253,6 +1254,9 @@ class IdleTalkDirector:
                     self._bc_record(DRAMA_SELF_KIND, {"chars": len(res["text"])})  # 台詞の本文は残さない (設計書 7)
                     return
                 self.drama.add_line(res["text"])
+                if _alnum(res["text"]):  # 画面の文字起こし欄にも出す (画面だけ)。uid は付けない (マイクの番号と別系統)
+                    self._emit({"t": "transcript", "speaker": DRAMA_SPEAKER, "text": res["text"].strip(),
+                                "ts": self.now_ms()})
                 # 台詞の本文は残さない (設計書 7)。聞き取れているかは字数で見る
                 log.info("drama line: %d chars (pending %d)", len(res["text"]), self.drama._new_chars)
             elif res is None:

@@ -221,6 +221,10 @@ def test_ai_voice_in_shared_audio_is_not_a_line(tmp_path):
         drama_speak(b)
         await until(lambda: len(d.drama.lines) == 2)
         assert [t for _, t in d.drama.lines] == ["犯人はお前だ、そうだろう。", "逃げられないけど"]
+        # 台詞は画面の文字起こし欄にも出す (AI の声は出さない)
+        assert [(m["speaker"], m["text"]) for m in b.of("transcript")] == [
+            ("ドラマ", "犯人はお前だ、そうだろう。"), ("ドラマ", "逃げられないけど")]
+        assert all("uid" not in m for m in b.of("transcript"))
     asyncio.run(run())
 
 
