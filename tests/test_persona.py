@@ -15,6 +15,7 @@ from idle_talk.persona import (
     DEFAULT,
     FALLBACK_END,
     FALLBACK_START,
+    MISHEARD_PROMPT,
     NAME_PROMPT,
     PersonaBook,
     parse_personas,
@@ -122,8 +123,28 @@ def test_shipped_personas_file_is_valid():
     book = PersonaBook(path)
     assert raw["style_rules"].strip()
     assert all(p.name and p.name in p.label for p in personas)
-    assert book.system_prompt() == (NAME_PROMPT.format(name=book.current.name) + book.current.prompt
-                                    + "\n" + raw["style_rules"].strip())
+    s = book.system_prompt()
+    assert s.startswith(NAME_PROMPT.format(name=book.current.name))
+    assert s.endswith(book.current.prompt + "\n" + raw["style_rules"].strip())
+
+
+def test_misheard_words_go_to_system_prompt(tmp_path):
+    path = tmp_path / "personas.toml"
+    path.write_text('[a]\nname = "うちゅ"\nprompt = "人物設定"\nmisheard = ["宇宙", "うちゅう"]\n', encoding="utf-8")
+    p = PersonaBook(path)
+    assert p.current.misheard == ("宇宙", "うちゅう")
+    assert p.system_prompt() == (NAME_PROMPT.format(name="うちゅ")
+                                 + MISHEARD_PROMPT.format(name="うちゅ", words="「宇宙」・「うちゅう」") + "人物設定")
+
+
+@pytest.mark.parametrize("text", [
+    '[a]\nprompt = "p"\nmisheard = ["宇宙"]\n',  # name が無い
+    '[a]\nname = "n"\nprompt = "p"\nmisheard = "宇宙"\n',
+    '[a]\nname = "n"\nprompt = "p"\nmisheard = []\n',
+])
+def test_misheard_rejects(text):
+    with pytest.raises(ValueError):
+        parse_personas(tomllib.loads(text))
 
 
 @pytest.mark.parametrize("header", ["", 'style_rules = ""\n', 'style_rules = "  \\n  "\n'])

@@ -24,11 +24,16 @@ class Persona(NamedTuple):
     prompt: str  # 人物設定 (性格・口調)。声は画面の「声」で別に選ぶ
     fallback_start: tuple[str, ...] = ()  # LLM が失敗したときの一言 (何も話す前)。空なら共通のもの
     fallback_end: tuple[str, ...] = ()  # 同 (途中まで話した後)。空なら共通のもの
+    misheard: tuple[str, ...] = ()  # 音声認識が name の代わりに書きがちな語 (「うちゅ」→「宇宙」)
 
 
 DEFAULT = Persona("default", "", "気さくな雑談相手", "あなたは気さくな日本語の雑談相手です。")
 NAME_PROMPT = ("あなたの名前は「{name}」です。名前を聞かれたら「{name}」と名乗り、"
                "「{name}」と呼ばれたら自分のことだと分かって答えてください。\n")
+# 利用者の発話は音声認識の結果なので、珍しい名前はよくある語に化ける (ASR は学習でよく見た語を選ぶ)
+MISHEARD_PROMPT = ("利用者の発話は音声認識の結果で、あなたの名前「{name}」が{words}と書かれることがあります。"
+                   "呼びかけや名前として使われていたら、あなたのことだと考えて答えてください。"
+                   "聞き違いを指摘したり、言い直させたりはしないでください。\n")
 # LLM の時間切れ・接続断で読む一言 (ランダムに 1 つ)。personas.toml のトップレベル・各ペルソナで上書きできる
 FALLBACK_START = ("あれ、なんだっけ…ごめん、もう一回言って？",
                   "うーん、頭が真っ白になっちゃった。もう一度お願い。",
@@ -67,7 +72,7 @@ def parse_personas(raw: dict) -> tuple[list[Persona], str]:
             raise ValueError(f"persona {pid!r} must be a table")
         if not 1 <= len(pid) <= ID_MAX:
             raise ValueError(f"persona id must be 1..{ID_MAX} chars: {pid!r}")
-        unknown = set(t) - {"name", "label", "prompt", *FALLBACK_KEYS}
+        unknown = set(t) - {"name", "label", "prompt", "misheard", *FALLBACK_KEYS}
         if unknown:
             raise ValueError(f"unknown keys in [{pid}]: {sorted(unknown)}")
         prompt = t.get("prompt")
@@ -78,8 +83,11 @@ def parse_personas(raw: dict) -> tuple[list[Persona], str]:
                 raise ValueError(f"[{pid}].{key} must be a non-empty string")
         name = t.get("name", "").strip()
         fb = parse_fallbacks(t, f"[{pid}].")
+        misheard = _phrases(t["misheard"], f"[{pid}].misheard") if "misheard" in t else ()
+        if misheard and not name:
+            raise ValueError(f"[{pid}].misheard needs name")
         out.append(Persona(pid, name, t.get("label", "").strip() or name or pid, prompt.strip(),
-                           fb.get("fallback_start", ()), fb.get("fallback_end", ())))
+                           fb.get("fallback_start", ()), fb.get("fallback_end", ()), misheard))
     if not out:
         raise ValueError("no persona defined")
     if default is None:
@@ -154,7 +162,10 @@ class PersonaBook:
 
     def system_prompt(self) -> str:
         p = self.current  # 更新時刻の確認と再読み込みを先に行う
-        prompt = (NAME_PROMPT.format(name=p.name) if p.name else "") + p.prompt
+        prompt = (NAME_PROMPT.format(name=p.name) if p.name else "")
+        if p.misheard:
+            prompt += MISHEARD_PROMPT.format(name=p.name, words="・".join(f"「{w}」" for w in p.misheard))
+        prompt += p.prompt
         return prompt + ("\n" + self.style_rules if self.style_rules else "")
 
     def fallback(self, spoke: bool, rng: random.Random | None = None) -> str:
