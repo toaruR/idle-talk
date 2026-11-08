@@ -152,6 +152,8 @@ class TtsSettingsReloader:
 def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> IdleTalkDirector:
     store = Store(data_dir / DB_FILE, bool(cfg.DB_BACKUP))
     llm = LlmClient(args.llm_url, cfg)
+    if load_llm_launch(args.config).lora:  # 読み込んだ LoRA はペルソナごとに要求で効かせる
+        llm.lora_scale = args.personas.lora_scale
     tts = TtsClient(args.tts_url, args.speaker, cfg, voice=load_voice(args.config))
     if not tts.warmup():
         log.warning("tts warmup failed: %s", args.tts_url)

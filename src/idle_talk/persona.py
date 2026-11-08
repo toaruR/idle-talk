@@ -25,6 +25,7 @@ class Persona(NamedTuple):
     fallback_start: tuple[str, ...] = ()  # LLM が失敗したときの一言 (何も話す前)。空なら共通のもの
     fallback_end: tuple[str, ...] = ()  # 同 (途中まで話した後)。空なら共通のもの
     misheard: tuple[str, ...] = ()  # 音声認識が name の代わりに書きがちな語 (「うちゅ」→「宇宙」)
+    lora: bool = False  # [llm].lora の LoRA をこのペルソナの応答に効かせる (村山弁など)
 
 
 DEFAULT = Persona("default", "", "気さくな雑談相手", "あなたは気さくな日本語の雑談相手です。")
@@ -72,7 +73,7 @@ def parse_personas(raw: dict) -> tuple[list[Persona], str]:
             raise ValueError(f"persona {pid!r} must be a table")
         if not 1 <= len(pid) <= ID_MAX:
             raise ValueError(f"persona id must be 1..{ID_MAX} chars: {pid!r}")
-        unknown = set(t) - {"name", "label", "prompt", "misheard", *FALLBACK_KEYS}
+        unknown = set(t) - {"name", "label", "prompt", "misheard", "lora", *FALLBACK_KEYS}
         if unknown:
             raise ValueError(f"unknown keys in [{pid}]: {sorted(unknown)}")
         prompt = t.get("prompt")
@@ -86,8 +87,11 @@ def parse_personas(raw: dict) -> tuple[list[Persona], str]:
         misheard = _phrases(t["misheard"], f"[{pid}].misheard") if "misheard" in t else ()
         if misheard and not name:
             raise ValueError(f"[{pid}].misheard needs name")
+        if not isinstance(t.get("lora", False), bool):
+            raise ValueError(f"[{pid}].lora must be true or false")
         out.append(Persona(pid, name, t.get("label", "").strip() or name or pid, prompt.strip(),
-                           fb.get("fallback_start", ()), fb.get("fallback_end", ()), misheard))
+                           fb.get("fallback_start", ()), fb.get("fallback_end", ()), misheard,
+                           t.get("lora", False)))
     if not out:
         raise ValueError("no persona defined")
     if default is None:
@@ -167,6 +171,15 @@ class PersonaBook:
             prompt += MISHEARD_PROMPT.format(name=p.name, words="・".join(f"「{w}」" for w in p.misheard))
         prompt += p.prompt
         return prompt + ("\n" + self.style_rules if self.style_rules else "")
+
+    def lora_scale(self, messages: list[dict]) -> float:
+        """要求に付ける LoRA の強さ。今のペルソナが lora = true で、system にその人物設定があるときだけ 1。
+
+        記憶・名前の抜き出しや話題選びは人物設定を使わないので、方言の LoRA を効かせない。"""
+        p = self.current
+        head = messages[0] if messages else {}
+        text = head.get("content") if head.get("role") == "system" else None
+        return 1.0 if p.lora and isinstance(text, str) and p.prompt in text else 0.0
 
     def fallback(self, spoke: bool, rng: random.Random | None = None) -> str:
         """LLM が失敗したときに読む一言。spoke は途中まで話していたか。ペルソナ > 共通 > 組み込みの順。"""

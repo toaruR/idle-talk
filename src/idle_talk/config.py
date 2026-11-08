@@ -193,13 +193,14 @@ class LlmLaunch(NamedTuple):
     main_gpu: int = 0   # 載せる GPU の番号 (PCI 順)。-1 なら llama-server の自動配置 (複数 GPU に分割)
     mmproj: str = ""    # 画像エンコーダ (mmproj)。指定するとドラマモードで画面も見る
     image_max_tokens: int = 0  # 画像 1 枚のトークン上限。0 なら llama-server の既定
+    lora: str = ""      # LoRA アダプタ (GGUF)。personas.toml で lora = true のペルソナの応答にだけ効く (村山弁など)
 
 
 def load_llm_launch(path: str | Path = SETTINGS_FILE) -> LlmLaunch:
     """[llm] を読む。無ければ既定値 (監督なし)。型違い・未知キーは ValueError。"""
     raw = _read_section(path, "llm", LlmLaunch._fields)
     for k, v in raw.items():
-        want = str if k in ("server", "model", "mmproj") else int
+        want = str if k in ("server", "model", "mmproj", "lora") else int
         low = -1 if k == "main_gpu" else 0
         if type(v) is not want or (want is int and v < low):
             raise ValueError(f"[llm].{k} must be a {'string' if want is str else 'non-negative int'}: {v!r}")

@@ -283,3 +283,22 @@ def test_mode_section_in_system(tmp_path):
         d.pc_on = False
         d.close()
         store.close()
+
+
+def test_lora_scale_only_for_lora_persona_with_its_prompt(tmp_path):
+    f = tmp_path / "personas.toml"
+    f.write_text('default = "a"\n[a]\nprompt = "方言で話す"\nlora = true\n[b]\nprompt = "標準語"\n',
+                 encoding="utf-8")
+    book = PersonaBook(f)
+    sysmsg = [{"role": "system", "content": book.system_prompt()}, {"role": "user", "content": "x"}]
+    assert book.lora_scale(sysmsg) == 1.0
+    assert book.lora_scale([{"role": "system", "content": "記憶を抜き出す"}]) == 0.0  # 人物設定なし
+    assert book.lora_scale([{"role": "user", "content": "x"}]) == 0.0
+    book.select("b")
+    assert book.lora_scale([{"role": "system", "content": book.system_prompt()}]) == 0.0
+
+
+def test_persona_lora_must_be_bool():
+    with pytest.raises(ValueError):
+        parse_personas({"a": {"prompt": "p", "lora": "yes"}})
+    assert parse_personas({"a": {"prompt": "p"}})[0][0].lora is False

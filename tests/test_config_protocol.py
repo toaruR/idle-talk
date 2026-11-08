@@ -292,7 +292,10 @@ def test_load_llm_launch(tmp_path):
     f.write_text('[llm]\nmain_gpu = -1\n', encoding="utf-8")
     assert load_llm_launch(f).main_gpu == -1  # 自動配置
     f.write_text('[llm]\nmmproj = "p.gguf"\nimage_max_tokens = 256\n', encoding="utf-8")
-    assert load_llm_launch(f)[-2:] == ("p.gguf", 256)
+    got = load_llm_launch(f)
+    assert (got.mmproj, got.image_max_tokens, got.lora) == ("p.gguf", 256, "")
+    f.write_text('[llm]\nlora = "l.gguf"\n', encoding="utf-8")
+    assert load_llm_launch(f).lora == "l.gguf"
 
 
 @pytest.mark.parametrize("body", ['[llm]\nmodle = "m"\n', "[llm]\nmodel = 1\n", '[llm]\nngl = "9"\n',

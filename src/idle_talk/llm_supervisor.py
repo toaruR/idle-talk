@@ -33,8 +33,10 @@ def build_llama_argv(launch: LlmLaunch, port: int) -> list[str]:
     vision = ["--mmproj", launch.mmproj] if launch.mmproj else []
     if launch.mmproj and launch.image_max_tokens > 0:
         vision += ["--image-max-tokens", str(launch.image_max_tokens)]
+    # LoRA は読み込むだけで効かせず、要求の "lora" で効かせる (personas.toml の lora = true のペルソナだけ)
+    lora = ["--lora", launch.lora, "--lora-init-without-apply"] if launch.lora else []
     return [launch.server, "-m", launch.model, "--host", "127.0.0.1", "--port", str(port),
-            "-ngl", str(launch.ngl), "-c", str(launch.ctx), *gpu, *vision,
+            "-ngl", str(launch.ngl), "-c", str(launch.ctx), *gpu, *vision, *lora,
             "--jinja", "--chat-template-kwargs", NO_THINK_KWARGS]
 
 

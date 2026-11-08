@@ -16,7 +16,7 @@ from .config import DEFAULT_SPEAKER, Config
 from .errors import ERR_ASR_FAILED, ERR_LLM_TIMEOUT, ERR_TTS_FAILED
 
 LLM_MAX_TOKENS = 300  # 応答 1 回の生成上限 (日本語で 2〜5 文程度)
-LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"anyOf":[{"type":"string"},{"type":"array","minItems":1,"items":{"oneOf":[{"type":"object","required":["type","text"],"properties":{"type":{"const":"text"},"text":{"type":"string"}}},{"type":"object","required":["type","image_url"],"properties":{"type":{"const":"image_url"},"image_url":{"type":"object","required":["url"],"properties":{"url":{"type":"string","pattern":"^data:image/"}}}}}]}}]}}}},"stream":{"const":True},"max_tokens":{"const":LLM_MAX_TOKENS}}}
+LLM_REQ_SCHEMA = {"type":"object","required":["model","messages","stream","max_tokens"],"additionalProperties":False,"properties":{"model":{"const":"local"},"messages":{"type":"array","items":{"type":"object","required":["role","content"],"properties":{"role":{"enum":["system","user","assistant"]},"content":{"anyOf":[{"type":"string"},{"type":"array","minItems":1,"items":{"oneOf":[{"type":"object","required":["type","text"],"properties":{"type":{"const":"text"},"text":{"type":"string"}}},{"type":"object","required":["type","image_url"],"properties":{"type":{"const":"image_url"},"image_url":{"type":"object","required":["url"],"properties":{"url":{"type":"string","pattern":"^data:image/"}}}}}]}}]}}}},"stream":{"const":True},"max_tokens":{"const":LLM_MAX_TOKENS},"lora":{"type":"array","maxItems":1,"items":{"type":"object","required":["id","scale"],"additionalProperties":False,"properties":{"id":{"const":0},"scale":{"type":"number","minimum":0,"maximum":1}}}}}}
 LLM_CHUNK_SCHEMA = {"type":"object","required":["choices"],"properties":{"choices":{"type":"array","items":{"type":"object","required":["delta"],"properties":{"delta":{"type":"object","properties":{"content":{"type":["string","null"]}}}}}}}}
 
 log = logging.getLogger("idle_talk.clients")
@@ -63,8 +63,11 @@ def _is_timeout(e: Exception) -> bool:
 
 # ---------------- LLM ----------------
 
-def build_llm_request(messages: list[dict]) -> dict:
+def build_llm_request(messages: list[dict], lora: float | None = None) -> dict:
+    """lora は llama-server に読み込んだ LoRA (id 0) の強さ。None なら要求に含めない (サーバの既定)。"""
     req = {"model": "local", "messages": messages, "stream": True, "max_tokens": LLM_MAX_TOKENS}
+    if lora is not None:
+        req["lora"] = [{"id": 0, "scale": lora}]
     errs = list(_LLM_REQ.iter_errors(req))
     if errs:
         raise ValueError(f"invalid llm request: {errs[0].message}")
@@ -115,10 +118,12 @@ class LlmClient:
         self.cfg = config or Config()
         self.clock = clock
         self._stream = stream
+        # 要求ごとの LoRA の強さ (messages -> scale | None)。None なら "lora" を送らない (main が設定)
+        self.lora_scale: Callable[[list[dict]], float | None] | None = None
 
     def stream_chat(self, messages: list[dict]) -> Iterator[str]:
         """content を逐次返す。最初のトークン/全体の超過で LlmTimeout(5001)。"""
-        req = build_llm_request(messages)
+        req = build_llm_request(messages, self.lora_scale(messages) if self.lora_scale else None)
         t = self.cfg.HTTP_TIMEOUT
         start = self.clock()
         state = {"first": False}

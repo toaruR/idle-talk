@@ -156,6 +156,13 @@ def test_build_llama_argv_vision():
     assert "--image-max-tokens" not in build_llama_argv(LlmLaunch(model="m.gguf", mmproj="p.gguf"), 8091)
 
 
+def test_build_llama_argv_lora():
+    argv = build_llama_argv(LlmLaunch(model="m.gguf", lora="l.gguf"), 8091)
+    assert argv[argv.index("--lora") + 1] == "l.gguf"
+    assert "--lora-init-without-apply" in argv  # 要求ごとにペルソナで効かせる
+    assert "--lora" not in build_llama_argv(LlmLaunch(model="m.gguf"), 8091)
+
+
 def test_has_vision_reads_props(monkeypatch):
     import io
     import json as json_mod

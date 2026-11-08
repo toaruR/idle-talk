@@ -75,6 +75,7 @@ ngl = 99
 ctx = 4096
 main_gpu = -1          # 載せる GPU の番号 (nvidia-smi と同じ順)。分割せずこの 1 枚に載せる。-1 で自動配置 (複数 GPU に分割)
 mmproj = "D:/models/mmproj-gemma-4-12b-it-qat-q4_0.gguf"  # 画像エンコーダ。指定するとドラマモードの一言・感想で画面も見る (空なら音だけ)
+lora = "D:/models/lora-yamagata-murayama.gguf"  # 村山弁の LoRA (tools/dialect/train.sh で作る、第 2 版)。personas.toml で lora = true のペルソナにだけ効く
 # image_max_tokens = 0  # 画像 1 枚のトークン上限 (0 = llama-server の既定)。画面は 640x360 で送るので約 106 トークン
 
 [aivis]

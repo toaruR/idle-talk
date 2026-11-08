@@ -217,3 +217,21 @@ def test_tts_speakers_lists_talk_styles():
     def down(url, timeout):
         raise OSError("refused")
     assert TtsClient(get=down).speakers() == []
+
+
+def test_build_llm_request_lora():
+    msgs = [{"role": "user", "content": "x"}]
+    assert "lora" not in build_llm_request(msgs)
+    assert build_llm_request(msgs, 1.0)["lora"] == [{"id": 0, "scale": 1.0}]
+    assert build_llm_request(msgs, 0.0)["lora"] == [{"id": 0, "scale": 0.0}]
+    with pytest.raises(ValueError):
+        build_llm_request(msgs, 1.5)
+
+
+def test_stream_chat_sends_lora_scale():
+    clock, got = FakeClock(), []
+    llm = LlmClient(clock=clock, stream=mock_llm_stream(clock, ["a"], captured=got))
+    list(llm.stream_chat([{"role": "user", "content": "x"}]))
+    llm.lora_scale = lambda m: 1.0
+    list(llm.stream_chat([{"role": "user", "content": "x"}]))
+    assert "lora" not in got[0][1] and got[1][1]["lora"] == [{"id": 0, "scale": 1.0}]
