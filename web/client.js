@@ -47,7 +47,7 @@
 
   function makeUi(settings) {
     const out = { t: 'ui' };
-    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'drama_mic', 'screen', 'camera', 'pc', 'transcribe', 'persona']) {
+    for (const k of ['mute', 'on', 'radio', 'interval_s', 'quiet_start', 'quiet_end', 'speaker', 'drama', 'drama_mic', 'drama_window', 'screen', 'camera', 'pc', 'transcribe', 'persona']) {
       if (settings && settings[k] !== undefined) out[k] = settings[k];
     }
     return out;
@@ -229,6 +229,7 @@
       for (const t of stream.getVideoTracks()) t.stop();
       throw new Error('音声が共有されていません。共有の画面で「タブの音声も共有する」をオンにしてください');
     }
+    const windowId = sharedWindowId(stream.getVideoTracks()[0]);
     const keep = Boolean(await vision);
     const video = keep ? stream.getVideoTracks() : [];
     if (!keep) for (const t of stream.getVideoTracks()) t.stop();
@@ -249,7 +250,15 @@
     };
     audio[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
     const snapshot = snapshotter(video, () => stopped, keep ? 'no video track' : 'vision off at share start', createCanvas);
-    return { ctx, stream, node, stop, snapshot };
+    return { ctx, stream, node, stop, snapshot, windowId };
+  }
+
+  // 共有したウィンドウの番号 (Windows ではウィンドウハンドル)。Chrome はウィンドウ共有の映像トラックの label を
+  // "window:<番号>:0" にする。ウィンドウ以外 (画面全体・タブ) や読めなければ 0。Director はこの番号のウィンドウを直接撮る
+  function sharedWindowId(track) {
+    const m = /^window:(\d+):/.exec((track && track.label) || '');
+    const id = m ? Number(m[1]) : 0;
+    return id > 0 && id <= 0xffffffff ? id : 0;
   }
 
   // snapshot(): 今の画面を { jpeg, thumb } で返す。止めた後・映像なし・描けなければ { reason }
@@ -324,7 +333,7 @@
   const api = {
     PROTOCOL_VERSION, SAMPLE_RATE, FRAME_SAMPLES, SNAP_W, SNAP_H, THUMB_W, THUMB_H, W, P,
     wsUrl, micConstraints, displayConstraints, makeHello, makeUi, stateLabel, snapSize, grayThumb, errorResolved,
-    createClient, startCapture, startDramaCapture, startScreenCapture, startCameraCapture, startWindowWatch,
+    createClient, startCapture, startDramaCapture, sharedWindowId, startScreenCapture, startCameraCapture, startWindowWatch,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else if (typeof globalThis !== 'undefined') globalThis.IdleTalkClient = api;

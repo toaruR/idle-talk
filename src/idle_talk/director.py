@@ -308,6 +308,10 @@ class IdleTalkDirector:
         self.screen_on = False
         # [screen].follow_window なら前面のウィンドウを撮る (wincap.WindowCapture.grab。main が結線)。None ならブラウザの共有
         self.screen_capture: Callable[[], object] | None = None
+        # ドラマモードで共有したウィンドウのハンドル (ui.drama_window。0 はウィンドウ以外の共有) と、それを撮る
+        # wincap.WindowCapture.grab (Windows で main が結線)。Chrome の共有映像が黒くなるアプリ (TVTest) 向け
+        self.drama_window = 0
+        self.window_capture: Callable[[int], object] | None = None
         self.camera_on = False  # カメラモード (ui.camera)。screen_on と一緒に立ち、cameras のソースを順に見る
         self.cameras = CameraCycle(Cameras())  # main が cameras.toml で差し替える。既定はブラウザの Web カメラだけ
         # ブラウザ補正なしモード。画面の「ブラウザ補正なし」で ui.pc が on。AI の声はブラウザではなくモニターが鳴らす
@@ -653,6 +657,10 @@ class IdleTalkDirector:
             self._set_transcribe(bool(settings.get("transcribe")))
         if "drama_mic" in settings:
             self.drama_mic = bool(settings["drama_mic"])
+        window = int(settings.get("drama_window") or 0) if settings.get("drama") else 0
+        if window != self.drama_window:
+            log.info("drama window: %s", window or "none")
+            self.drama_window = window
         if bool(settings.get("drama")) != self.drama_on:
             self._set_drama(bool(settings.get("drama")))
         camera = bool(settings.get("camera"))  # カメラモードは画面モードの見る先を Web カメラに替えたもの
@@ -1302,8 +1310,8 @@ class IdleTalkDirector:
         if not self.drama.s.log_prompt:
             return
         body = " / ".join(line.strip() for line in text.splitlines() if line.strip()) or "(なし)"
-        if jpeg:
-            body += f" [画像あり {len(jpeg) * 3 // 4 // 1024} KB]"
+        if jpeg:  # data URL
+            body += f" [画像あり {len(jpeg.partition(',')[2]) * 3 // 4 // 1024} KB]"
         talk_log.info("DRAMA(%s): %s", kind, body)
 
     # ---- 画面 (設計書 6.5): 一言・感想の直前に 1 枚だけ求め、使ったら捨てる ----
@@ -1314,8 +1322,28 @@ class IdleTalkDirector:
             self._snap_wait[1].set_result(msg)
 
     async def _snapshot(self) -> str | None:
-        """ブラウザに今の画面を求め、JPEG の base64 を返す。無効・未接続・時間切れ・映像なしは None。"""
-        return (await self._snap())[0]
+        """一言・感想に添える今の画面の data URL。無効・未接続・時間切れ・映像なしは None。
+        ウィンドウを共有していればそのウィンドウ (ui.drama_window)、でなく [screen].follow_window なら前面のウィンドウを
+        wincap で撮る (Chrome の共有で黒く写るアプリ (TVTest 等) 向け)。撮れなければ (除外・最小化・失敗) ブラウザの共有に求める。"""
+        grab = None
+        if self.drama_window and self.window_capture is not None:
+            hwnd = self.drama_window
+            grab = lambda: self.window_capture(hwnd)  # noqa: E731
+        elif self.screen_capture is not None:
+            grab = self.screen_capture
+        if grab is not None and self.drama_vision:
+            try:
+                shot = await asyncio.to_thread(grab)
+            except Exception as e:  # noqa: BLE001  撮れなければブラウザの共有へ
+                log.warning("drama window capture failed: %s", e)
+                shot = None
+            if shot is not None:
+                self._snap_id = (self._snap_id + 1) % (1 << 31)
+                log.info("drama snapshot (window): %d KB", len(shot.png) * 3 // 4 // 1024)
+                self._keep_snap(shot.png, "png")
+                return "data:image/png;base64," + shot.png
+        jpeg = (await self._snap())[0]
+        return "data:image/jpeg;base64," + jpeg if jpeg else None
 
     async def _snap(self) -> tuple[str | None, bytes | None]:
         """ブラウザに今の画面を求め、(JPEG の base64, 縮小画像) を返す。取れなかったものは None。"""
@@ -1357,12 +1385,12 @@ class IdleTalkDirector:
             log.warning("drama snapshot save failed: %s", e)
 
     @staticmethod
-    def _with_image(prompt: str, jpeg: str | None) -> str | list[dict]:
-        """画面があれば user の content を文章 + 画像の部品にする。"""
-        if not jpeg:
+    def _with_image(prompt: str, url: str | None) -> str | list[dict]:
+        """画面 (data URL) があれば user の content を文章 + 画像の部品にする。"""
+        if not url:
             return prompt
         return [{"type": "text", "text": prompt + DRAMA_VISION_NOTE},
-                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + jpeg}}]
+                {"type": "image_url", "image_url": {"url": url}}]
 
     def _collect_vision(self, messages: list[dict], stop: threading.Event) -> str | None:
         """画像つきで失敗したら (mmproj 無しの llama-server が先に動いていた等) 画像なしで 1 回だけ呼び直す。"""

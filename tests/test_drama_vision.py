@@ -2,6 +2,7 @@
 import asyncio
 import json
 
+import pytest
 from test_drama import SETTINGS, drama_on, drama_speak, make, until
 
 from idle_talk import director as director_mod
@@ -56,6 +57,49 @@ def test_reaction_attaches_screen(tmp_path):
         assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + JPEG}}
         assert [r[0] for r in store.query("SELECT text FROM turns WHERE role='ai'")] == ["え、泣いてる！"]
         assert d._snap_wait is None  # 使ったら捨てる
+    asyncio.run(run())
+
+
+def test_reaction_uses_window_capture(tmp_path):
+    """follow_window なら前面のウィンドウを撮る (Chrome の共有で黒く写る TVTest 等)。撮れなければブラウザに求める。"""
+    from idle_talk.wincap import Shot
+
+    async def run(shot):
+        d, b, _ = make(tmp_path, ["え、泣いてる！"], ["犯人はお前だ、そうだろう。"])
+        d.drama_vision = True
+        d.screen_capture = lambda: shot
+        await react(d, b)
+        if shot is None:  # 撮れない (除外・最小化): ブラウザの共有へ
+            await until(lambda: any(m["t"] == "snap" for m in b.texts))
+            answer_snap(d, b)
+        await until(lambda: not d.spontaneous.pending)
+        return b, d.seen_[0][1]["content"][1]["image_url"]["url"]
+
+    b, url = asyncio.run(run(Shot("UE5H", bytes(1), "VIVANT - TVTest")))
+    assert not any(m["t"] == "snap" for m in b.texts) and url == "data:image/png;base64,UE5H"  # ブラウザには求めない
+    assert asyncio.run(run(None))[1] == "data:image/jpeg;base64," + JPEG
+
+
+def test_reaction_uses_shared_window(tmp_path):
+    """ウィンドウを共有したら (ui.drama_window) 前面ではなくそのウィンドウを撮る。ドラマを止めたら忘れる。"""
+    from idle_talk.wincap import Shot
+
+    async def run():
+        d, b, _ = make(tmp_path, ["え、泣いてる！"], ["犯人はお前だ、そうだろう。"])
+        d.drama_vision = True
+        asked = []
+        d.window_capture = lambda hwnd: asked.append(hwnd) or Shot("V0lO", bytes(1), "VIVANT - TVTest")
+        d.screen_capture = lambda: pytest.fail("共有したウィンドウがあれば前面は撮らない")
+        drama_on(d, b)
+        d.core.on_text(b, json.dumps({"t": "ui", "drama": True, "drama_window": 4660}))
+        drama_speak(b)
+        await until(lambda: d.drama.lines)
+        d.clock_.advance(60)
+        assert d.spontaneous_tick() == "drama"
+        await until(lambda: not d.spontaneous.pending)
+        assert asked == [4660] and d.seen_[0][1]["content"][1]["image_url"]["url"] == "data:image/png;base64,V0lO"
+        d.core.on_text(b, json.dumps({"t": "ui", "drama": False, "drama_window": 4660}))
+        assert d.drama_window == 0
     asyncio.run(run())
 
 

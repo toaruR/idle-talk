@@ -7,6 +7,17 @@ test('makeUi: drama is passed through', () => {
   assert.deepEqual(C.makeUi({ drama: true, mute: false, other: 1 }), { t: 'ui', mute: false, drama: true });
 });
 
+test('makeUi: drama_window is passed through', () => {
+  assert.deepEqual(C.makeUi({ drama: true, drama_window: 4660 }), { t: 'ui', drama: true, drama_window: 4660 });
+});
+
+test('sharedWindowId: window label gives the handle, others 0', () => {
+  assert.equal(C.sharedWindowId({ label: 'window:4660:0' }), 4660);
+  for (const label of ['screen:0:0', 'web-contents-media-stream://1:2', 'window:0:0', 'window:99999999999:0', ''])
+    assert.equal(C.sharedWindowId({ label }), 0);
+  assert.equal(C.sharedWindowId(undefined), 0);
+});
+
 test('makeUi: persona is passed through', () => {
   assert.deepEqual(C.makeUi({ persona: 'haru' }), { t: 'ui', persona: 'haru' });
 });

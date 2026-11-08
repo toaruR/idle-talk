@@ -254,6 +254,7 @@
       quiet_start: $('quiet_start').value,
       quiet_end: $('quiet_end').value,
       drama: drama !== null,
+      drama_window: (drama && drama.windowId) || 0, // 共有したウィンドウを Director が直接撮る (TVTest 等の黒い映像対策)
       screen: screen !== null,
       camera: camera !== null,
       pc,

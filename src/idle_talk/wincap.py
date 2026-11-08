@@ -85,6 +85,7 @@ class WindowCapture:
                 (u.GetWindowTextLengthW, ctypes.c_int, [wintypes.HWND]),
                 (u.GetWindowTextW, ctypes.c_int, [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]),
                 (u.IsIconic, wintypes.BOOL, [wintypes.HWND]),
+                (u.IsWindow, wintypes.BOOL, [wintypes.HWND]),
                 (u.GetWindowRect, wintypes.BOOL, [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]),
                 (u.GetSystemMetrics, ctypes.c_int, [ctypes.c_int]),
                 (u.GetDC, wintypes.HDC, [wintypes.HWND]),
@@ -149,8 +150,12 @@ class WindowCapture:
             g.DeleteObject(bmp)
             g.DeleteDC(mem)
 
-    def grab(self) -> Shot | None:
-        hwnd = self._u.GetForegroundWindow()
+    def grab(self, hwnd: int | None = None) -> Shot | None:
+        """hwnd を撮る (省略時は前面のウィンドウ)。画面に見えているままを切り抜くので、他のウィンドウが重なっていればそれが写る。"""
+        if hwnd is None:
+            hwnd = self._u.GetForegroundWindow()
+        elif not self._u.IsWindow(hwnd):  # 閉じられた
+            return None
         if not hwnd or self._u.IsIconic(hwnd):
             return None
         title = self._title(hwnd)
