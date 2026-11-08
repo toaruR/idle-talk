@@ -34,3 +34,8 @@ data/
 
 # カメラモードのソース (パスワードを含む)
 cameras.toml
+
+# 作業用の一時ファイル
+tmp/
+# Unsloth が学習時に作業フォルダへ作るコンパイル済みコード (tools/dialect/train.sh)
+unsloth_compiled_cache/
