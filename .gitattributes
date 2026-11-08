@@ -1,0 +1,9 @@
+# 追記型の知見ファイル。複数人・複数エージェントが同じ箇所(ファイル末尾やセクション末尾)に
+# 追記し続けるため、通常の3-way mergeだと衝突しやすい。union merge driverで両者の追記行を
+# 単純に和集合し、衝突マーカーの手動解消を避ける。
+# 重複・矛盾する記述はデデュープされないので、/spec-doc での定期整理は引き続き必要。
+CLAUDE.md merge=union
+AGENTS.md merge=union
+docs/**/*.md merge=union
+*.cmd text eol=crlf
+*.sh text eol=lf
