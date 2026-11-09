@@ -103,6 +103,31 @@ def test_reaction_uses_shared_window(tmp_path):
     asyncio.run(run())
 
 
+def test_reaction_uses_drama_window_title(tmp_path):
+    """[drama].window (drama_capture) があれば、画面全体の共有でも前面ではなくそのウィンドウを撮る。"""
+    from idle_talk.wincap import Shot
+
+    async def run():
+        d, b, _ = make(tmp_path, ["え、泣いてる！"], ["犯人はお前だ、そうだろう。"])
+        d.drama_vision = True
+        d.drama_capture = lambda: Shot("VFZU", bytes(1), "VIVANT - TVTest")
+        d.screen_capture = lambda: pytest.fail("[drama].window があれば前面は撮らない")
+        await react(d, b)
+        await until(lambda: not d.spontaneous.pending)
+        assert d.seen_[0][1]["content"][1]["image_url"]["url"] == "data:image/png;base64,VFZU"
+    asyncio.run(run())
+
+
+def test_load_drama_window(tmp_path):
+    from idle_talk.config import load_drama
+    p = tmp_path / "c.toml"
+    p.write_text('[drama]\nwindow = "TVTest"\n', encoding="utf-8")
+    assert load_drama(p).window == "TVTest"
+    p.write_text("[drama]\nwindow = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_drama(p)
+
+
 def test_no_screen_without_vision_or_video(tmp_path):
     async def run():
         d, b, _ = make(tmp_path, ["え、泣いてる！"], ["犯人はお前だ、そうだろう。"])

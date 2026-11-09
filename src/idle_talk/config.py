@@ -404,6 +404,9 @@ class Drama(NamedTuple):
     log_prompt: bool = False  # 一言・感想・要約に LLM へ渡した台詞とメモを talk.log に残す (既定は保存しない)
     keep_snaps: int = 0     # 一言・感想に使った画面を data/snaps に新しい順でこの枚数だけ残す (0 なら保存しない)
     mic: bool = True  # ドラマモード中もマイクを聞く。False なら聞くだけ (話しかけられないが、拾った台詞を利用者の発話と取らない)
+    # 一言・感想の画面を、タイトルにこの語を含むウィンドウから撮る (Windows のみ。例 "TVTest")。空なら使わない。
+    # ドラマモードは音のために画面全体を共有するので、見ているアプリのウィンドウはここで指定する
+    window: str = ""
 
 
 _DRAMA_RANGES = {"interval_s": (10, 3600), "gap_ms": (500, 30000), "window_s": (30, 1800),
@@ -418,6 +421,10 @@ def load_drama(path: str | Path = SETTINGS_FILE) -> Drama:
         if k in ("log_prompt", "mic"):
             if type(v) is not bool:
                 raise ValueError(f"[drama].{k} must be bool: {v!r}")
+            continue
+        if k == "window":
+            if type(v) is not str or len(v) > 100:
+                raise ValueError(f"[drama].window must be a string of up to 100 chars: {v!r}")
             continue
         lo, hi = _DRAMA_RANGES[k]
         if type(v) is not int or not lo <= v <= hi:

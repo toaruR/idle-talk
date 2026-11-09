@@ -186,7 +186,10 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
             log.warning("[screen].follow_window ignored: %s", e)
     if sys.platform == "win32":  # ドラマモードで共有したウィンドウを直接撮る (Chrome の共有映像が黒くなるアプリ向け)
         try:
-            director.window_capture = WindowCapture((), screen.width, screen.color_bits).grab
+            wc = WindowCapture((), screen.width, screen.color_bits)
+            director.window_capture = wc.grab
+            if drama.window:  # 画面全体を共有しても、見ているアプリのウィンドウだけを撮る
+                director.drama_capture = lambda: wc.grab_title(drama.window)
         except OSError as e:
             log.warning("drama window capture unavailable: %s", e)
     director.cameras = CameraCycle(load_cameras(Path(args.config).with_name(CAMERAS_FILE)))  # カメラモードのソース (設計書 6.9)

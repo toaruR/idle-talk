@@ -21,6 +21,7 @@ TITLE_MAX = 100  # LLM に渡すウィンドウタイトルの上限字数
 # idle-talk 自身の画面 (web/index.html の <title>)。ブラウザのタイトルは「idle-talk - Google Chrome」のように先頭に来る。
 # 部分一致にしないのは、VS Code 等のタイトルにもフォルダ名の idle-talk が入るため
 SELF_TITLE = "idle-talk"
+BLACK_MAX = 8  # PrintWindow の縮小画像の明るさの最大がこれ未満なら描けなかった (真っ黒) とみなし、画面から切り抜く
 
 
 class Shot(NamedTuple):
@@ -86,6 +87,9 @@ class WindowCapture:
                 (u.GetWindowTextW, ctypes.c_int, [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]),
                 (u.IsIconic, wintypes.BOOL, [wintypes.HWND]),
                 (u.IsWindow, wintypes.BOOL, [wintypes.HWND]),
+                (u.IsWindowVisible, wintypes.BOOL, [wintypes.HWND]),
+                (u.EnumWindows, wintypes.BOOL, [ctypes.c_void_p, wintypes.LPARAM]),
+                (u.PrintWindow, wintypes.BOOL, [wintypes.HWND, wintypes.HDC, wintypes.UINT]),
                 (u.GetWindowRect, wintypes.BOOL, [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]),
                 (u.GetSystemMetrics, ctypes.c_int, [ctypes.c_int]),
                 (u.GetDC, wintypes.HDC, [wintypes.HWND]),
@@ -116,12 +120,14 @@ class WindowCapture:
         self._u.GetWindowTextW(hwnd, buf, n + 1)
         return buf.value
 
-    def _rect(self, hwnd) -> tuple[int, int, int, int] | None:
-        """ウィンドウの見えている範囲 (影を除く) を仮想画面に収めて (left, top, right, bottom)。"""
+    def _rect(self, hwnd, clip: bool = True) -> tuple[int, int, int, int] | None:
+        """ウィンドウの見えている範囲 (影を除く) を (left, top, right, bottom)。clip なら仮想画面に収める。"""
         r = self._w.RECT()
         if (self._d.DwmGetWindowAttribute(hwnd, 9, self._c.byref(r), self._c.sizeof(r)) != 0  # EXTENDED_FRAME_BOUNDS
                 and not self._u.GetWindowRect(hwnd, self._c.byref(r))):
             return None
+        if not clip:
+            return (r.left, r.top, r.right, r.bottom)
         m = self._u.GetSystemMetrics
         vx, vy = m(76), m(77)  # SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN
         box = (max(r.left, vx), max(r.top, vy), min(r.right, vx + m(78)), min(r.bottom, vy + m(79)))
@@ -150,8 +156,55 @@ class WindowCapture:
             g.DeleteObject(bmp)
             g.DeleteDC(mem)
 
+    def find(self, words: str) -> int | None:
+        """タイトルに words を含む (大文字小文字は区別しない) 見えているトップレベルのウィンドウ。Z 順で前のもの。"""
+        key = words.casefold()
+        found: list[int] = []
+        proto = self._c.WINFUNCTYPE(self._w.BOOL, self._w.HWND, self._w.LPARAM)
+
+        def each(hwnd, _):
+            t = self._title(hwnd)
+            if self._u.IsWindowVisible(hwnd) and key in t.casefold() and not t.casefold().startswith(SELF_TITLE):
+                found.append(hwnd)
+                return False
+            return True
+        cb = proto(each)
+        self._u.EnumWindows(self._c.cast(cb, self._c.c_void_p), 0)
+        return found[0] if found else None
+
+    def grab_title(self, words: str) -> Shot | None:
+        """タイトルに words を含むウィンドウを撮る (前面でなく、他のウィンドウが重なっていてもよい)。無ければ None。"""
+        hwnd = self.find(words)
+        return self.grab(hwnd) if hwnd else None
+
+    def _print(self, hwnd, screen, w: int, h: int) -> tuple[bytes, bytes] | None:
+        """PrintWindow でウィンドウそのものを描かせ、見えている範囲を w x h と縮小画像にする。他のウィンドウが重なっても写る。
+        描けない・真っ黒 (描画に応じないアプリ) なら None。"""
+        r, frame = self._w.RECT(), self._rect(hwnd, clip=False)
+        if frame is None or not self._u.GetWindowRect(hwnd, self._c.byref(r)):
+            return None
+        ww, wh = r.right - r.left, r.bottom - r.top
+        g = self._g
+        mem = g.CreateCompatibleDC(screen)
+        bmp = g.CreateCompatibleBitmap(screen, ww, wh)
+        try:
+            old = g.SelectObject(mem, bmp)
+            ok = self._u.PrintWindow(hwnd, mem, 2)  # PW_RENDERFULLCONTENT: DirectX の映像も描く
+            # 影を除いた見えている枠 (frame) を、ウィンドウの左上からの位置にする
+            box = (frame[0] - r.left, frame[1] - r.top, frame[2] - r.left, frame[3] - r.top)
+            out = (self._stretch(mem, box, w, h), bgra_to_gray(self._stretch(mem, box, THUMB_W, THUMB_H))) if ok else None
+            g.SelectObject(mem, old)
+        finally:
+            g.DeleteObject(bmp)
+            g.DeleteDC(mem)
+        if out is None or max(out[1]) < BLACK_MAX:
+            return None
+        return out
+
     def grab(self, hwnd: int | None = None) -> Shot | None:
-        """hwnd を撮る (省略時は前面のウィンドウ)。画面に見えているままを切り抜くので、他のウィンドウが重なっていればそれが写る。"""
+        """hwnd を撮る (省略時は前面のウィンドウ)。指定したときは PrintWindow で描かせ (重なりも写らない)、
+        描けなければ画面に見えているままを切り抜く。前面のときは画面から切り抜く。"""
+        given = hwnd is not None
         if hwnd is None:
             hwnd = self._u.GetForegroundWindow()
         elif not self._u.IsWindow(hwnd):  # 閉じられた
@@ -168,8 +221,12 @@ class WindowCapture:
         w, h = fit(box[2] - box[0], box[3] - box[1], *self.size)
         screen = self._u.GetDC(None)
         try:
-            bgra = self._stretch(screen, box, w, h)
-            thumb = bgra_to_gray(self._stretch(screen, box, THUMB_W, THUMB_H))
+            printed = self._print(hwnd, screen, w, h) if given else None
+            if printed is not None:
+                bgra, thumb = printed
+            else:
+                bgra = self._stretch(screen, box, w, h)
+                thumb = bgra_to_gray(self._stretch(screen, box, THUMB_W, THUMB_H))
         finally:
             self._u.ReleaseDC(None, screen)
         png = bgra_to_png(posterize(bgra, self.color_bits), w, h)

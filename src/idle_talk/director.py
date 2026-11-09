@@ -312,6 +312,8 @@ class IdleTalkDirector:
         # wincap.WindowCapture.grab (Windows で main が結線)。Chrome の共有映像が黒くなるアプリ (TVTest) 向け
         self.drama_window = 0
         self.window_capture: Callable[[int], object] | None = None
+        # [drama].window のタイトルのウィンドウを撮る (wincap.WindowCapture.grab_title。main が結線)。前面・重なりに関係なく撮る
+        self.drama_capture: Callable[[], object] | None = None
         self.camera_on = False  # カメラモード (ui.camera)。screen_on と一緒に立ち、cameras のソースを順に見る
         self.cameras = CameraCycle(Cameras())  # main が cameras.toml で差し替える。既定はブラウザの Web カメラだけ
         # ブラウザ補正なしモード。画面の「ブラウザ補正なし」で ui.pc が on。AI の声はブラウザではなくモニターが鳴らす
@@ -1329,6 +1331,8 @@ class IdleTalkDirector:
         if self.drama_window and self.window_capture is not None:
             hwnd = self.drama_window
             grab = lambda: self.window_capture(hwnd)  # noqa: E731
+        elif self.drama_capture is not None:  # [drama].window のタイトルのウィンドウ
+            grab = self.drama_capture
         elif self.screen_capture is not None:
             grab = self.screen_capture
         if grab is not None and self.drama_vision:
