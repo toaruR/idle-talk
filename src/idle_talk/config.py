@@ -171,6 +171,42 @@ def load_voice(path: str | Path = SETTINGS_FILE) -> dict[str, float]:
     return out
 
 
+class VoiceFx(NamedTuple):
+    """[voice_fx]: 合成した声に掛けるエフェクト (voice_fx.apply)。各効果は既定値のままなら掛けない。"""
+    on: bool = False
+    formant: float = 1.0          # 声の響き (フォルマント) の倍率。1 で無効、上げると小さく機械的、下げると太い
+    ring_hz: float = 0.0          # リングモジュレーションの周波数 (Hz)。0 で無効
+    ring_mix: float = 0.5         # リングモジュレーションの混ぜる割合
+    comb_ms: float = 0.0          # コムフィルタ / フランジャーの遅れ (ms)。0 で無効
+    comb_feedback: float = 0.5    # コムフィルタの帰還 (響きの強さ)。flanger_hz > 0 では使わない
+    comb_mix: float = 0.5         # コムフィルタ / フランジャーの混ぜる割合
+    flanger_hz: float = 0.0       # 遅れを揺らす速さ (Hz)。0 なら固定の遅れ (コムフィルタ)
+    flanger_depth_ms: float = 1.0  # 遅れを揺らす幅 (ms)
+
+
+# [voice_fx] の数値キー -> (下限, 上限)
+VOICE_FX_RANGES: dict[str, tuple[float, float]] = {
+    "formant": (0.5, 2.0), "ring_hz": (0.0, 2000.0), "ring_mix": (0.0, 1.0),
+    "comb_ms": (0.0, 50.0), "comb_feedback": (0.0, 0.95), "comb_mix": (0.0, 1.0),
+    "flanger_hz": (0.0, 10.0), "flanger_depth_ms": (0.0, 10.0),
+}
+
+
+def load_voice_fx(path: str | Path = SETTINGS_FILE) -> VoiceFx:
+    """[voice_fx] を読む。無ければ既定 (オフ)。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "voice_fx", VoiceFx._fields)
+    if "on" in raw and type(raw["on"]) is not bool:
+        raise ValueError(f"[voice_fx].on must be bool: {raw['on']!r}")
+    for k, (lo, hi) in VOICE_FX_RANGES.items():
+        if k not in raw:
+            continue
+        v = raw[k]
+        if type(v) not in (int, float) or not lo <= v <= hi:
+            raise ValueError(f"[voice_fx].{k} must be a number in [{lo}, {hi}]: {v!r}")
+        raw[k] = float(v)
+    return VoiceFx(**raw)
+
+
 def load_spontaneous(path: str | Path = SETTINGS_FILE) -> dict:
     """[spontaneous] (on / interval_s / quiet_start / quiet_end / radio) を Config の引数名で返す (指定キーのみ)。
 

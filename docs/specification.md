@@ -237,6 +237,19 @@ flowchart LR
 - 不正な値は警告し、前の値を保つ。
 - `--speaker` を指定したときは、ファイルの話者で上書きしない。
 
+声のエフェクト (`[voice_fx]`、`config.load_voice_fx`、`voice_fx.apply`。2026-11-13):
+
+- `TtsSettingsReloader.synthesize` が、合成した WAV にエフェクトを掛けてから返す。ブラウザの再生にも、ブラウザ補正なしモードのモニターにも同じ声が届く。
+- `on = false` なら何もしない。各効果は既定値 (`formant = 1.0`、`ring_hz = 0`、`comb_ms = 0`) なら掛けない。
+- 順は フォルマントシフト → リングモジュレーション → コムフィルタ / フランジャー。
+- フォルマントシフト：STFT (1024 点、hop 256) の各フレームで、ケプストラム (次数 30) で包絡を取り出し、包絡だけを `formant` 倍に伸縮する。声の高さは変わらない。
+- リングモジュレーション：`x * ((1 - ring_mix) + ring_mix * sin(2π ring_hz t))`。
+- コムフィルタ：`y[n] = x[n] + comb_feedback * y[n - d]` (`d` = `comb_ms`)。共鳴の山を `1 - comb_feedback` 倍して戻す。`flanger_hz > 0` なら帰還なしで、遅れを `comb_ms`〜`comb_ms + flanger_depth_ms` で揺らす。
+- 出力のピークが元より大きくなれば、元のピーク (上限 0.98) に揃える。
+- 16bit モノラル以外の WAV・読めない WAV は、そのまま返す (warning)。
+- 5 秒の声の処理は 0.5 秒未満 (テストで検査)。
+- `[voice_fx]` も保存すれば次の発話から効く。不正な値は `[tts]` と同じく警告して前の値を保つ。起動時に不正なら `ValueError` で起動しない。
+
 画面の「声」選択欄:
 
 - `main` は `/config.json` を配信するときに、AivisSpeech の `GET /speakers` を取得する (`SpeakerChoices`、`TtsClient.speakers`)。

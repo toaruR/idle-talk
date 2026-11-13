@@ -19,7 +19,8 @@ from pathlib import Path
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
                      load_asr, load_drama, load_pc, load_screen, load_search, load_topics, load_transcribe, load_vad,
-                     load_voice, load_voice_id)
+                     load_voice, load_voice_fx, load_voice_id, VoiceFx)
+from . import voice_fx
 from .director import IdleTalkDirector
 from .drama import DramaListener
 from .history import TALK_LOG_FILE, talk_log
@@ -98,15 +99,17 @@ class SpeakerChoices:
 
 
 class TtsSettingsReloader:
-    """設定ファイルの更新時刻が変わったら [tts] (話者・声パラメータ) を読み直して tts に反映する。
+    """設定ファイルの更新時刻が変わったら [tts] (話者・声パラメータ) と [voice_fx] を読み直して反映する。
 
     合成のたびに呼ぶので、ファイルを保存すれば再起動なしで次の発話から効く。
     不正な値は警告して前の値を使い続ける。--speaker 指定時は話者を上書きしない。
     話者はファイルの speaker が変わったときだけ反映する (声パラメータの編集で画面の選択を戻さない)。"""
 
     def __init__(self, tts: TtsClient, path: str | Path, fixed_speaker: bool = False,
-                 speaker_ids: frozenset[int] | SpeakerChoices = frozenset()) -> None:
+                 speaker_ids: frozenset[int] | SpeakerChoices = frozenset(),
+                 fx: VoiceFx = VoiceFx()) -> None:
         self.tts = tts
+        self.fx = fx  # 合成後に掛けるエフェクト (voice_fx.apply)
         self.path = Path(path)
         self.fixed_speaker = fixed_speaker
         self.speaker_ids = speaker_ids  # AivisSpeech の話者一覧。空なら検査しない (一覧取得失敗時)
@@ -127,13 +130,16 @@ class TtsSettingsReloader:
         try:
             speaker = self._file_speaker if self.fixed_speaker else load_speaker(self.path)
             voice = load_voice(self.path)
+            fx = load_voice_fx(self.path)
         except (ValueError, OSError, tomllib.TOMLDecodeError) as e:
             log.warning("tts settings not reloaded (keeping previous): %s", e)
             return False
         if speaker != self._file_speaker:
             self._file_speaker = self.tts.speaker = speaker
         self.tts.voice = voice
-        log.info("tts settings reloaded: speaker=%d voice=%s", self.tts.speaker, voice)
+        self.fx = fx
+        log.info("tts settings reloaded: speaker=%d voice=%s fx=%s", self.tts.speaker, voice,
+                 fx._asdict() if fx.on else "off")
         return True
 
     def set_speaker(self, speaker: int) -> None:
@@ -146,7 +152,7 @@ class TtsSettingsReloader:
 
     def synthesize(self, text: str) -> bytes:
         self.reload_if_changed()
-        return self.tts.synthesize(text)
+        return voice_fx.apply(self.tts.synthesize(text), self.fx)
 
 
 def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> IdleTalkDirector:
@@ -159,7 +165,7 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
         log.warning("tts warmup failed: %s", args.tts_url)
     asr = AsrClient(_asr_send(args.asr_url), cfg)
     reloader = TtsSettingsReloader(tts, args.config, fixed_speaker=args.speaker_from_cli,
-                                   speaker_ids=args.speakers)
+                                   speaker_ids=args.speakers, fx=load_voice_fx(args.config))
     vad = load_vad(args.config)
     director = IdleTalkDirector(store, llm.stream_chat, reloader.synthesize, lambda: None,
                                 EnergyVad(vad.threshold, onset_frames=vad.onset_ms // FRAME_MS, adaptive=vad.adaptive,
