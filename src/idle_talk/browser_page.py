@@ -15,6 +15,7 @@ import webbrowser
 from collections.abc import Callable
 from urllib.parse import quote
 
+from .talk_length import ANSWER_SENTENCES, strip_chat_note
 from .wincap import excluded
 
 log = logging.getLogger("idle_talk.browser_page")
@@ -94,10 +95,10 @@ def body_excerpt(text: str, title: str = "", max_chars: int = PAGE_ASK_MAX_CHARS
 def page_messages(messages: list[dict], page: dict, turns: int, image: str | None = None) -> list[dict]:
     """読んだページ (本文。無ければ image = 画面の data URL) を最後の利用者発話に添えて答えさせるメッセージ。
     履歴は turns に絞る。"""
-    system = messages[:1] if messages and messages[0]["role"] == "system" else []
+    system = strip_chat_note(messages[:1] if messages and messages[0]["role"] == "system" else [])
     rest = messages[len(system):][-turns:]
     last = rest.pop() if rest and rest[-1]["role"] == "user" else {"role": "user", "content": ""}
-    rule = ("この内容を踏まえて、利用者の求めに話し言葉で 2〜4 文で答えてください。意見を求められたら自分の考えも言ってください。"
+    rule = (f"この内容を踏まえて、利用者の求めに話し言葉で {ANSWER_SENTENCES}で答えてください。意見を求められたら自分の考えも言ってください。"
             "{src}に無いことは推測せず、URL は書かないでください)")
     if image is None:
         ref = (f"(利用者がブラウザで見ているページ「{page['title']}」の本文の抜粋です。" + rule.format(src="抜粋")

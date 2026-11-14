@@ -622,7 +622,7 @@ def test_overlapped_voice_unlike_named_speaker_is_discarded(tmp_path):
 def test_no_name_question_while_watching(tmp_path):
     d, b, _ = make(tmp_path, [], [])
     calls = []
-    d._chat_messages = lambda ask=True: calls.append(ask) or []
+    d._chat_messages = lambda ask=True, length=False: calls.append(ask) or []
     drama_on(d, b)
     d._text = "こんにちは"
     asyncio.run(d._respond())

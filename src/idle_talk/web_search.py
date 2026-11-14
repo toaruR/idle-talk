@@ -20,6 +20,8 @@ from collections.abc import Callable
 from functools import lru_cache
 from importlib.resources import files
 
+from .talk_length import ANSWER_SENTENCES, strip_chat_note
+
 log = logging.getLogger("idle_talk.web_search")
 
 DDG_URL = "https://lite.duckduckgo.com/lite/?kl=jp-jp&q="
@@ -295,13 +297,13 @@ def answer_messages(messages: list[dict], query: str, results: list[dict],
                     today: datetime.date | None = None) -> list[dict]:
     """検索結果を最後の利用者発話に添えて答えさせるメッセージ。履歴は ANSWER_TURNS に絞る。"""
     today = today or datetime.date.today()
-    system = messages[:1] if messages and messages[0]["role"] == "system" else []
+    system = strip_chat_note(messages[:1] if messages and messages[0]["role"] == "system" else [])
     turns = messages[len(system):][-ANSWER_TURNS:]
     last = turns.pop() if turns and turns[-1]["role"] == "user" else {"role": "user", "content": ""}
     body = format_results(results)
     if body:
         ref = (f"(Web で「{query}」を検索した結果です。今日は{today.year}年{today.month}月{today.day}日。"
-               "この結果に書かれている内容だけを根拠に、話し言葉で 2〜4 文で答えてください。"
+               f"この結果に書かれている内容だけを根拠に、話し言葉で {ANSWER_SENTENCES}で答えてください。"
                "数値は結果のとおりに言い、日時が分かれば添えてください。結果に無いことは推測せず、分からないと言ってください。"
                + ("X の投稿は個人の発言なので事実と決めつけず、「〜という声がある」のように伝えてください。"
                   if any(r.get("post") for r in results) else "")

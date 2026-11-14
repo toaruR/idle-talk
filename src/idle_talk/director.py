@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .backchannel import Backchannel, event_payload
+from .talk_length import chat_note
 from .camera import CameraCycle, Cameras, Source
 from .camera import describe as describe_camera
 from .camera import grab as grab_camera
@@ -74,7 +75,8 @@ CARD_RULES = "前の話の情景や言い回し (天気や音など) は繰り�
 RADIO_CARD_PROMPT = ("(利用者は聞いているだけで返事はしません。ラジオのパーソナリティとして{topic}を紹介してください。"
                      + CARD_RULES + "自分の感想を交えて 3〜5 文で話し、質問や呼びかけで返事を求めないでください)")
 CARD_PROMPT = ("(利用者は黙っています。{topic}を話題に話しかけてください。"
-               + CARD_RULES + "自分の感想を一言添えて 2〜3 文で話してください。"
+               + CARD_RULES + "最初は見出しの要点を短く伝え、自分の感想を一言添えて 1〜2 文で話してください。"
+               "詳しい中身は利用者が興味を示してから話してください。"
                "感想で終える回と、話の流れで気になることを自然に一つ尋ねる回を織り交ぜてください)")
 FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 # ブラウザ (web/player.js MAX_LOOKAHEAD) が再生中チャンクの後ろに保持する数。超えて送ると dropped で捨てられる
@@ -1205,7 +1207,7 @@ class IdleTalkDirector:
             prompt = RADIO_PROMPT.format(topic=topic)
         else:
             prompt = ("(利用者は黙っています。これまでの会話と違う話題を自分から振ってください。"
-                      f"例えば{topic}について、自分の話を一言添えて 2〜3 文で話しかけてください。"
+                      f"例えば{topic}について、自分の話を一言添えて 1〜2 文で短く話しかけてください。"
                       "感想で終える回と、話の流れで気になることを自然に一つ尋ねる回を織り交ぜてください)")
         messages.append({"role": "user", "content": prompt})
         self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
@@ -1721,8 +1723,9 @@ class IdleTalkDirector:
             return MODE_PC_PROMPT
         return ""
 
-    def _chat_messages(self, turns: int | None = None, ask: bool = False) -> list[dict]:
-        """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。"""
+    def _chat_messages(self, turns: int | None = None, ask: bool = False, length: bool = False) -> list[dict]:
+        """system + 履歴。turns を指定すると直近 turns 件だけ渡す。ask なら名前の分からない相手に名前を尋ねさせる。
+        length なら最後の利用者発話に合わせた返答の長さの目安を足す (通常応答のみ。talk_length)。"""
         rows = history_window(self.store, self.cfg)
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in rows if t["text"]]
@@ -1731,6 +1734,9 @@ class IdleTalkDirector:
         lines = self.drama.context_text() if self.drama_on else ""
         if lines:
             system += DRAMA_CONTEXT_PROMPT.format(lines=lines)
+        if length:
+            last = next((t["text"] for t in reversed(rows) if t["role"] != "ai" and t["text"]), "")
+            system += chat_note(last)
         return [{"role": "system", "content": system}] + (
             history[-turns:] if turns else history)
 
@@ -1785,7 +1791,7 @@ class IdleTalkDirector:
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:
         # ブラウザ補正なしモード: 名前の質問は相手に答えさせてしまう。ドラマモード: 動画の声は名乗らない (拾った台詞に尋ねた。2026-10-19)
-        messages = self._chat_messages(ask=not (self.pc_on or self.drama_on))
+        messages = self._chat_messages(ask=not (self.pc_on or self.drama_on), length=True)
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current

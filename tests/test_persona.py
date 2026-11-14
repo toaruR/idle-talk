@@ -302,3 +302,23 @@ def test_persona_lora_must_be_bool():
     with pytest.raises(ValueError):
         parse_personas({"a": {"prompt": "p", "lora": "yes"}})
     assert parse_personas({"a": {"prompt": "p"}})[0][0].lora is False
+
+
+def test_length_note_only_for_normal_response(tmp_path):
+    """通常応答 (length=True) だけ、最後の利用者発話に合わせた長さの目安を system の末尾に足す。"""
+    from idle_talk.talk_length import CHAT_LONG_NOTE, CHAT_SHORT_NOTE
+    clock = FakeClock()
+    store = Store(tmp_path / "t.db", db_backup=False)
+    d = IdleTalkDirector(store, lambda m: iter(()), lambda text: b"RIFF....WAVE", lambda: None, EnergyVad(),
+                         AsrClient(mock_asr_send(clock)), clock=clock, now_ms=lambda: 1000)
+    try:
+        store.add_turn(1, "user", "寒いね", 1)
+        assert d._chat_messages(length=True)[0]["content"].endswith(CHAT_SHORT_NOTE)
+        system = d._chat_messages()[0]["content"]  # 自発発話など
+        assert CHAT_SHORT_NOTE not in system and CHAT_LONG_NOTE not in system
+        store.add_turn(2, "ai", "ほんとね。", 1)
+        store.add_turn(3, "user", "なんで冬は寒いの", 1)
+        assert d._chat_messages(length=True)[0]["content"].endswith(CHAT_LONG_NOTE)
+    finally:
+        d.close()
+        store.close()
