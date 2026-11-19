@@ -179,3 +179,14 @@ color_bits = 5        # follow_window の PNG の色数 (各色 4〜8 ビット)
 monitor = ""        # AI の声を鳴らす出力機器の名前 (部分一致。空なら Windows の既定の再生機器)
 mic = ""            # マイクの入力機器の名前 (部分一致。空なら Windows の既定の録音機器)。モード中はブラウザのマイクを使わない
                     # (Chrome のエコー除去が、ブラウザの ChatGPT の声まで消すため)
+
+[chatgpt]
+# 呼びかけ (ウェイクワード) で ChatGPT の音声会話を始める。会話の間、idle-talk は聞かず話さない。
+# 専用プロファイル (data/chatgpt-chrome) の Chrome を開くので、初回だけそのウィンドウで ChatGPT にログインする。
+on = true
+phrases = ["チャッピー", "チャピー", "ジャッピー"]  # 発話がこれだけ (前後 2 字まで: 「ねえチャッピー」「チャッピーさん」) のときに起こす。聞き違いの表記も足せる
+chrome = ""          # chrome.exe のパス。空なら既定のインストール先
+port = 9333          # Chrome の remote debugging のポート (127.0.0.1 のみ)
+first_timeout_s = 20 # 始めてから誰も話さなければ終える (5〜300 秒)
+idle_timeout_s = 30  # 話した後、声も ChatGPT の画面の更新も無いまま経ったら終える (5〜600 秒)
+max_s = 900          # 1 回の会話の上限 (60〜7200 秒)

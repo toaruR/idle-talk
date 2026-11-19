@@ -159,6 +159,31 @@
   const NAMES = { idle: '待機', user_speaking: 'ユーザー発話中', eot_check: '終話確認中',
     preparing: '返答準備中', ai_playing: 'AI再生中', interrupt_check: '割り込み確認中', rest: '休止' };
   const $ = (id) => document.getElementById(id);
+  // ChatGPT の音声会話を始められなかった理由 (handoff.reason)。会話の終わり (idle / closed / max) は表示しない
+  const HANDOFF_FAIL = {
+    login: 'ChatGPT にログインしてください（専用の Chrome のウィンドウ）',
+    needs_action: 'ChatGPT の画面に確認が出ています（専用の Chrome のウィンドウ）',
+    unsupported: 'ChatGPT の音声ボタンが見つかりませんでした',
+    timeout: 'ChatGPT の音声会話を始められませんでした（時間切れ）',
+    no_browser: 'ChatGPT 用の Chrome を開けませんでした',
+    lost: 'ChatGPT のタブが閉じられました',
+    error: 'ChatGPT への引き渡しに失敗しました',
+  };
+  // 短い 2 音の合図。呼びかけを聞いたら上がる音、戻ったら下がる音、失敗は低い音
+  function chime(actx, freqs) {
+    if (!actx) return;
+    try {
+      freqs.forEach((f, i) => {
+        const t = actx.currentTime + i * 0.12, o = actx.createOscillator(), g = actx.createGain();
+        o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.2, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+        o.connect(g).connect(actx.destination);
+        o.start(t); o.stop(t + 0.12);
+      });
+    } catch (e) { console.warn('chime failed', e); }
+  }
   let client = null;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
@@ -358,6 +383,11 @@
         onState: (m) => { $('state').textContent = C.stateLabel(m, NAMES); $('state').dataset.state = m.state; },
         onError: (m) => showError(`[${m.code}] ${m.message}`, m.code),
         onSearch: (m) => { $('search').textContent = m.active ? `Web で「${m.query}」を調べています…` : ''; },
+        onHandoff: (m) => {  // 呼びかけで ChatGPT の音声会話へ引き渡した (設計書 6.11)
+          $('search').textContent = m.active ? 'ChatGPT と会話中（idle-talk は聞いていません）'
+            : (HANDOFF_FAIL[m.reason] || '');
+          chime(session.actx, m.active ? [660, 880] : (HANDOFF_FAIL[m.reason] ? [330, 247] : [880, 660]));
+        },
         onLinks: (m) => showLinks(m.items),
         onTranscript: showTranscript,
         onPartial: showPartial,

@@ -27,6 +27,7 @@ from pathlib import Path
 from .backchannel import Backchannel, event_payload
 from .talk_length import chat_note
 from .camera import CameraCycle, Cameras, Source
+from .chatgpt_voice import OK_RESULTS, ChatgptVoice
 from .camera import describe as describe_camera
 from .camera import grab as grab_camera
 from .config import Config, Drama, Screen, Transcribe
@@ -83,6 +84,8 @@ FRAME_BYTES = 640  # 20ms @ 16kHz s16le
 DOWN_LOOKAHEAD = 1
 MEM_BATCH = 4  # 記憶抽出に 1 回で渡す利用者発話の上限
 ECHO_SUPPRESSED_KIND = "echo_suppressed"  # AI 再生中に拾った自声の認識結果を捨てた 1 回 = 1 行
+HANDOFF_KIND = "handoff"  # ChatGPT の音声会話への引き渡しの開始と終了 (設計書 6.11)
+HANDOFF_TAIL_S = 2.0  # 引き渡しから戻った直後に上りの音を捨て続ける秒数
 PC_ECHO_KIND = "pc_echo_suppressed"  # ブラウザ補正なしモードで AI の声の最中に始まった発話を捨てた 1 回 = 1 行
 # ドラマモード (設計書 6.5)
 DRAMA_ECHO_KIND = "drama_echo_suppressed"  # マイクが拾ったドラマの台詞を捨てた 1 回 = 1 行
@@ -344,6 +347,11 @@ class IdleTalkDirector:
         self._changes = ChangeDetector()
         self._mic_ref = (0, 0.0)  # (フレーム番号, そのフレームを受けた時刻)。talk.log の時刻をマイクの音の位置から出す
         self.wall = time.time
+        # 呼びかけで ChatGPT の音声会話へ引き渡す (設計書 6.11)。main が [chatgpt].on のときだけ結線する
+        self.chatgpt: ChatgptVoice | None = None
+        self.handoff_on = False  # 引き渡し中: 休止して上りの音を捨てる (聞かない・話さない)
+        self._handoff_task: asyncio.Task | None = None
+        self._handoff_tail = 0.0  # 戻った直後もこの時刻までは上りの音を捨てる (ChatGPT の最後の声・終了音)
 
     # ---- M1 計測 (設計書 11.1): 1 ターン 5 段階を events に kind 別で記録 ----
     def _m_mark(self, stage: str) -> None:
@@ -493,7 +501,7 @@ class IdleTalkDirector:
         self._bc_speaking, self._bc_silence_ms, self._bc_active = False, 0, None
 
     def _on_hello(self) -> None:
-        if self.fsm.ctx.state is State.REST and not self.fsm.ctx.muted:
+        if self.fsm.ctx.state is State.REST and not self.fsm.ctx.muted and not self.handoff_on:
             self.fsm.enqueue(Event(Ev.WAKE))
             self._pump()
         self._last_op = self.clock()
@@ -506,6 +514,8 @@ class IdleTalkDirector:
         if ctx.state is State.IDLE:  # 沈黙は接続時から測る (接続前の時間で即座に話しかけない)
             self._idle_since = self.clock()
         self._emit({"t": "state", "state": ctx.state.value, "muted": ctx.muted})
+        if self.handoff_on:  # 引き渡し中に画面を開き直した
+            self._emit({"t": "handoff", "active": True, "reason": ""})
 
     def _send_state(self, ctx: Ctx) -> None:
         if ctx.state is not State.IDLE:
@@ -599,6 +609,10 @@ class IdleTalkDirector:
     def _on_up_audio(self, seq: int, pcm: bytes) -> None:
         if not self.core.hello_done:
             return
+        if self.handoff_on or self.clock() < self._handoff_tail:  # ChatGPT と会話中: 音は VAD にも ASR にも入れない
+            if self.handoff_on and not is_drama(seq):
+                self._handoff_hear(pcm)
+            return
         if is_drama(seq):  # 共有したタブの音: マイクの VAD・FSM・相槌・E6 には入れない
             if self.drama_on:
                 for i in range(0, len(pcm), FRAME_BYTES):
@@ -679,7 +693,7 @@ class IdleTalkDirector:
         muted = bool(settings.get("mute"))
         if muted and not self.fsm.ctx.muted:
             self.fsm.enqueue(Event(Ev.MUTE))
-        elif not muted and (self.fsm.ctx.muted or self.fsm.ctx.state is State.REST):
+        elif not muted and not self.handoff_on and (self.fsm.ctx.muted or self.fsm.ctx.state is State.REST):
             self.fsm.enqueue(Event(Ev.WAKE))  # 無操作・連続失敗による休止もミュートなしの操作で解除する
         self._pump()
 
@@ -725,6 +739,9 @@ class IdleTalkDirector:
             self.store.add_event(self.now_ms(), self.epoch.current, SHORT_KIND,
                                  json.dumps({"utterance_id": uid, "text": text}, ensure_ascii=False))
             return False
+        if self._wants_handoff(text):
+            self._start_handoff(uid, text)
+            return False  # 応答しない (休止に入ってから DISCARDED が届くので待機には戻らない)
         if self.transcribe_on:
             self._transcribe(uid, text)
             return False  # 応答しない (Ingress が DISCARDED を送り、待機に戻る)
@@ -750,6 +767,61 @@ class IdleTalkDirector:
         if len(text) >= MIN_UTTERANCE_CHARS:  # 古い分は捨て、直近 MEM_BATCH 発話だけ抽出に回す
             self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text)]
         return True
+
+    # ---- ChatGPT への引き渡し (設計書 6.11) ----
+    def _wants_handoff(self, text: str) -> bool:
+        """呼びかけか。文字起こし・ブラウザ補正なしモードでは起こさない (テレビ・相手の AI の声で起きる)。"""
+        return (self.chatgpt is not None and not self.handoff_on and not (self.transcribe_on or self.pc_on)
+                and self.chatgpt.matches(text))
+
+    def _start_handoff(self, uid: int, text: str) -> None:
+        """鳴っている声・作りかけの話しかけを取消して休止し (ChatGPT の開始音より先に黙る)、音声会話を始める。"""
+        log.info("wake: utterance %d %r -> chatgpt", uid, text)
+        talk_log.info("HANDOFF: %s", text)
+        self.store.add_event(self.now_ms(), self.epoch.current, HANDOFF_KIND,
+                             json.dumps({"utterance_id": uid, "text": text, "phase": "start"}, ensure_ascii=False))
+        self.handoff_on = True
+        self.fsm.enqueue(Event(Ev.HANDOFF))
+        self._pump()
+        self._emit({"t": "handoff", "active": True, "reason": ""})
+        self._handoff_task = asyncio.get_running_loop().create_task(self._handoff())
+
+    async def _handoff(self) -> None:
+        reason = "error"
+        try:
+            result = await self.chatgpt.start()
+            log.info("chatgpt: start -> %s", result)
+            reason = await self.chatgpt.session() if result in OK_RESULTS else result
+        except asyncio.CancelledError:
+            reason = "cancelled"
+            raise
+        except Exception:  # 引き渡しの失敗で休止のまま残らない
+            log.exception("chatgpt: handoff failed")
+        finally:
+            self._end_handoff(reason)
+
+    def _end_handoff(self, reason: str) -> None:
+        if not self.handoff_on:
+            return
+        log.info("chatgpt: handoff ended (%s)", reason)
+        talk_log.info("HANDOFF: end (%s)", reason)
+        self.store.add_event(self.now_ms(), self.epoch.current, HANDOFF_KIND,
+                             json.dumps({"phase": "end", "reason": reason}, ensure_ascii=False))
+        self.handoff_on = False
+        self._handoff_tail = self.clock() + HANDOFF_TAIL_S
+        self._last_op = self.clock()
+        self._emit({"t": "handoff", "active": False, "reason": reason})
+        if not self.fsm.ctx.muted:
+            self.fsm.enqueue(Event(Ev.WAKE))
+            self._pump()
+
+    def _handoff_hear(self, pcm: bytes) -> None:
+        """会話中のマイクの音量だけを見て、無操作の締め切りを延ばす (認識はしない)。"""
+        threshold = getattr(self.ingress.vad, "current_threshold", None)
+        if self.chatgpt is None or threshold is None:
+            return
+        for i in range(0, len(pcm), FRAME_BYTES):
+            self.chatgpt.hear(rms(pcm[i:i + FRAME_BYTES]), threshold)
 
     def _drama_echo(self, uid: int, text: str) -> str | None:
         """マイクの認識結果がドラマの回り込みなら理由 (level / text / voice)。ドラマの音と重なった発話だけ音量と声で見る。"""
@@ -1171,7 +1243,7 @@ class IdleTalkDirector:
         """定期呼び出し。'rest' (IDLE_TIMEOUT 遷移) / 'spontaneous' (発火) / None を返す。"""
         now = self.clock() if now is None else now
         idle = self.fsm.ctx.state is State.IDLE
-        if self.transcribe_on:  # 文字起こし中は AI は話さず、長く黙っていても休止しない
+        if self.transcribe_on or self.handoff_on:  # 文字起こし・ChatGPT と会話中は AI は話さず、休止の判定もしない
             return None
         if self.drama_on:  # 見ている間は黙って長く過ごすので、無操作休止と普段の自発発話の代わりに一言の判定だけ
             return self._drama_tick(idle)
