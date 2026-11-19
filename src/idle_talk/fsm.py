@@ -34,6 +34,7 @@ class Ev(str, Enum):
     IDLE_TIMEOUT = "idle_timeout"
     FAILURES = "failures"
     WAKE = "wake"  # power_save_released
+    HANDOFF = "handoff"  # 呼びかけで ChatGPT の音声会話に引き渡す (休止。ミュートとは別)
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ def _A(name: str, epoch: int | None = None) -> Action:
     return Action(name, epoch)
 
 
-_REST_EVENTS = (Ev.MUTE, Ev.IDLE_TIMEOUT, Ev.FAILURES)
+_REST_EVENTS = (Ev.MUTE, Ev.IDLE_TIMEOUT, Ev.FAILURES, Ev.HANDOFF)
 _IN_FLIGHT = (State.PREPARING, State.AI_PLAYING, State.INTERRUPT_CHECK)
 
 

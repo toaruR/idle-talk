@@ -19,7 +19,8 @@ from pathlib import Path
 from .clients import AsrClient, LlmClient, TtsClient
 from .config import (SETTINGS_FILE, Config, load_llm_launch, load_ports, load_speaker, load_spontaneous,
                      load_asr, load_drama, load_pc, load_screen, load_search, load_topics, load_transcribe, load_vad,
-                     load_voice, load_voice_fx, load_voice_id, VoiceFx)
+                     load_voice, load_voice_fx, load_voice_id, VoiceFx, load_chatgpt)
+from .chatgpt_voice import PROFILE_DIR as CHATGPT_PROFILE, ChatgptVoice, ChromeHost
 from . import voice_fx
 from .director import IdleTalkDirector
 from .drama import DramaListener
@@ -181,6 +182,9 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                    cfg.MIN_SEG)
     director.snap_dir = data_dir / SNAP_DIR
     pc = load_pc(args.config)  # ブラウザ補正なしモード: AI の声はモニターが [pc].monitor の機器に鳴らす
+    gpt = load_chatgpt(args.config)  # 呼びかけで ChatGPT の音声会話を始める (設計書 6.11)
+    if gpt.on:
+        director.chatgpt = ChatgptVoice(gpt, ChromeHost(gpt, data_dir / CHATGPT_PROFILE))
     director.open_monitor = lambda: open_device(pc.monitor)
     director.open_mic = lambda: open_input(pc.mic)  # マイクもブラウザを通さず録る (Chrome のエコー除去が相手の声を消す)
     screen = load_screen(args.config)
@@ -395,6 +399,8 @@ async def _run(director: IdleTalkDirector, port: int, sup: LlmSupervisor | None 
         tasks.append(loop.create_task(topic_loop(director.topic_worker, topic_interval_s)))
     if stop_file is not None:
         tasks.append(loop.create_task(stop_watch(stop_file, stopped.set)))
+    if director.chatgpt is not None:  # 専用の Chrome と ChatGPT のタブを先に開いておく (呼びかけからの開始を速くする)
+        tasks.append(loop.create_task(director.chatgpt.warm()))
     try:
         await stopped.wait()  # Ctrl+C はキャンセルで抜ける
     finally:

@@ -513,3 +513,39 @@ def load_pc(path: str | Path = SETTINGS_FILE) -> Pc:
         if type(v) is not str or len(v) > 100:
             raise ValueError(f"[pc].{k} must be a string of up to 100 chars: {v!r}")
     return Pc(**raw)
+
+
+class Chatgpt(NamedTuple):
+    """[chatgpt]: 呼びかけ (ウェイクワード) で ChatGPT の音声会話を始める。専用プロファイルの Chrome を CDP で操作する。"""
+    on: bool = False
+    phrases: tuple[str, ...] = ("チャッピー",)  # 呼びかけ。発話がこれだけ (前後 2 字まで) のときに起こす
+    chrome: str = ""  # chrome.exe のパス。空なら既定のインストール先を探す
+    port: int = 9333  # CDP (remote debugging) のポート。127.0.0.1 だけで待ち受ける
+    url: str = "https://chatgpt.com/"
+    first_timeout_s: int = 20  # 始めてから誰も話さなければ終える
+    idle_timeout_s: int = 30  # 話した後、声も画面の更新も無いまま経ったら終える
+    max_s: int = 900  # 1 回の会話の上限
+
+
+def load_chatgpt(path: str | Path = SETTINGS_FILE) -> Chatgpt:
+    """[chatgpt] を読む。無ければ既定値。型違い・範囲外・未知キーは ValueError。"""
+    raw = _read_section(path, "chatgpt", Chatgpt._fields)
+    if type(raw.get("on", False)) is not bool:
+        raise ValueError(f"[chatgpt].on must be a bool: {raw['on']!r}")
+    phrases = raw.get("phrases", list(Chatgpt._field_defaults["phrases"]))
+    if (type(phrases) is not list or not 1 <= len(phrases) <= 10
+            or any(type(p) is not str or not 2 <= len(p.strip()) <= 20 for p in phrases)):
+        raise ValueError(f"[chatgpt].phrases must be 1-10 strings of 2-20 chars: {phrases!r}")
+    raw["phrases"] = tuple(p.strip() for p in phrases)
+    for k in ("chrome", "url"):
+        v = raw.get(k, Chatgpt._field_defaults[k])
+        if type(v) is not str or len(v) > 260:
+            raise ValueError(f"[chatgpt].{k} must be a string of up to 260 chars: {v!r}")
+    if not raw.get("url", Chatgpt._field_defaults["url"]).startswith("https://"):
+        raise ValueError(f"[chatgpt].url must start with https://: {raw['url']!r}")
+    for k, lo, hi in (("port", 1024, 65535), ("first_timeout_s", 5, 300), ("idle_timeout_s", 5, 600),
+                      ("max_s", 60, 7200)):
+        v = raw.get(k, Chatgpt._field_defaults[k])
+        if type(v) is not int or not lo <= v <= hi:
+            raise ValueError(f"[chatgpt].{k} must be an int in {lo}..{hi}: {v!r}")
+    return Chatgpt(**raw)
