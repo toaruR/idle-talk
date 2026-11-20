@@ -171,6 +171,15 @@ test('client: downlink binary and cancel routed to player; state/ui', () => {
     t: 'ui', mute: true, on: false, radio: true, interval_s: 30, quiet_start: '23:00', quiet_end: '07:00' });
 });
 
+test('client direct: vision routed to its handler', () => {
+  const { WS, created } = fakeWs();
+  const seen = [];
+  C.createClient({ port: 1, WebSocketCtor: WS, onVision: (m) => seen.push(m) });
+  const ws = created[0];
+  ws.onmessage({ data: JSON.stringify({ t: 'vision', url: 'data:image/png;base64,AA', label: '画面', ts: 1 }) });
+  assert.deepStrictEqual(seen, [{ t: 'vision', url: 'data:image/png;base64,AA', label: '画面', ts: 1 }]);
+});
+
 test('client direct: search and links routed to their handlers', () => {
   const { WS, created } = fakeWs();
   const searches = [];

@@ -308,6 +308,7 @@ class IdleTalkDirector:
         self._snap_id = 0
         self._snap_wait: tuple[int, asyncio.Future] | None = None  # 返事待ちの (id, 結果)
         self.snap_dir: Path | None = None  # [drama].keep_snaps の保存先 (main が data/snaps にする)
+        self._loop_main: asyncio.AbstractEventLoop | None = None  # _page_shot (別スレッド) から画像を画面に出すため
         # 画面モード (設計書 6.7)。画面で画面共有を始めると ui.screen で on。main が [screen] の設定で差し替える
         self.screen = ScreenWatcher(Screen(), clock)
         self.screen_on = False
@@ -676,8 +677,9 @@ class IdleTalkDirector:
         if "drama_mic" in settings:
             self.drama_mic = bool(settings["drama_mic"])
         window = int(settings.get("drama_window") or 0) if settings.get("drama") else 0
-        if window != self.drama_window:
-            log.info("drama window: %s", window or "none")
+        if window != self.drama_window or (window == 0 and bool(settings.get("drama")) and not self.drama_on):
+            # 0 = ウィンドウ以外 (画面全体・タブ) の共有。そのときは [drama].window → follow_window → ブラウザの共有で撮る
+            log.info("drama window: %s", window or "none (screen or tab shared)")
             self.drama_window = window
         if bool(settings.get("drama")) != self.drama_on:
             self._set_drama(bool(settings.get("drama")))
@@ -1415,7 +1417,9 @@ class IdleTalkDirector:
             except Exception as e:  # noqa: BLE001  撮れなければブラウザの共有へ
                 log.warning("drama window capture failed: %s", e)
                 shot = None
-            if shot is not None:
+            if shot is None:  # 無言でブラウザの共有に落ちると、指定したウィンドウが撮れていないことに気づけない
+                log.info("drama window not captured (not found / minimized / excluded): falling back to browser share")
+            else:
                 self._snap_id = (self._snap_id + 1) % (1 << 31)
                 log.info("drama snapshot (window): %d KB", len(shot.png) * 3 // 4 // 1024)
                 self._keep_snap(shot.png, "png")
@@ -1462,6 +1466,11 @@ class IdleTalkDirector:
         except (OSError, ValueError) as e:
             log.warning("drama snapshot save failed: %s", e)
 
+    def _show_vision(self, url: str | None, label: str) -> None:
+        """LLM に見せる画像を画面に出す (確認用。ブラウザは最新の 1 枚だけ表示し、保存しない)。"""
+        if url:
+            self._emit({"t": "vision", "url": url, "label": label[:100], "ts": self.now_ms()})
+
     @staticmethod
     def _with_image(prompt: str, url: str | None) -> str | list[dict]:
         """画面 (data URL) があれば user の content を文章 + 画像の部品にする。"""
@@ -1484,6 +1493,7 @@ class IdleTalkDirector:
     async def _drama_respond(self, scene: str) -> None:
         me = asyncio.current_task()
         jpeg = await self._snapshot()
+        self._show_vision(jpeg, "ドラマ (一言)")
         self._log_drama("一言", scene, jpeg)
         messages = [{"role": "system", "content": self.personas.system_prompt()},
                     {"role": "user", "content": self._with_image(DRAMA_PROMPT.format(scene=scene), jpeg)}]
@@ -1521,6 +1531,7 @@ class IdleTalkDirector:
         jpeg = await self._snapshot()
         if self._spont_task is not me or not self.spontaneous.pending:
             return
+        self._show_vision(jpeg, "ドラマ (感想)")
         prompt = DRAMA_FINALE_PROMPT.format(notes=notes or "(なし)", rest=rest or "(なし)")
         self._log_drama("感想・メモ", notes)
         self._log_drama("感想・台詞", rest, jpeg)
@@ -1630,6 +1641,8 @@ class IdleTalkDirector:
             log.info("screen skipped: diff %.1f%% (image %s)", diff, bool(url))
             self.spontaneous.done()
             return
+        self._show_vision(url, f"カメラ: {src.label}" if src is not None and src.label
+                          else "カメラ" if src is not None else f"画面: {title}" if title else "画面")
         if src is not None:
             self.cameras.mark_shown(thumb)
             prompt = CAMERA_PROMPT + (CAMERA_LABEL_NOTE.format(label=src.label) if src.label else "")
@@ -1867,6 +1880,7 @@ class IdleTalkDirector:
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current
+        self._loop_main = asyncio.get_running_loop()
         try:
             await self.pipeline.respond(messages, search=self.web_search, page=self.page_reader,
                                         shot=self._page_shot if self.page_capture and self.drama_vision else None,
@@ -1894,7 +1908,10 @@ class IdleTalkDirector:
         if shot is None:
             return None
         self._keep_snap(shot.png, "png")
-        return "data:image/png;base64," + shot.png, shot.title
+        url = "data:image/png;base64," + shot.png
+        if self._loop_main is not None:  # 別スレッド: WS 送信はループ上で行う
+            self._loop_main.call_soon_threadsafe(self._show_vision, url, f"見ているページ: {shot.title or ''}".rstrip(": "))
+        return url, shot.title
 
     def _cancel_path(self, route: str) -> None:
         """pipeline.cancel は await を含まないので eager 実行して epoch を即時に確定させる。"""

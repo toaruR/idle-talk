@@ -106,11 +106,11 @@
     }
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onHandoff(msg), onLinks(msg), onSnap(msg), onTranscript(msg), onPartial(msg), onOpen(), onClose(),
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onHandoff(msg), onLinks(msg), onSnap(msg), onVision(msg), onTranscript(msg), onPartial(msg), onOpen(), onClose(),
   //         clientId, reconnectMs, setTimeoutFn }
   // 接続が切れた・つながらなかったら reconnectMs 後につなぎ直す (サーバの再起動中に開始を押しても待てば動く)。close() で止める
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError, onSearch, onHandoff, onLinks, onSnap, onTranscript, onPartial, onOpen, onClose } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onSearch, onHandoff, onLinks, onSnap, onVision, onTranscript, onPartial, onOpen, onClose } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
     const reconnectMs = opts.reconnectMs || RECONNECT_MS;
     const setTimeoutFn = opts.setTimeoutFn || setTimeout;
@@ -153,6 +153,7 @@
       else if (msg.t === 'handoff') { if (onHandoff) onHandoff(msg); }
       else if (msg.t === 'links') { if (onLinks) onLinks(msg); }
       else if (msg.t === 'snap') { if (onSnap) onSnap(msg); }
+      else if (msg.t === 'vision') { if (onVision) onVision(msg); }
       else if (msg.t === 'transcript') { if (onTranscript) onTranscript(msg); }
       else if (msg.t === 'partial') { if (onPartial) onPartial(msg); }
       else if (player) player.handleMessage(msg);
@@ -250,7 +251,9 @@
       if (onEnded) onEnded();
     };
     audio[0].addEventListener('ended', stop); // ブラウザの「共有を停止」
-    const snapshot = snapshotter(video, () => stopped, keep ? 'no video track' : 'vision off at share start', createCanvas);
+    // 理由に共有の種類 (トラックの label: window:<番号>:0 / screen:0:0 / タブ) を添える (何を共有したかをサーバのログで見るため)
+    const kind = String((stream.getVideoTracks()[0] || {}).label || 'none').slice(0, 80);
+    const snapshot = snapshotter(video, () => stopped, `${keep ? 'no video track' : 'vision off at share start'} [${kind}]`, createCanvas);
     return { ctx, stream, node, stop, snapshot, windowId };
   }
 

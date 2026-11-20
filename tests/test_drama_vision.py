@@ -57,6 +57,8 @@ def test_reaction_attaches_screen(tmp_path):
         assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + JPEG}}
         assert [r[0] for r in store.query("SELECT text FROM turns WHERE role='ai'")] == ["え、泣いてる！"]
         assert d._snap_wait is None  # 使ったら捨てる
+        shown = [m for m in b.texts if m["t"] == "vision"]  # LLM に見せた画像は画面にも出す
+        assert [(m["url"], m["label"]) for m in shown] == [("data:image/jpeg;base64," + JPEG, "ドラマ (一言)")]
     asyncio.run(run())
 
 

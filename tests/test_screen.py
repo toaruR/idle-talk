@@ -99,8 +99,11 @@ def test_comments_only_when_screen_changed(tmp_path):
         assert d.seen_[0][0]["role"] == "system" and len(d.seen_[0]) == 2  # 会話履歴は渡さない
         assert ai_turns(store) == ["面白そうな記事だね！"]
 
+        shown = [m for m in b.texts if m["t"] == "vision"]  # LLM に見せた画像は画面にも出す
+        assert len(shown) == 1 and shown[0]["url"] == "data:image/jpeg;base64," + JPEG and shown[0]["label"] == "画面"
         await look(d, b, SLIGHT)  # ほとんど変わっていない: LLM を呼ばずに黙る
         assert len(d.seen_) == 1 and ai_turns(store) == ["面白そうな記事だね！"]
+        assert sum(m["t"] == "vision" for m in b.texts) == 1  # 見せなかった画像は出さない
         skip = store.query("SELECT payload_json FROM events WHERE kind='screen_skip'")
         assert len(skip) == 1 and json.loads(skip[0][0])["diff"] < 3
 
@@ -152,6 +155,7 @@ def test_camera_uses_browser_snap_and_camera_prompt(tmp_path):
         text = d.seen_[0][1]["content"][0]["text"]
         assert "カメラ" in text and "ウィンドウのタイトル" not in text
         assert ai_turns(store) == ["お、コーヒー飲んでるの？"]
+        assert [m["label"] for m in b.texts if m["t"] == "vision"][0].startswith("カメラ")
         d.core.on_text(b, json.dumps({"t": "ui", "screen": True, "camera": False}))  # カメラから画面へ: 見直す (比べる相手を捨てる)
         assert d.screen_on and not d.camera_on and d.screen.changed(None)
         d.core.on_text(b, json.dumps({"t": "ui", "screen": False}))
@@ -206,9 +210,25 @@ def test_follow_window_uses_foreground_and_title(tmp_path):
         assert not any(m["t"] == "snap" for m in b.texts)  # ブラウザには求めない
         text, image = d.seen_[0][1]["content"]
         assert "猫の動画 - YouTube" in text["text"] and image["image_url"]["url"] == "data:image/png;base64,UE5H"
+        assert [m["label"] for m in b.texts if m["t"] == "vision"] == ["画面: 猫の動画 - YouTube", "画面: 受信トレイ - Outlook"]
         # 画面が同じでもウィンドウが替われば話す。撮れない (除外等) と同じウィンドウのままは黙る
         assert len(d.seen_) == 2 and ai_turns(store) == ["その動画面白そう！", "今度はメールか。"]
         assert len(store.query("SELECT 1 FROM events WHERE kind='screen_skip'")) == 2
+    asyncio.run(run())
+
+
+def test_page_shot_shown_from_thread(tmp_path):
+    """見ているページの代わりに撮った画面 (別スレッド) もループ経由で画面に出す。"""
+    from idle_talk.wincap import Shot
+
+    async def run():
+        d, b, _ = make(tmp_path, [], [])
+        d.page_capture = lambda: Shot("UE5H", bytes(N), "記事 - Google Chrome")
+        d._loop_main = asyncio.get_running_loop()
+        assert await asyncio.to_thread(d._page_shot) == ("data:image/png;base64,UE5H", "記事 - Google Chrome")
+        await until(lambda: any(m["t"] == "vision" for m in b.texts))
+        m = next(m for m in b.texts if m["t"] == "vision")
+        assert m["url"] == "data:image/png;base64,UE5H" and m["label"] == "見ているページ: 記事 - Google Chrome"
     asyncio.run(run())
 
 

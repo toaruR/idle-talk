@@ -96,6 +96,8 @@
   .volume { display: flex; align-items: center; gap: 12px; margin-top: 16px; font-size: 13px; color: var(--muted); font-weight: 600; }
   .volume input { flex: 1; accent-color: var(--accent); }
   #volume_text { min-width: 3.5em; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  #vision_img { display: block; max-width: 100%; height: auto; border-radius: 10px; background: var(--bg); }
+  #vision_caption { margin: 6px 0 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
   #links { list-style: none; margin: 0; padding: 0; max-height: 20em; overflow-y: auto; display: grid; gap: 6px; }
   #links li { padding: 8px 12px; border-radius: 10px; background: var(--bg); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   #links a { display: block; color: var(--accent); text-decoration: none; font-weight: 600; }
@@ -141,6 +143,11 @@
   </div>
   <label class="volume">音量 <input type="range" id="volume" min="0" max="200" step="5" value="100"> <span id="volume_text">100%</span></label>
 </section>
+<section class="card" id="vision_box" hidden>
+  <h2>AI が見た画像</h2>
+  <img id="vision_img" alt="AI が最後に見た画像">
+  <p id="vision_caption"></p>
+</section>
 <section class="card" id="links_box" hidden>
   <h2>URL</h2>
   <ul id="links"></ul>
@@ -185,6 +192,9 @@
     } catch (e) { console.warn('chime failed', e); }
   }
   let client = null;
+  // サーバとつながって hello を済ませたか。モードはこの間だけ始められる (再起動中に共有を始めると、起動途中の
+  // /config.json の vision: false で映像を止めたままになった。WS の待ち受けは LLM の判定の後に始まる。2026-11-20)
+  let linked = false;
   let drama = null; // 共有中のタブの音 (startDramaCapture の戻り値)
   let screen = null; // 共有中の画面 (startScreenCapture の戻り値)。drama とは同時に使わない
   let camera = null; // Web カメラ (startCameraCapture の戻り値)。drama・screen とは同時に使わない
@@ -232,6 +242,15 @@
     while (list.children.length > MAX_LINKS) list.lastElementChild.remove();
     $('links_box').hidden = list.children.length === 0;
     list.scrollTop = 0;
+  }
+
+  // LLM に見せた画像 (画面・カメラ・ドラマ・見ているページ) を最新の 1 枚だけ出す。data:image/ 以外は出さない
+  function showVision(m) {
+    if (typeof m.url !== 'string' || !m.url.startsWith('data:image/')) return;
+    $('vision_img').src = m.url;
+    const time = new Date(m.ts || Date.now()).toLocaleTimeString('ja-JP', { hour12: false });
+    $('vision_caption').textContent = `${time} ${String(m.label || '')}`;
+    $('vision_box').hidden = false;
   }
 
   // 文字起こしを下に積む (新しいものが下)。MAX_TRANSCRIPT 行を超えたら古い順 (上) から消す。文字列は textContent で入れる
@@ -323,6 +342,7 @@
     const old = connection;
     connection = null;
     client = null;
+    linked = false;
     if (old) {
       if (old.client) old.client.close();
       if (old.player) old.player.reset();
@@ -389,6 +409,7 @@
           chime(session.actx, m.active ? [660, 880] : (HANDOFF_FAIL[m.reason] ? [330, 247] : [880, 660]));
         },
         onLinks: (m) => showLinks(m.items),
+        onVision: showVision,
         onTranscript: showTranscript,
         onPartial: showPartial,
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
@@ -396,8 +417,14 @@
           const r = src ? await src.snapshot() : { reason: 'not sharing' };
           if (connection === session) session.client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg, thumb: r.thumb } : { t: 'snap', id: m.id, reason: r.reason });
         },
-        onOpen: () => { showError('', null); pushUi(); }, // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
-        onClose: () => { $('state').textContent = '再接続中…'; $('state').dataset.state = 'offline'; $('search').textContent = ''; },
+        onOpen: () => { // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
+          showError('', null); pushUi();
+          if (connection === session) { linked = true; showDrama(); }
+        },
+        onClose: () => {
+          $('state').textContent = '再接続中…'; $('state').dataset.state = 'offline'; $('search').textContent = '';
+          if (connection === session) { linked = false; showDrama(); }
+        },
       });
       const capture = await openMic(client, transcribe);
       if (connection !== session) { capture.stop(); return; }
@@ -416,9 +443,9 @@
     $('screen').textContent = screen ? '画面を見るのをやめる' : '画面を一緒に見る';
     $('camera').textContent = camera ? 'カメラを止める' : 'カメラで見てもらう';
     $('pc').textContent = pc ? 'ブラウザ補正なしをやめる' : 'ブラウザ補正なし';
-    $('pc').disabled = !client || transcribe;
+    $('pc').disabled = (!linked && !pc) || transcribe; // 再接続中は始められない (動いているモードは止められる)
     $('transcribe').textContent = transcribe ? '文字起こしをやめる' : '文字起こし';
-    $('transcribe').disabled = !client || drama !== null || screen !== null || camera !== null || pc; // AI が話すモードとは同時に使わない
+    $('transcribe').disabled = (!linked && !transcribe) || drama !== null || screen !== null || camera !== null || pc; // AI が話すモードとは同時に使わない
     $('transcribe').setAttribute('aria-pressed', String(transcribe));
     $('drama').setAttribute('aria-pressed', String(drama !== null)); // 使用中のモードのボタンを強調する (CSS)
     $('screen').setAttribute('aria-pressed', String(screen !== null));
@@ -427,9 +454,9 @@
     $('drama_state').textContent = drama ? 'ドラマ視聴中' : screen ? (screen.stream ? '画面を見ています' : '前面のウィンドウを見ています')
       : camera ? (camera.stream ? 'カメラで見ています' : 'カメラ (サーバ) を見ています') : pc ? 'ブラウザ補正なしで会話中 (スピーカーで)'
       : transcribe ? '文字起こし中 (AI は話しません)' : '';
-    $('drama').disabled = !client || screen !== null || camera !== null || transcribe; // 共有は 1 つずつ
-    $('screen').disabled = !client || drama !== null || camera !== null || transcribe;
-    $('camera').disabled = !client || drama !== null || screen !== null || transcribe;
+    $('drama').disabled = (!linked && !drama) || screen !== null || camera !== null || transcribe; // 共有は 1 つずつ
+    $('screen').disabled = (!linked && !screen) || drama !== null || camera !== null || transcribe;
+    $('camera').disabled = (!linked && !camera) || drama !== null || screen !== null || transcribe;
   }
   $('drama').addEventListener('click', async () => {
     if (drama) { drama.stop(); return; }
@@ -438,7 +465,7 @@
       const capture = await C.startDramaCapture({
         getDisplayMedia: (c) => navigator.mediaDevices.getDisplayMedia(c),
         AudioContextCtor: AudioContext, workletUrl: 'worklet.js', client,
-        // LLM が画像を読めるときだけ映像を残す (LLM の起動後に決まるので、画面を開いた時ではなく共有の開始時に聞く)
+        // LLM が画像を読めるときだけ映像を残す。ボタンは接続中 (linked) だけ押せるので、LLM の判定は済んでいる
         vision: loadServerConfig().then((c) => Boolean(c.vision), () => false),
         onEnded: () => { if (connection !== owner) return; drama = null; showDrama(); pushUi(); },
       });

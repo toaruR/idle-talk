@@ -168,7 +168,7 @@ test('startDramaCapture: without vision stops video at once and snapshot is null
   const f = fakeDrama();
   const d = await C.startDramaCapture({ getDisplayMedia: async () => f.stream, AudioContextCtor: f.Ctx, workletUrl: '', client: {} });
   assert.equal(f.stops.video, 1);
-  assert.deepEqual(await d.snapshot(), { reason: 'vision off at share start' });
+  assert.match((await d.snapshot()).reason, /^vision off at share start \[/); // 共有の種類 (トラックの label) を添える
   d.stop();
   assert.deepEqual(f.stops, { audio: 1, video: 1 });
 });
