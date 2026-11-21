@@ -1,6 +1,6 @@
 """idle_talk.haas_onnx の試験。実モデルは使わず、デコードの規則・語の復元・特徴量の形・GPU の選び方を検証する。
 
-実モデルでの一致 (NeMo と同じ認識結果) は tools/asr_bench_ja.py --engine haas_onnx で確かめる (docs/asr-comparison-haas-ja.md)。
+実モデルでの一致 (NeMo と同じ認識結果) は tools/asr_bench_ja.py --engine haas_onnx で確かめる (docs/research/2026-10-31-asr-comparison-haas-ja.md)。
 """
 from types import SimpleNamespace
 

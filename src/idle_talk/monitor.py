@@ -1,4 +1,4 @@
-"""相手モードのモニター (docs/plans/2026-10-18-partner-mode.md §2.3)。AI の声を Chrome の外からスピーカーに鳴らす。
+"""相手モードのモニター (docs/plans/archive/2026-10-18-partner-mode.md §2.3)。AI の声を Chrome の外からスピーカーに鳴らす。
 
 相手 (ChatGPT 等) のタブのエコー除去は、Chrome が鳴らした声を、別のタブの音でも消した (実測 2026-10-18)。
 Chrome の外のプロセスが鳴らした声は消さないので、相手モード中は Director が鳴らす。

@@ -1,3 +1,7 @@
+---
+type: research
+owner: ai
+---
 # 非QAT Gemma 4 12B と DFlash の比較
 
 > 2026-10-29 清掃: このテストで追加したモデル・変換元重み・専用トークナイザーは削除済み。以下のモデル保存先は実験時点の記録。測定データ・レポートと既存モデルは保持。
@@ -114,6 +118,6 @@ QAT版を使う現在の idle-talk を、そのまま DFlash 有効に変更す�
 - 非QAT BF16元データ: 同ディレクトリの `gemma4-12B-it-nonqat-BF16.gguf`。再検証・別精度への変換用に保存。
 - 自前軽量ドラフト: `D:/vagrant/idle-talk/data/models/dflash/gemma4-12B-it-DFlash-self-Q4_K_M.gguf`、442,399,712 bytes、SHA-256 `6f492f8c6a748f8538f84756f2bc918596ddad04c37615a9dbd4e77b8929c08b`。
 
-再現用は同ディレクトリの `quantize.py`、`inspect_headers.py`、`english_control.py`、`verify_results.py`、`summarize.py` と [bench_dflash.py](../tools/bench_dflash.py)。
+再現用は同ディレクトリの `quantize.py`、`inspect_headers.py`、`english_control.py`、`verify_results.py`、`summarize.py` と [bench_dflash.py](../../tools/bench_dflash.py)。
 
 公開元: [BF16とQ4_0の変換ログ（固定 revision）](https://huggingface.co/ggml-org/gemma-4-12B-it-GGUF/blob/202658970530b31541cd0b645a9c198bed2a615e/convert.log)、[元モデル revision](https://huggingface.co/ggml-org/gemma-4-12B-it-GGUF/blob/202658970530b31541cd0b645a9c198bed2a615e/.src_sha)。

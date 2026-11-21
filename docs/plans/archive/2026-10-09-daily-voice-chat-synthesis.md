@@ -1,3 +1,9 @@
+---
+type: plan
+status: superseded
+owner: ai
+superseded_by: docs/plans/archive/2026-10-11-idle-talk-final-architecture.md
+---
 # このPCで常用する、日本語音声雑談の統合アーキテクチャ
 
 作成日：2026-10-09。対象：Windows、利用者1人、日本語の日常会話。状態：設計提案。部品の公式資料とPCの読み取りを確認したが、モデル導入・音声対話・性能測定は未実施。

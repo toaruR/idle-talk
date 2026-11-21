@@ -39,3 +39,5 @@ cameras.toml
 tmp/
 # Unsloth が学習時に作業フォルダへ作るコンパイル済みコード (tools/dialect/train.sh)
 unsloth_compiled_cache/
+.cache/
+docs/guides/knowledge-kit-usage.md

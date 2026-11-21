@@ -17,7 +17,7 @@ type: spec
 
 本書は、実装 (`src/idle_talk/`, `web/`) が今どう動くかをまとめる。
 
-- 設計の根拠: `docs/design-idle-talk.md`
+- 設計の根拠: `docs/spec/design-idle-talk.md`
 - タスク分解: `docs/plans/plan-idle-talk.json`
 - 起動手順と運用フェーズの実機確認: `README.md`
 

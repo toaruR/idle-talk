@@ -1,3 +1,8 @@
+---
+type: plan
+status: done
+owner: ai
+---
 # 呼びかけで ChatGPT の音声会話を始める（Chappy の再実装）
 
 作成日：2026-11-19

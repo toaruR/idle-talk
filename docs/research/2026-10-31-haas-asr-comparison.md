@@ -1,3 +1,7 @@
+---
+type: research
+owner: ai
+---
 # Haas-ja-v1.0 と現行ASRの比較（2026-10-31）
 
 ## 判断
@@ -12,7 +16,7 @@ Windowsでは公式Python実装よりspeech.cppの移植版が試しやすい見
 - `src/idle_talk/asr_worker.py:117`：encoder / decoder / joiner はint8版を優先。`load_reazon_model` はsherpa-onnxの `OfflineRecognizer.from_transducer`、greedy decodingを使用。
 - ローカルモデルのREADMEと公式カード：**reazonspeech-k2-v2、159.34M、Zipformer / RNN-T、日本語、約30秒まで**。配布ディレクトリ名は `sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01`。
 - 実際に選ばれるint8版3ファイルの合計は160,326,446 bytes（約160 MB）。README記載の配布サイズ約680 MBや、ディレクトリ内のFP32版を含めたサイズとは区別する。実行時RAMの測定値ではない。
-- `data/asr_bench_tv/results.csv` を読み取り集計：80クリップ、CER **10.7579%**、認識呼び出しp50 **164.5 ms**、p95 **295 ms**、RTF **0.03058**。今回は再認識せず既存CSVを集計しただけ。`docs/design-idle-talk.md` の以前のp50 212 msとは計測回が異なる。
+- `data/asr_bench_tv/results.csv` を読み取り集計：80クリップ、CER **10.7579%**、認識呼び出しp50 **164.5 ms**、p95 **295 ms**、RTF **0.03058**。今回は再認識せず既存CSVを集計しただけ。`docs/spec/design-idle-talk.md` の以前のp50 212 msとは計測回が異なる。
 - ローカルCERはNFKC、句読点・空白除去、漢数字の正規化後の文字編集距離。発話終了待ち・音声取得・画面表示を含まない認識呼び出し時間。
 
 ## 比較

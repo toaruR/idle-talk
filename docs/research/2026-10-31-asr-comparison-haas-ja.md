@@ -1,3 +1,7 @@
+---
+type: research
+owner: ai
+---
 # 音声認識の比較: ReazonSpeech (現行) と Haas-ja-v1.0
 
 2026-10-31 測定。idle-talk の既定の音声認識 ReazonSpeech と、
@@ -29,7 +33,7 @@ Haas-ja で GPU が要るのは予測ネットワーク (KDA, 3.9M パラメー�
 エンコーダ (609M) は普通の PyTorch なので CPU でも動く。
 
 - Triton カーネルは `TRITON_INTERPRET=1` で CPU で解釈実行できる。ただし 1 発話に 80〜180 秒かかった。
-- そこで、デコード中に毎ステップ呼ばれる 3 つのカーネルを、同じ式の PyTorch 実装に置き換えた ([tools/haas_cpu_patch.py](../tools/haas_cpu_patch.py))。
+- そこで、デコード中に毎ステップ呼ばれる 3 つのカーネルを、同じ式の PyTorch 実装に置き換えた ([tools/haas_cpu_patch.py](../../tools/haas_cpu_patch.py))。
   - KDA の再帰更新
   - 短い畳み込み
   - ゲート付き RMSNorm
@@ -125,9 +129,9 @@ idle-talk には 3 つ目の案 (ONNX) で入れた。`idle-talk.cmd asr haas` /
 
 - NeMo・PyTorch・Triton は使わない。実行時に要るのは onnxruntime-gpu と numpy だけで、Windows でもそのまま動く。
 - 重いエンコーダ (609M) だけを ONNX にして GPU で動かす。
-- 予測ネットワーク (KDA)・joint・TDT 貪欲デコード・特徴量は numpy で書き直した ([src/idle_talk/haas_onnx.py](../src/idle_talk/haas_onnx.py))。どれも小さく、CPU の負荷はわずか。
-- 書き出しは [tools/haas_export_onnx.py](../tools/haas_export_onnx.py) で行う (Linux / WSL2 で 1 回だけ、GPU は不要)。
-- 配布用には [tools/haas_pack.py](../tools/haas_pack.py) で約 1.2GB に詰められる。重みは元々 bf16 なので、復元するとバイト単位で元に戻る。
+- 予測ネットワーク (KDA)・joint・TDT 貪欲デコード・特徴量は numpy で書き直した ([src/idle_talk/haas_onnx.py](../../src/idle_talk/haas_onnx.py))。どれも小さく、CPU の負荷はわずか。
+- 書き出しは [tools/haas_export_onnx.py](../../tools/haas_export_onnx.py) で行う (Linux / WSL2 で 1 回だけ、GPU は不要)。
+- 配布用には [tools/haas_pack.py](../../tools/haas_pack.py) で約 1.2GB に詰められる。重みは元々 bf16 なので、復元するとバイト単位で元に戻る。
 
 NeMo との一致は次のとおり確かめた。
 

@@ -1,3 +1,9 @@
+---
+type: plan
+status: superseded
+owner: ai
+superseded_by: docs/plans/archive/2026-10-11-idle-talk-final-architecture.md
+---
 # idle-talk 推奨アーキテクチャ（3案比較の結論）
 
 作成: 2026-10-09 / 対象PC: Win11, Ryzen 7 5700X, RTX 3060 12GB ×2, RAM 64GB

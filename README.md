@@ -2,7 +2,7 @@
 
 Windows PC に常駐して、日本語で気軽に雑談できる音声アプリです。音声認識・会話・音声合成はすべて手元の PC で動きます。
 
-![idle-talk の画面](docs/images/webui.png)
+![idle-talk の画面](docs/assets/webui.png)
 
 ## できること
 
@@ -15,7 +15,7 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
 - **人物設定（ペルソナ）と声を、画面で切り替えられます。**
 
 構成: ブラウザ（マイク・再生）⇄ Director（Python）⇄ llama-server（LLM）/ AivisSpeech（声）/ ReazonSpeech（音声認識）。
-設計は [docs/design-idle-talk.md](docs/design-idle-talk.md)、細かい動きは [docs/spec/specification.md](docs/spec/specification.md) にあります。
+設計は [docs/spec/design-idle-talk.md](docs/spec/design-idle-talk.md)、細かい動きは [docs/spec/specification.md](docs/spec/specification.md) にあります。
 
 ## 必要なもの
 
@@ -26,7 +26,7 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) の `llama-server` | 会話 | 同梱の設定は Gemma 4 12B（QAT Q4_0、gguf）。軽くしたいなら Qwen3.5-4B Q4_K_M |
 | [AivisSpeech](https://aivis-project.com/) | 声 | idle-talk が AivisSpeech Engine を起動できます（`127.0.0.1:10101`） |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) + ReazonSpeech | 音声認識（CPU） | モデルは約 680MB（Apache-2.0）。`[asr].engine = "whisper"` で faster-whisper `small`（GPU）に戻せます |
-| onnxruntime-gpu + [Haas-ja-v1.0](https://huggingface.co/third-intelligence/Haas-ja-v1.0)（任意） | 音声認識（GPU） | ReazonSpeech と切り換えて使えます。誤りが少なく、感情のこもった声や文頭の「はぁ？」「えー」を落としにくい（[比較](docs/asr-comparison-haas-ja.md)）。モデルは約 2.4GB（Apache-2.0） |
+| onnxruntime-gpu + [Haas-ja-v1.0](https://huggingface.co/third-intelligence/Haas-ja-v1.0)（任意） | 音声認識（GPU） | ReazonSpeech と切り換えて使えます。誤りが少なく、感情のこもった声や文頭の「はぁ？」「えー」を落としにくい（[比較](docs/research/2026-10-31-asr-comparison-haas-ja.md)）。モデルは約 2.4GB（Apache-2.0） |
 | onnxruntime + [WeSpeaker ResNet34](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | 声で相手を見分ける（任意） | モデルは約 26MB（CC-BY-4.0）。無ければ見分けずに動きます |
 | Chrome などのブラウザ | マイク・再生・画面 | |
 
@@ -278,7 +278,7 @@ HTML ファイルを直接（`file://` で）開くと接続できません。
 
 - テスト: `pytest`（外部サービス不要）、`node --test web/tests/*.test.js`
 - ソースは `src/idle_talk/`（Python）と `web/`（ブラウザ）にあります。
-- 仕様は [docs/spec/specification.md](docs/spec/specification.md)、設計は [docs/design-idle-talk.md](docs/design-idle-talk.md) にあります。
+- 仕様は [docs/spec/specification.md](docs/spec/specification.md)、設計は [docs/spec/design-idle-talk.md](docs/spec/design-idle-talk.md) にあります。
 
 ## ライセンス
 

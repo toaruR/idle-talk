@@ -40,7 +40,7 @@ ROWS = [
 def _doc_row_count():
     import pathlib
 
-    doc = pathlib.Path(__file__).resolve().parents[1] / "docs" / "design-idle-talk.md"
+    doc = pathlib.Path(__file__).resolve().parents[1] / "docs" / "spec" / "design-idle-talk.md"
     text = doc.read_text(encoding="utf-8")
     sec = text.split("### 4.2 遷移表")[1].split("### 4.3")[0]
     rows = [ln for ln in sec.splitlines() if ln.startswith("|") and not ln.startswith("|---")]

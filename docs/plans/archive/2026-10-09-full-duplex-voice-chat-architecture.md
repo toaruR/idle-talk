@@ -1,3 +1,9 @@
+---
+type: plan
+status: superseded
+owner: ai
+superseded_by: docs/plans/archive/2026-10-11-idle-talk-final-architecture.md
+---
 # 全二重・自律発話型 ローカル音声チャット アーキテクチャ設計書 (2026年10月版)
 
 ## 1. 概要と要件

@@ -1,3 +1,9 @@
+---
+type: plan
+status: superseded
+owner: ai
+superseded_by: docs/plans/archive/2026-10-11-idle-talk-final-architecture.md
+---
 # idle-talk アーキテクチャ案（2026-10 時点）
 
 ローカルLLMで動く日本語の全二重音声チャット。ネットからニュース・話題を自動収集し、取り留めなく喋りつつ、ユーザーと会話もできる。

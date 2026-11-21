@@ -11,7 +11,7 @@ web = 8000   # web/ の配信 (main が起動。ブラウザは http://127.0.0.1
 # 音声認識のエンジン。idle-talk.cmd asr reazon / idle-talk.cmd asr haas で、会話を止めずに切り換えられる。
 #   reazon = ReazonSpeech (CPU。pip install sherpa-onnx とモデルが要る)
 #   haas   = Haas-ja-v1.0 (GPU。ReazonSpeech より誤りが少なく、感情のこもった声や文頭の「はぁ？」「えー」を落としにくい。
-#            pip install onnxruntime-gpu と、tools/haas_export_onnx.py で書き出したモデルが要る。docs/asr-comparison-haas-ja.md)
+#            pip install onnxruntime-gpu と、tools/haas_export_onnx.py で書き出したモデルが要る。docs/research/2026-10-31-asr-comparison-haas-ja.md)
 #   whisper = faster-whisper small (GPU0)
 # このファイルを手で変えたら idle-talk.cmd restart。
 engine = "haas"

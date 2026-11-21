@@ -1,10 +1,14 @@
+---
+type: spec
+owner: ai
+---
 # idle-talk 設計書
 
 作成日：2026-10-11
-基礎資料：`docs/plans/2026-10-11-idle-talk-final-architecture.md`（合議結果。以下「合議書」）
+基礎資料：`docs/plans/archive/2026-10-11-idle-talk-final-architecture.md`（合議結果。以下「合議書」）
 対象：Windows 11、利用者1人、常駐する日本語の音声雑談アプリ
 状態：設計確定版。既定値は §8.1 で決定済みで、M0/M1 の実測では値のみを更新する（設計構造は変更しない）。
-改訂：2026-10-12 実機接続で判明した外部サービスの制約に合わせて TTS 合成方式と LLM 応答スキーマを改訂（下記「改訂履歴」）。初版は `docs/design-idle-talk.initial-2026-10-11.md` に保存。
+改訂：2026-10-12 実機接続で判明した外部サービスの制約に合わせて TTS 合成方式と LLM 応答スキーマを改訂（下記「改訂履歴」）。初版はコミット `de4bec8` の `docs/design-idle-talk.md`。
 
 改訂履歴：
 - 2026-10-12：AivisSpeech Engine 1.2.0 は `/cancellable_synthesis` が 501 Not Implemented（有効化オプションも無い）のため、`/synthesis` に変更。中止は epoch 不一致での破棄で代替し、切断後に残る計算は合成中の 1 文ぶん（`HTTP_TIMEOUT.tts_sentence` 以内）とする。T-E8 の合否もそれに合わせて変更。初回合成の遅延（実測約 14 秒）は起動時のウォームアップで吸収する（§3 外部サービス、§12.1、§12.3）。
@@ -15,7 +19,7 @@
 - 2026-10-14：ドラマモードに総合的な感想を追加（§6.5）。台詞が長く途切れたら、裏で要約したあらすじメモをもとにそれまでの感想を話す。
 - 2026-10-14：ペルソナを追加（§6.6）。人物設定を `personas.toml` に書き、画面で切り替える（`ui.persona`）。
 - 2026-10-14：ASR を faster-whisper small（GPU0）から ReazonSpeech（sherpa-onnx、CPU）に変更（§2.2、§8.1）。放送字幕を正解にした 80 クリップで CER 29.1% → 10.8%、遅延 p50 334 → 212ms（`tools/asr_bench.py`）。`no_speech_prob` は出ないので幻聴除外は `compression_ratio`（本文から計算）と語なし判定に頼る。`[asr].engine = "whisper"` で戻せる。
-- 2026-10-31：ASR に Haas-ja-v1.0（onnxruntime、GPU は `[asr].gpu`）を追加し、`idle-talk.cmd asr reazon|haas` で ReazonSpeech と切り換えられるようにした（既定は reazon のまま）。asr-ja-bench の JSUT・JVNV・FLEURS で CER strict 7.36% → 4.79%、文の取りこぼしは JVNV で 27 → 1 件。NeMo を使わず、エンコーダだけ ONNX、予測ネットワーク（KDA）と TDT デコードは numpy（`src/idle_talk/haas_onnx.py`、`docs/asr-comparison-haas-ja.md`）。
+- 2026-10-31：ASR に Haas-ja-v1.0（onnxruntime、GPU は `[asr].gpu`）を追加し、`idle-talk.cmd asr reazon|haas` で ReazonSpeech と切り換えられるようにした（既定は reazon のまま）。asr-ja-bench の JSUT・JVNV・FLEURS で CER strict 7.36% → 4.79%、文の取りこぼしは JVNV で 27 → 1 件。NeMo を使わず、エンコーダだけ ONNX、予測ネットワーク（KDA）と TDT デコードは numpy（`src/idle_talk/haas_onnx.py`、`docs/research/2026-10-31-asr-comparison-haas-ja.md`）。
 - 2026-10-15：`[drama].log_prompt` を追加（§7）。オンなら一言・感想・要約に使った台詞とメモを talk.log に残す（何を見て一言を言ったかを後で確かめるため）。既定オフで、オフなら従来どおり台詞を保存しない。
 - 2026-10-16：`[drama].keep_snaps` を追加（§7）。1 以上なら一言・感想に使った画面を `data/snaps` に新しい方からその枚数だけ残す（LLM が何を見たかを確かめるため）。既定 0 で、0 なら従来どおり画面を保存しない。
 - 2026-10-15：文脈の無い短い認識結果を捨てる（§5.1）。食器・咳を「はい」「誰」「ハハ」と聞き違えて応答・取消が続いた。
@@ -262,7 +266,7 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 限界：ブラウザの共有は 640×360 の 1 コマなので小さい文字は読めない（前面のウィンドウは 1280×720 で読める）。差は明るさの平均なので、配色の似たページ間の移動は小さく出る。通常応答には画面を添えない（G1 に足さない）。
 
 ### 6.8 ブラウザ補正なしモード（旧称：PC と話すモード）
-- 詳細は `docs/plans/2026-10-18-partner-mode.md`。
+- 詳細は `docs/plans/archive/2026-10-18-partner-mode.md`。
 - 画面の「ブラウザ補正なし」で `ui.pc=true` を送る。共有はしない。相手（PC で動く別の音声 AI）の声は、利用者の声と同じくマイクで聞く。
 - AI の声は、ブラウザではなく Director がスピーカーに鳴らす（`monitor.Monitor`、`sounddevice`、出力機器は `[pc].monitor`）。ブラウザで動く ChatGPT のエコー除去は、Chrome の別のタブが鳴らした声も消した。Chrome の外から鳴らした声は消さなかった（実測 2026-10-18）。再生の報告はブラウザと同じ形で返し、履歴の確定は今と同じ経路を通る。
 - マイクも Director が録る（`monitor.MicCapture`、`sounddevice`、入力機器は `[pc].mic`）。モード中はブラウザの上りのマイクを捨てる。ブラウザのマイクは Chrome のエコー除去を通り、Chrome が鳴らした音を消すため、ブラウザの ChatGPT の声がほぼ消えて聞き取れなかった（実機 2026-10-19）。Python で録る音はエコー除去も雑音抑制も通らない。静かな部屋では RMS 0.5 程度になり、E6（無音 3 秒でマイク喪失）を誤って起こしたので、モード中の E6 は無音ではなく読み取りの失敗で判定する。
@@ -296,7 +300,7 @@ WAL モード、書き込みは専用スレッドのキュー経由。スキー�
 - 限界：仮名の言葉は最初の 1 発話で決まり、その発話の調子に左右される。声の似た人は同じ話者になり、同時に話すとどちらか 1 人になる。
 
 ### 6.11 ChatGPT への引き渡し（呼びかけ）
-- 詳細は `docs/plans/2026-11-19-chappy-wake.md`。`[chatgpt].on` のときだけ有効（`chatgpt_voice.py`）。
+- 詳細は `docs/plans/archive/2026-11-19-chappy-wake.md`。`[chatgpt].on` のときだけ有効（`chatgpt_voice.py`）。
 - 呼びかけ：利用者の発話の認識結果を、自声・ドラマの回り込み・文脈の無い短い結果（§5.1）を除いた後に `wake_match` で見る。NFKC・カタカナ→ひらがな・空白・句読点・長音を除いて、呼びかけを含み、前の呼びかけ語（`WAKE_LEADS`：おーい・ねえ・ちょっと等）と後ろの頼む語（`WAKE_TAILS`：を起動して・呼んで・お願い・さん等）を除いた残りが `WAKE_EXTRA`（2）字以下なら一致（「ねえチャッピー」「おーいチャッピー」「チャッピーを起動して」は可、「はチャッピーで大丈夫だよ」は不可。2026-11-20）。一致しないが呼びかけらしい発話（呼びかけを含むが余りが多い、または呼びかけと 3/4 以上同じ字並びでパ行・バ行を含む：`wake_near`）は起こさず、idle_talk.log に `wake near-miss`、talk.log に `HANDOFF?:`、events に `handoff`（phase `near`）を残し、`{"t":"wake","matched":false,"text":str}` で画面の文字起こし欄に出す（`phrases` の調整用）。一致したときも `wake`（matched true）、開始の結果は talk.log の `HANDOFF: start (結果)` と events（phase `started`）、画面には `handoff`（active true、reason に開始の結果）で出す。あいまい一致はしない（長音を除いた「ちゃっぴ」の 1 字違いを許すと「〜ちゃった」が当たった）。文字起こし・ブラウザ補正なしモードでは見ない。
 - 引き渡し：一致したら応答せず（履歴・turns に残さない）、`Ev.HANDOFF` で休止に入る（`_REST_EVENTS`。鳴っている声・作りかけの生成は既存の遷移で取消。`ctx.muted` は立てない）。`handoff`（active）を送り、ブラウザは上がる 2 音を鳴らす。
 - 会話中：`_on_up_audio` の先頭で上りの音（マイク・タブ）を VAD にも ASR にも入れずに捨てる（ChatGPT の声は Chrome のエコー除去で消えないので、聞けば利用者の発話になる）。マイクの音量だけを見て、閾値以上が 200ms 続けば無操作の締め切りを延ばす。再接続（hello）・ミュート解除では休止から戻さない。自発発話・無操作休止もしない。

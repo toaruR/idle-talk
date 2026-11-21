@@ -1,3 +1,9 @@
+---
+type: plan
+status: superseded
+owner: ai
+superseded_by: docs/plans/archive/2026-10-11-idle-talk-final-architecture.md
+---
 # ローカルLLMによる自発的な全二重音声雑談：アーキテクチャ案
 
 調査基準日：2026年10月9日。日本語、Windows PC、利用者1人を前提とする。

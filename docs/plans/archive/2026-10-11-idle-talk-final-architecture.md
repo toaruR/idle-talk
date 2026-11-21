@@ -1,3 +1,8 @@
+---
+type: plan
+status: done
+owner: ai
+---
 # idle-talk 最終アーキテクチャ（合議結果）
 
 作成日：2026-10-11

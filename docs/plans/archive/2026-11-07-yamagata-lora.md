@@ -1,3 +1,8 @@
+---
+type: plan
+status: done
+owner: ai
+---
 # 山形弁 (村山) LoRA 計画
 
 作成日：2026-11-07
