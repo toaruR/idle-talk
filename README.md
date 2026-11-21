@@ -15,7 +15,7 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
 - **人物設定（ペルソナ）と声を、画面で切り替えられます。**
 
 構成: ブラウザ（マイク・再生）⇄ Director（Python）⇄ llama-server（LLM）/ AivisSpeech（声）/ ReazonSpeech（音声認識）。
-設計は [docs/design-idle-talk.md](docs/design-idle-talk.md)、細かい動きは [docs/specification.md](docs/specification.md) にあります。
+設計は [docs/design-idle-talk.md](docs/design-idle-talk.md)、細かい動きは [docs/spec/specification.md](docs/spec/specification.md) にあります。
 
 ## 必要なもの
 
@@ -278,7 +278,7 @@ HTML ファイルを直接（`file://` で）開くと接続できません。
 
 - テスト: `pytest`（外部サービス不要）、`node --test web/tests/*.test.js`
 - ソースは `src/idle_talk/`（Python）と `web/`（ブラウザ）にあります。
-- 仕様は [docs/specification.md](docs/specification.md)、設計は [docs/design-idle-talk.md](docs/design-idle-talk.md) にあります。
+- 仕様は [docs/spec/specification.md](docs/spec/specification.md)、設計は [docs/design-idle-talk.md](docs/design-idle-talk.md) にあります。
 
 ## ライセンス
 

@@ -1,3 +1,7 @@
+---
+type: spec
+---
+
 <!-- spec-doc:last-reviewed-commit=8a393b6c39f9ca4dddbd1f73544e79f7fa4420b4 reviewed-at=2026-10-16 -->
 
 # 仕様書
