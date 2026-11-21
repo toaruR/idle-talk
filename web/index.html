@@ -176,6 +176,7 @@
     lost: 'ChatGPT のタブが閉じられました',
     error: 'ChatGPT への引き渡しに失敗しました',
   };
+  const HANDOFF_END = { idle: '無操作', closed: 'ChatGPT 側で終了', max: '時間の上限', cancelled: '取消' };
   // 短い 2 音の合図。呼びかけを聞いたら上がる音、戻ったら下がる音、失敗は低い音
   function chime(actx, freqs) {
     if (!actx) return;
@@ -406,7 +407,15 @@
         onHandoff: (m) => {  // 呼びかけで ChatGPT の音声会話へ引き渡した (設計書 6.11)
           $('search').textContent = m.active ? 'ChatGPT と会話中（idle-talk は聞いていません）'
             : (HANDOFF_FAIL[m.reason] || '');
+          // 開始の結果 (started / already) と終わり・失敗は文字起こし欄にも残す。呼びかけ直後 (reason 空) は onWake が出す
+          if (m.active && m.reason) showTranscript({ speaker: 'ChatGPT', text: '音声会話を始めました' });
+          if (!m.active) showTranscript({ speaker: 'ChatGPT', text: HANDOFF_FAIL[m.reason] || `会話を終えました（${HANDOFF_END[m.reason] || m.reason}）` });
+          if (m.active && m.reason) return; // 合図の音は呼びかけ直後に鳴らし済み
           chime(session.actx, m.active ? [660, 880] : (HANDOFF_FAIL[m.reason] ? [330, 247] : [880, 660]));
+        },
+        onWake: (m) => {  // 呼びかけを聞いた (matched) / 呼びかけらしいが [chatgpt].phrases に一致しなかった
+          showTranscript({ speaker: '呼びかけ', text: m.matched ? `「${m.text}」→ ChatGPT を起動します`
+            : `「${m.text}」は呼びかけと判定しませんでした` });
         },
         onLinks: (m) => showLinks(m.items),
         onVision: showVision,

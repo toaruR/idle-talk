@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 WAKE_EXTRA = 2  # 呼びかけの前後に許す字数 (「ねえチャッピー」「チャッピーさん」)。文中の「はチャッピーで大丈夫だよ」は起こさない
 VOICED_FRAMES = 10  # 会話中のマイクで声とみなす連続フレーム数 (20ms x 10 = 200ms)。物音 1 つで延長しない
 START_TIMEOUT_S = 12.0  # ページの読み込み + 音声ボタン
+RELOAD_S = 4.0  # 開始ボタンがこれだけ出なければページを 1 回開き直す (入力欄の文字・別のページ等で出ないことがある)
 STOP_TIMEOUT_S = 6.0
 OFF_STABLE_S = 0.5  # 終了ボタンの後、開始ボタンに戻ったまま保つ時間
 CLOSED_S = 2.0  # 会話中に音声の画面がこれだけ続けて無ければ、利用者が ChatGPT 側で終えたとみなす
@@ -56,14 +57,64 @@ def _norm(text: str) -> str:
     return "".join(out)
 
 
+# 呼びかけの前後に付けてよい言葉 (_norm 後の形。長音は除かれる)。これを除いた残りが WAKE_EXTRA 字以下なら一致
+# (「おーいチャッピー」「チャッピーを起動して」、2026-11-20)。文中の「チャッピーさんがいます」は残りが多いので起こさない
+WAKE_LEADS = ("ちょっと", "おおい", "おい", "ねえ", "ねぇ", "へい", "hey", "あの", "ね")
+WAKE_TAILS = tuple(sorted({_n for _n in (
+    "を起動して", "起動して", "を起動", "起動", "きどうして", "をきどうして", "を開いて", "開いて", "をひらいて", "ひらいて",
+    "を呼んで", "呼んで", "をよんで", "よんで", "を始めて", "始めて", "をはじめて", "はじめて", "お願い", "おねがい",
+    "出てきて", "でてきて", "来て", "きて", "おいで", "さん", "ちゃん", "くん")}, key=len, reverse=True))
+_KANA_P = set("ぱぴぷぺぽばびぶべぼ")
+
+
+def _strip_affixes(before: str, after: str) -> tuple[str, str]:
+    """呼びかけの前の末尾から WAKE_LEADS、後ろの先頭から WAKE_TAILS を取り除く (それぞれ 2 つまで)。"""
+    for _ in range(2):
+        lead = next((x for x in WAKE_LEADS if before.endswith(x)), None)
+        if lead is None:
+            break
+        before = before[:-len(lead)]
+    for _ in range(2):
+        tail = next((x for x in WAKE_TAILS if after.startswith(x)), None)
+        if tail is None:
+            break
+        after = after[len(tail):]
+    return before, after
+
+
 def wake_match(text: str, phrases: tuple[str, ...]) -> bool:
-    """発話がほぼ呼びかけだけ (前後 WAKE_EXTRA 字まで) なら True。あいまい一致はしない: 長音を除くと
-    「ちゃっぴ」の 4 字で、1 字違いを許すと「〜ちゃった」が当たった (talk.log 12.5 万発話で 24 件、2026-11-19)。"""
+    """発話がほぼ呼びかけだけ (WAKE_LEADS・WAKE_TAILS を除いて前後 WAKE_EXTRA 字まで) なら True。あいまい一致はしない:
+    長音を除くと「ちゃっぴ」の 4 字で、1 字違いを許すと「〜ちゃった」が当たった (talk.log 12.5 万発話で 24 件、2026-11-19)。"""
     n = _norm(text)
     for p in phrases:
         w = _norm(p)
-        if w and w in n and len(n) - len(w) <= WAKE_EXTRA:
+        i = n.find(w) if w else -1
+        while i >= 0:
+            before, after = _strip_affixes(n[:i], n[i + len(w):])
+            if len(before) + len(after) <= WAKE_EXTRA:
+                return True
+            i = n.find(w, i + 1)
+    return False
+
+
+def wake_near(text: str, phrases: tuple[str, ...]) -> bool:
+    """呼びかけに一致しないが、呼びかけらしい発話か (ログ・画面に出すだけで起こさない)。呼びかけを含むが余りが多い、
+    または呼びかけと 3/4 以上同じ字並びでパ行・バ行の字を含む (「チャピ」「ちゃっぷい」。「〜ちゃった」は含まない)。"""
+    from difflib import SequenceMatcher
+    n = _norm(text)
+    if not n or wake_match(text, phrases):
+        return False
+    for p in phrases:
+        w = _norm(p)
+        if not w:
+            continue
+        if w in n:
             return True
+        for size in {max(2, len(w) - 1), len(w), len(w) + 1}:
+            for i in range(max(1, len(n) - size + 1)):
+                part = n[i:i + size]
+                if _KANA_P & set(part) and SequenceMatcher(None, w, part).ratio() >= 0.75:
+                    return True
     return False
 
 
@@ -169,7 +220,8 @@ PROBE_JS = r"""(() => {
   const allControls = [...document.querySelectorAll('button,[role="button"],a')], controls = allControls.filter(visible);
   const starts = controls.filter(e => /^(start voice(?: (?:mode|chat|conversation))?|use voice(?: mode)?|voice(?: mode)?|音声モード(?:を開始(?:する)?)?|音声(?:会話|チャット)(?:を開始(?:する)?)?|音声を開始(?:する)?|音声を使用(?:する)?)$/i.test(name(e)));
   const mutes = controls.filter(e => /^(?:unmute|mute)(?: (?:the |your )?microphone)?$|^microphone$|^ミュート(?:(?:を)?解除)?$|^マイク(?:を)?(?:ミュート|オフ|オン)?(?:する)?$|^マイクを(?:オン|オフ)にする$/i.test(name(e)));
-  const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(shown);
+  // 吹き出しの案内 (「ライブラリがスペースに変わりました」等の coachmark・popover) は Radix の popper の中にあり、操作を妨げない (2026-11-20)
+  const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(e => shown(e) && !e.closest('[data-radix-popper-content-wrapper]'));
   const explicitEnd = e => /^(?:(?:end|exit|close|stop) voice(?: (?:mode|chat|conversation|call))?|end (?:voice )?call|音声(?:会話|チャット|モード)?を終了(?:する)?|音声(?:会話|チャット|モード)から退出(?:する)?|通話を終了(?:する)?)$/i.test(name(e))
     || /^(?:(?:close|exit|end)-voice|voice-(?:close|exit|end))(?:-(?:button|mode|chat|call))*$/i.test(e.getAttribute('data-testid') || '');
   const voiceContext = e => {
@@ -178,10 +230,18 @@ PROBE_JS = r"""(() => {
   };
   const ends = controls.filter(e => explicitEnd(e) || voiceContext(e) && /^(end (?:voice )?(?:chat|conversation)|close|会話を終了(?:する)?|閉じる|終了)$/i.test(name(e)));
   const logins = controls.filter(e => /^(log in|sign in|ログイン|サインイン)$/i.test(name(e)));
-  const messages = [...document.querySelectorAll('[data-message-author-role="assistant"]')], last = messages.length ? messages[messages.length - 1] : null;
-  const busyControl = allControls.some(e => shown(e) && /^(stop generating|stop streaming|stop response|stop responding|生成を停止|応答を停止|回答を停止|生成を中止)$/i.test(name(e)));
+  // 応答の要素は data-message-author-role から data-conversation-role (見出し) に変わった (2026-11-20)。両方を見る
+  const messages = [...document.querySelectorAll('[data-message-author-role="assistant"],[data-conversation-role="assistant"]')];
+  const lastHead = messages.length ? messages[messages.length - 1] : null;
+  const last = lastHead ? (lastHead.closest('[data-talvt-turn-state]') || lastHead) : null;
+  const busyControl = allControls.some(e => shown(e) && (/^(stop generating|stop streaming|stop response|stop responding|生成を停止|応答を停止|回答を停止|生成を中止)$/i.test(name(e))
+    || /^(working|thinking|searching|作業中|思考中|考え中|検索中)/i.test((e.innerText || '').trim())));
   const busyMessage = !!last && (last.getAttribute('aria-busy') === 'true' || [...last.querySelectorAll('[aria-busy="true"]')].some(shown));
-  const meta = { busy: busyControl || busyMessage, revision: messages.length + ':' + (last ? last.textContent.length : 0) };
+  // 版は全ターンの文字数の合計。タスクの途中経過・作業時間の表示が増えても更新とみなす (ChatGPT が作業中に無操作で切れた、2026-11-20)。
+  // main は会話欄を含まない
+  const turns = [...document.querySelectorAll('[data-talvt-turn-state]')];
+  const size = turns.length ? turns.reduce((n, e) => n + e.textContent.length, 0) : last ? last.textContent.length : 0;
+  const meta = { busy: busyControl || busyMessage, revision: messages.length + ':' + size };
   const result = v => Object.assign(v, meta);
   const point = e => {
     const r = e.getBoundingClientRect(), x = Math.max(0, r.left) + (Math.min(innerWidth, r.right) - Math.max(0, r.left)) / 2, y = Math.max(0, r.top) + (Math.min(innerHeight, r.bottom) - Math.max(0, r.top)) / 2;
@@ -201,7 +261,8 @@ PROBE_JS = r"""(() => {
   return result({ kind: 'Loading' });
 })()"""
 
-CONTROLS_JS = r"""[...document.querySelectorAll('button,[role="button"],a')].map(e => (e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '').trim()).filter(n => /音声|声|マイク|voice|mic/i.test(n)).slice(0, 20)"""
+CONTROLS_JS = r"""({controls: [...document.querySelectorAll('button,[role="button"],a')].map(e => (e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '').trim()).filter(n => /音声|声|マイク|voice|mic|送信|send/i.test(n)).slice(0, 20),
+  path: location.pathname, composer: (document.querySelector('#prompt-textarea')?.innerText || '').trim().length})"""
 SETTLE_S = 2.0
 _STUCK = {"Login": LOGIN, "NeedsAction": NEEDS_ACTION, "Unsupported": UNSUPPORTED}
 
@@ -348,6 +409,9 @@ class ChatgptVoice:
     def matches(self, text: str) -> bool:
         return wake_match(text, self.cfg.phrases)
 
+    def near(self, text: str) -> bool:
+        return wake_near(text, self.cfg.phrases)
+
     def hear(self, level: float, threshold: float) -> None:
         """会話中のマイクの 1 フレーム (Director から)。声が VOICED_FRAMES 続いたら締め切りを延ばす。
         スピーカーなら ChatGPT の声も入るが、どちらが話していても会話は続いている。"""
@@ -370,14 +434,20 @@ class ChatgptVoice:
                 await page.front()
             except CdpError:
                 pass
-            clicked = False
+            clicked = reloaded = False
             stuck: tuple[str, float] | None = None  # (止まって見える状態, その始まり)
-            deadline = self.clock() + START_TIMEOUT_S
+            begin = self.clock()
+            deadline = begin + START_TIMEOUT_S
             while self.clock() < deadline:
                 snap = await page.probe()
                 kind = snap.get("kind")
                 if kind == "Active":
                     return STARTED if clicked else ALREADY
+                if kind == "Loading" and not clicked and not reloaded and self.clock() - begin >= RELOAD_S:
+                    await self._log_controls(page)
+                    log.info("chatgpt: no voice button, reloading %s", self.cfg.url)
+                    await page.navigate(self.cfg.url)
+                    reloaded = True
                 if kind in _STUCK:  # 読み込みの途中は一瞬 NeedsAction になる (実機 2026-11-19)。続いたときだけ確定
                     stuck = stuck if stuck and stuck[0] == kind else (kind, self.clock())
                     if self.clock() - stuck[1] >= SETTLE_S:

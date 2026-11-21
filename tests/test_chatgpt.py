@@ -7,7 +7,7 @@ from mocks import FakeClock
 from mocks_browser import MockBrowser
 
 from idle_talk import chatgpt_voice as cv
-from idle_talk.chatgpt_voice import ChatgptVoice, IdleWatch, chrome_args, wake_match
+from idle_talk.chatgpt_voice import ChatgptVoice, IdleWatch, chrome_args, wake_match, wake_near
 from idle_talk.clients import AsrClient
 from idle_talk.config import Chatgpt, load_chatgpt
 from idle_talk.director import HANDOFF_KIND, HANDOFF_TAIL_S, IdleTalkDirector
@@ -20,15 +20,23 @@ PHRASES = ("チャッピー",)
 
 # ---- 呼びかけの一致 ----
 @pytest.mark.parametrize("text", ["チャッピー", "ちゃっぴー", "チャッピー。", "ﾁｬｯﾋﾟｰ", "チャッピーさん", "ねえチャッピー",
-                                  "チャッピー！"])
+                                  "チャッピー！", "おーいチャッピー", "チャッピーを起動して", "チャッピー起動",
+                                  "ねえチャッピー、お願い", "ちょっとチャッピー来て", "おーいチャッピーさん"])
 def test_wake_match(text):
     assert wake_match(text, PHRASES)
 
 
 @pytest.mark.parametrize("text", ["はチャッピーで大丈夫だよ", "チャッピーさんがいます", "迷っちゃって", "ちゃった",
-                                  "笑っちゃった", "チャピ", ""])
+                                  "笑っちゃった", "チャピ", "", "チャッピーを起動してから考える"])
 def test_wake_no_match(text):
     assert not wake_match(text, PHRASES)
+
+
+@pytest.mark.parametrize("text,want", [("チャピ", True), ("チャッピーで大丈夫だよ", True), ("ちゃっぷい", True),
+                                       ("笑っちゃった", False), ("迷っちゃって", False), ("チャッピー", False),
+                                       ("今日はいい天気", False), ("", False)])
+def test_wake_near(text, want):
+    assert wake_near(text, PHRASES) is want
 
 
 def test_wake_other_phrase():
@@ -130,6 +138,14 @@ def test_start_results(snap, want):
     assert asyncio.run(v.start()) == want and page.clicks == []
 
 
+def test_start_reloads_once_without_voice_button():
+    # 開き直すまでは開始ボタンが無く (Loading)、開き直すと Ready、押すと Active
+    page = FakePage([lambda p: (ACTIVE if p.clicks else READY) if p.navigated else {"kind": "Loading"}])
+    v, _ = voice(page, url="https://chatgpt.com/")
+    assert asyncio.run(v.start()) == cv.STARTED
+    assert page.navigated == ["https://chatgpt.com/"] and page.clicks == [(10, 20)]
+
+
 def test_start_without_browser():
     v, _ = voice(fail=True)
     assert asyncio.run(v.start()) == cv.NO_BROWSER and v.host.forgot == 1
@@ -218,6 +234,9 @@ class FakeGpt:
     def matches(self, text):
         return wake_match(text, PHRASES)
 
+    def near(self, text):
+        return wake_near(text, PHRASES)
+
     def hear(self, level, threshold):
         self.heard += 1
 
@@ -286,7 +305,7 @@ def test_wake_hands_off_and_stops_listening(tmp_path):
         d.clock_.advance(HANDOFF_TAIL_S)
         b.speak()
         assert d.ingress._n > n
-        assert [e["phase"] for e in handoff_events(store)] == ["start", "end"]
+        assert [e["phase"] for e in handoff_events(store)] == ["start", "started", "end"]
         assert store.query("SELECT COUNT(*) FROM turns")[0][0] == 0  # 呼びかけは会話の履歴に残さない
     asyncio.run(run())
 
@@ -343,3 +362,13 @@ def test_without_chatgpt_wake_is_normal_talk(tmp_path):
         assert not d.handoff_on
     asyncio.run(run())
 
+
+
+def test_wake_near_miss_is_shown_not_handed_off(tmp_path):
+    async def run():
+        d, b, store = make(tmp_path, ["チャピ"])
+        b.speak()
+        await until(lambda: b.of("wake"))
+        assert b.of("wake")[-1] == {"t": "wake", "matched": False, "text": "チャピ"} and not d.handoff_on
+        assert [e["phase"] for e in handoff_events(store)] == ["near"]
+    asyncio.run(run())

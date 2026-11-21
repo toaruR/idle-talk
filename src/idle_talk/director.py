@@ -744,6 +744,7 @@ class IdleTalkDirector:
         if self._wants_handoff(text):
             self._start_handoff(uid, text)
             return False  # 応答しない (休止に入ってから DISCARDED が届くので待機には戻らない)
+        self._wake_near(uid, text)
         if self.transcribe_on:
             self._transcribe(uid, text)
             return False  # 応答しない (Ingress が DISCARDED を送り、待機に戻る)
@@ -776,6 +777,17 @@ class IdleTalkDirector:
         return (self.chatgpt is not None and not self.handoff_on and not (self.transcribe_on or self.pc_on)
                 and self.chatgpt.matches(text))
 
+    def _wake_near(self, uid: int, text: str) -> None:
+        """呼びかけらしいが一致しなかった発話をログと画面に出す (phrases の調整用。起こさない)。"""
+        near = getattr(self.chatgpt, "near", None)
+        if near is None or self.handoff_on or self.transcribe_on or self.pc_on or not near(text):
+            return
+        log.info("wake near-miss: utterance %d %r (not in [chatgpt].phrases)", uid, text)
+        talk_log.info("HANDOFF?: %s", text)
+        self.store.add_event(self.now_ms(), self.epoch.current, HANDOFF_KIND,
+                             json.dumps({"utterance_id": uid, "text": text, "phase": "near"}, ensure_ascii=False))
+        self._emit({"t": "wake", "matched": False, "text": text})
+
     def _start_handoff(self, uid: int, text: str) -> None:
         """鳴っている声・作りかけの話しかけを取消して休止し (ChatGPT の開始音より先に黙る)、音声会話を始める。"""
         log.info("wake: utterance %d %r -> chatgpt", uid, text)
@@ -785,6 +797,7 @@ class IdleTalkDirector:
         self.handoff_on = True
         self.fsm.enqueue(Event(Ev.HANDOFF))
         self._pump()
+        self._emit({"t": "wake", "matched": True, "text": text})
         self._emit({"t": "handoff", "active": True, "reason": ""})
         self._handoff_task = asyncio.get_running_loop().create_task(self._handoff())
 
@@ -793,6 +806,11 @@ class IdleTalkDirector:
         try:
             result = await self.chatgpt.start()
             log.info("chatgpt: start -> %s", result)
+            talk_log.info("HANDOFF: start (%s)", result)
+            self.store.add_event(self.now_ms(), self.epoch.current, HANDOFF_KIND,
+                                 json.dumps({"phase": "started", "result": result}, ensure_ascii=False))
+            if result in OK_RESULTS:
+                self._emit({"t": "handoff", "active": True, "reason": result})
             reason = await self.chatgpt.session() if result in OK_RESULTS else result
         except asyncio.CancelledError:
             reason = "cancelled"
