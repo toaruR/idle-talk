@@ -2,7 +2,7 @@
 type: spec
 ---
 
-<!-- spec-doc:last-reviewed-commit=8a393b6c39f9ca4dddbd1f73544e79f7fa4420b4 reviewed-at=2026-10-16 -->
+<!-- spec-doc:last-reviewed-commit=8ab95626c75780618880c5b3b4e28d93bcae9e41 reviewed-at=2026-11-21 -->
 
 # 仕様書
 
@@ -33,6 +33,11 @@ idle-talk は、PC に常駐する日本語の音声雑談アプリである。�
 - AI は声で話し相手を見分け、名前で呼ぶ。
 - AI は利用者と一緒にドラマを聞き、ときどき感想を言う (ドラマモード)。LLM が画像を読めれば、画面も見る。
 - AI は利用者の画面をときどき見て、変化があれば一言話しかける (画面モード)。
+- AI はカメラの映像をときどき見て、変化があれば一言話しかける (カメラモード)。
+- AI は前面のブラウザで見ているページを読んで、感想や要約を答える。
+- AI はスピーカーで鳴る別の音声 AI と話せる (ブラウザ補正なしモード)。
+- AI は話さず、聞こえた声を話者のラベルつきで文字にする (文字起こしモード)。
+- 利用者が「チャッピー」と呼ぶと、AI は ChatGPT の音声会話に引き渡す。
 - AI の人物設定 (ペルソナ) と声は、画面で切り替えられる。
 
 ## 全体構成
@@ -49,7 +54,7 @@ flowchart LR
 ```
 
 - Director は Python の単一イベントループで動く。
-- ASR ワーカーは ReazonSpeech を使う。設定で faster-whisper に戻せる。
+- ASR ワーカーは `[asr].engine` の認識器を使う。既定は ReazonSpeech である。同梱の `idle_talk.toml` は Haas-ja を選ぶ。
 - 外部ネットワークに出るのは次の 2 つだけである。
   - RSS Topic Worker
   - `[search].on` のときの Web 検索とニュース検索 (「Web 検索」節)
@@ -91,6 +96,14 @@ flowchart LR
   - スレッド数は `[asr].threads` で決める。
   - int8 版のモデルがあれば int8 版を使う。
   - 長い音声は 25 秒ごとに切って認識する。
+- `haas` は Haas-ja-v1.0 を onnxruntime で動かす (`haas_onnx`)。
+  - モデルは `[asr].haas_dir` (既定 `data/models/haas-ja`) から読む。`tools/haas_export_onnx.py` の出力である。
+  - エンコーダだけを ONNX で動かす。予測ネットワークと TDT デコードは numpy で計算する。NeMo は使わない。
+  - エンコーダは `[asr].gpu` の GPU に載せる (既定 0)。-1 なら CPU で動かす。
+  - CUDA の DLL は pip で入れたものから読む。
+  - ONNX 版の認識結果は、NeMo 版と 7,025 件すべてで一致した。
+  - asr-ja-bench (JSUT・JVNV・FLEURS) で、CER strict は ReazonSpeech の 7.36% から 4.79% に下がった。比較は `docs/research/2026-10-31-asr-comparison-haas-ja.md`。
+- `idle-talk.cmd asr reazon|haas` で、`[asr].engine` を切り換える。
 - `whisper` は faster-whisper `small` を CUDA/float16 で動かす。
 - パッケージやモデルが無いと、ASR ワーカーは exit 2 で終わる。
 
@@ -133,7 +146,7 @@ flowchart LR
 ### 記憶と声の管理 (`ctl memories` / `ctl speakers`)
 
 - `ctl memories` は保存した記憶を一覧にする。
-- `ctl speakers` は覚えた声を一覧にする。表示は名前と、平均に使った発話数である。
+- `ctl speakers` は覚えた声を一覧にする。表示は名前・文字起こしの仮名と、平均に使った発話数である。
 - `ctl speakers` は声の特徴そのものを表示しない。
 - どちらも `--delete ID` で 1 件、`--clear` で全件を削除する。
 - どちらも起動中に使える。
@@ -147,6 +160,9 @@ flowchart LR
   - 利用者の発話は、ASR の確定時に書く。
   - AI の発話は、再生を終えたチャンクだけを確定時に書く。DB の turns と同じ規則である。
   - 途中で止まった AI の発話は `AI(中断):` と書く。
+  - ブラウザ補正なしモードのマイクの発話は `PC:` と書く。
+  - 文字起こしモードの発話は `TEXT(始まり-終わり): 本文`、話者の切り替わりは `SPEAKER(時刻): 前 → 新` と書く。
+  - ChatGPT への引き渡しは `HANDOFF: start (結果)`、呼びかけらしいが一致しなかった発話は `HANDOFF?: 本文` と書く。
 - Director は、起動中 60 秒ごとに RSS / VRAM を `soak_sample` として記録する。計測に失敗しても、ログだけ残して続ける。
 - `main` は CLI 引数と `idle_talk.toml` だけを使う。
 - 環境変数 `LLAMA_URL` / `AIVIS_URL` / `AIVIS_SPEAKER` は、M0 計測と実機試験だけが読む。
@@ -168,6 +184,8 @@ flowchart LR
 | `[tts]` | 合成のたびに更新時刻を見て、変わっていれば読み直す |
 | `[ports]` / `[asr]` / `[vad]` / `[spontaneous]` / `[llm]` / `[aivis]` / `[topics]` / `[search]` / `[voice_id]` / `[drama]` / `[screen]` | 起動時だけ読む (`[aivis]` は `ctl start` が読む) |
 | `personas.toml` (別ファイル) | system プロンプトを作るたびに更新時刻を見て、読み直す |
+| `[voice_fx]` / `[transcribe]` / `[pc]` / `[chatgpt]` | 起動時だけ読む |
+| `cameras.toml` (別ファイル) | 起動時だけ読む (「カメラモード」節) |
 
 ### ポート (`[ports]`)
 
@@ -192,7 +210,10 @@ flowchart LR
   - `personas`: ペルソナの選択肢 (`[{id, name}]`)
   - `vision`: LLM が画像を読めるか (`director.drama_vision`)
   - `follow_window`: 画面モードで前面のウィンドウを撮るか (`[screen].follow_window` かつ Windows)
+  - `camera_browser`: カメラモードでブラウザの Web カメラを開くか (`cameras.toml` に `url = "browser"` のソースがあるか)
 - `/config.json` の中身は、要求のたびに作る。
+- 声の選択肢 (`speakers`) も、要求のたびに AivisSpeech から取り直す。画面を読み込み直せば、後から足した声が出る。
+- 起動中の `/config.json` は、LLM の判定より先に応答する。そのため `vision` が偽のことがある (「ブラウザ」節の接続)。
   - `vision` は LLM の起動後に決まる。そのため、ブラウザは共有の開始時に読み直す。
   - `speakers` は、AivisSpeech が後から起動しても取れるようにするためである。
 - `index.html` はポート番号を持たない。`/config.json` を読んで接続する。
@@ -310,18 +331,23 @@ flowchart LR
   - 現行 epoch の送出済みチャンクが、`finished` / `dropped` の報告待ちである間を指す。
   - Director は、上り音声を受けるたびに `vad.playing` を設定する。
 
-### 機能別の設定 (`[asr]` / `[search]` / `[voice_id]` / `[drama]` / `[screen]`)
+### 機能別の設定 (`[asr]` / `[search]` / `[voice_id]` / `[drama]` / `[screen]` / `[transcribe]` / `[pc]` / `[chatgpt]`)
 
 - いずれも `config.load_*` が読む。
 - セクションが無ければ既定値で動く。
 
 | セクション | キー (既定値、範囲) | 備考 |
 |---|---|---|
-| `[asr]` | `engine` (`reazon`) / `model_dir` (`data/models/reazonspeech`) / `threads` (2、1〜32) / `short_chars` (2、0〜10) / `short_reply_s` (20、0〜3600) | `engine` は `reazon` か `whisper`。変えたら再起動する。`short_*` は「割り込み判定」節の短い認識結果。`short_chars`=0 で無効 |
-| `[search]` | `on` (false) / `engines` (`["duckduckgo","bing"]`) / `read_page` (true) | `engines` は空でなく、既知のエンジンだけを並べる。`on` が false なら外部に出ない |
-| `[voice_id]` | `on` (false) / `model` (`data/models/voxceleb_resnet34_LM.onnx`) / `threshold` (0.6、0 と 1 を含まない) | モデルや onnxruntime が無ければ warn し、識別なしで動く |
-| `[drama]` | 下表 | `log_prompt` は bool、他は整数 |
+| `[asr]` | `engine` (`reazon`) / `model_dir` (`data/models/reazonspeech`) / `threads` (2、1〜32) / `short_chars` (2、0〜10) / `short_reply_s` (20、0〜3600) / `haas_dir` (`data/models/haas-ja`) / `gpu` (0、-1〜15) | `engine` は `reazon`・`haas`・`whisper` のどれか。変えたら再起動する。`short_*` は「割り込み判定」節の短い認識結果。`short_chars`=0 で無効。`haas_dir`・`gpu` は `haas` だけが使う |
+| `[search]` | `on` (false) / `engines` (`["duckduckgo","bing"]`) / `read_page` (true) / `realtime` (false) / `read_window` (true) | `engines` は空でなく、既知のエンジンだけを並べる。`on` が false なら外部に出ない。`read_window` は「見ているページ」節 |
+| `[voice_id]` | `on` (false) / `model` (`data/models/voxceleb_resnet34_LM.onnx`) / `threshold` (0.6、0 と 1 を含まない) / `forget_days` (3、0〜365) / `forget_few_days` (1、0〜365) | モデルや onnxruntime が無ければ warn し、識別なしで動く。`forget_*` は「話者識別」節 |
+| `[drama]` | 下表 | `log_prompt`・`mic` は bool、`window` は文字列、他は整数 |
 | `[screen]` | 下表 | 「画面モード」節 |
+| `[transcribe]` | `threshold` (0.45、0 と 1 を含まない) / `voice_max_s` (8、2〜60) / `vad_ratio` (2.0、1 を含まず 10 まで) | 「文字起こしモード」節 |
+| `[pc]` | `monitor` (空) / `mic` (空) | 機器の名前 (部分一致、100 字まで)。空なら Windows の既定の機器。「ブラウザ補正なしモード」節 |
+| `[chatgpt]` | `on` (false) / `phrases` (`["チャッピー"]`、2〜20 字を 1〜10 個) / `chrome` (空) / `port` (9333、1024〜65535) / `url` (`https://chatgpt.com/`) / `first_timeout_s` (20、5〜300) / `idle_timeout_s` (30、5〜600) / `max_s` (900、60〜7200) | 「ChatGPT への引き渡し」節。`url` は `https://` で始める |
+
+- 同梱の `idle_talk.toml` は `[asr].engine`=`haas`、`[chatgpt].phrases` に聞き違いの表記 (チャピー・ジャッピー・キャッピー等) を足している。
 
 `[drama]` のキー:
 
@@ -339,6 +365,7 @@ flowchart LR
 | `log_prompt` | false | bool | 一言・感想・要約で LLM に渡した台詞とメモを `talk.log` に残す |
 | `mic` | true | 真偽 | ドラマモード中もマイクを聞く。偽なら聞くだけ (話しかけは聞かず、一言・感想は続ける)。画面の「ドラマ中もマイク」(`ui.drama_mic`) でも切り替える |
 | `keep_snaps` | 0 | 0〜20 | 一言・感想に使った画面を `data/snaps` に残す枚数。0 なら残さない。画面モードと共通 |
+| `window` | 空 | 100 字まで | 一言・感想の画面を、タイトルにこの語を含むウィンドウから撮る (Windows のみ。例 `TVTest`)。空なら使わない |
 
 - 同梱の `idle_talk.toml` は `interval_s`=15、`gap_ms`=800、`log_prompt`=true、`keep_snaps`=3 で上書きしている。
 
@@ -387,6 +414,22 @@ flowchart LR
   - 箇条書きと記号を使わない。
 - 声はペルソナと別である。画面の「声」(`ui.speaker`) で選ぶ。
 
+名前の聞き違い (`misheard`、2026-11-04):
+
+- ペルソナに `misheard` (文字列の配列) を書ける。`name` が要る。
+- `misheard` は、音声認識が名前の代わりに書きがちな語である (例: うちゅ → 宇宙)。
+- 書けば、名前の節の後に「あなたの名前が〇〇と書かれることがある。呼びかけならあなたのこと。聞き違いを指摘しない」を足す。
+- 認識結果そのものは直さない。
+
+LoRA (`lora`、2026-11-08):
+
+- ペルソナに `lora = true` を書くと、`[llm].lora` の LoRA アダプタ (GGUF、例: 村山弁) をそのペルソナにだけ効かせる。
+- Director は llama-server を `--lora-init-without-apply` で起動し、LoRA を読み込むだけにする。
+- Director は LLM の要求ごとに `"lora": [{"id": 0, "scale": 1 または 0}]` を付ける (`PersonaBook.lora_scale`)。
+- scale 1 は、今のペルソナが `lora = true` で、system にその人物設定が入る要求だけである。
+- 記憶・名前の抜き出しと話題カード選びは、scale 0 で呼ぶ。
+- 学習データの作成・学習・評価の道具は `tools/dialect/` にある。計画は `docs/plans/archive/2026-11-07-yamagata-lora.md`。
+
 返答の長さ (`talk_length`、2026-11-14):
 
 - 声は読み飛ばせないので、雑談は短くし、頼まれて答えるときだけ長くする。
@@ -421,6 +464,11 @@ flowchart LR
 - `hello` がスキーマ違反でも、close 4002 になる。
 - Director は `PING_INTERVAL` (5s) ごとに `ping` を送る。
 - pong の未応答が 2 回続くと、Director は切断扱い (close 1001) にする。
+- 接続が切れると、Director は接続に属する処理を止める (`director._on_disconnect`)。
+  - 上りの音の区間と認識待ちを捨てる。切断前の認識結果は使わない。
+  - 生成・再生・相槌を取り消し、epoch を +1 する。
+  - ドラマ・画面 (カメラ)・ブラウザ補正なし・文字起こしの各モードを切る。
+  - Director のプロセスとサーバは残る。
 
 ### テキストメッセージ
 
@@ -431,7 +479,7 @@ flowchart LR
 |---|---|---|
 | `hello` | B→S | `version`(=1), `sample_rate`(=16000), `client_id`(1〜64 文字) |
 | `playback` | B→S | `epoch`, `utterance_id`, `chunk_id`, `position_ms`(0〜600000), `state`(started/finished/dropped) |
-| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM), `speaker`(話者 ID), `drama`(タブ共有中か), `screen`(画面モード中か), `persona`(ペルソナ id、1〜64 文字) |
+| `ui` | B→S | `mute`, `on`, `radio`, `interval_s`(10〜3600 秒), `quiet_start` / `quiet_end`(HH:MM), `speaker`(話者 ID), `drama`(タブ共有中か), `drama_mic`(ドラマ中もマイクを聞くか), `drama_window`(共有したウィンドウの番号、u32。ウィンドウ以外は 0), `screen`(画面モード中か), `camera`(カメラモード中か), `pc`(ブラウザ補正なしモード中か), `transcribe`(文字起こしモード中か), `persona`(ペルソナ id、1〜64 文字) |
 | `snap` | S→B | `id`(u32)。今の画面を 1 枚求める |
 | `snap` | B→S | `id`, `jpeg`(base64、1MiB まで), `thumb`(base64、1024 字まで), `reason`(200 字まで)。映像が無い・描けなければ `jpeg` を省き、理由を `reason` に入れる |
 | `ping` / `pong` | 双方向 | `ts` |
@@ -453,9 +501,14 @@ flowchart LR
 | `text` | `epoch`, `utterance_id`, `text` | AI 発話の各チャンク送出時に送る。今のブラウザは表示せず無視する |
 | `search` | `query`, `active` | Web 検索の開始 / 終了 |
 | `links` | `items: [{title, url}]` | 画面の URL 欄に出すページ |
+| `transcript` | `speaker`, `text`, `ts`, `uid`(任意) | 文字起こし欄に出す 1 発話 (「画面の文字起こし欄」節) |
+| `partial` | `seg`, `text` | 文字起こしモードの仮の文字 |
+| `vision` | `url`(data URL), `label`, `ts` | LLM に見せた画像。画面の「AI が見た画像」に最新の 1 枚だけ出す |
+| `wake` | `matched`, `text` | 呼びかけを聞いた (`matched` 真) / 呼びかけらしいが一致しなかった (偽) |
+| `handoff` | `active`, `reason` | ChatGPT の音声会話への引き渡しの開始・結果・終了 |
 
 - `text` は `MESSAGE_SCHEMA` に無い。ブラウザから受信すると 5006 になる (要確認: 設計 §12.1 への追加要否)。
-- `search` と `links` は設計書 §3.1 に記載がある。
+- `search`・`links`・`transcript`・`vision`・`handoff` は設計書 §3.1 に記載がある。`partial` は §6.10、`wake` は §6.11 に記載がある。
 
 ### バイナリフレーム
 
@@ -610,6 +663,14 @@ flowchart TD
 - `short_reply_s` = 0 なら、AI の声の最中も含めて常に捨てる (割り込みにせず再生に戻る)。
   - 理由: ニュースや自発発話で AI が話し続けると「20 秒以内」が常に成り立ち、「ハハ」「フッ」「私」が割り込みになって取消が連鎖した (実機 2026-10-17)。
   - 代わりに「うん」「いや」等の 2 字の返事・訂正も聞き流す。
+
+出だしの区間の継ぎ足し (`Ingress.hold`、2026-10-19):
+
+- 発話が VAD で 2 区間に割れ、出だしの 1 字だけの区間が捨てられると、最初の何語かが欠けた。
+- そのため、`MIN_SEG` 未満・幻聴・語なし・文脈の無い短い結果で捨てた区間は残しておく。
+- 捨てた区間の終わりから `ingress.JOIN_GAP_MS`=1 秒以内に次の区間が始まれば、その頭に足して認識し直す。
+- 自声・ドラマ・ブラウザ補正なしの回り込みで捨てた区間は足さない。AI の言葉が混ざるためである。
+- 次の区間を認識に出した後で捨てると決まった区間は、足せない。
 
 自声除外:
 
@@ -822,7 +883,13 @@ flowchart TD
 何を話すか:
 
 - 自発発話の指示には、話題の種を 1 つ添える。前の会話と違う話題を振らせるためである (`director._pick_topic`)。
-- 未使用・期限内の話題カードがあれば、公開日時が最新のカードを 1 枚使う。
+- 未使用・期限内の話題カードがあれば、明るい記事を優先して 1 枚使う (2026-10-28)。
+  - Director は、カードを語の点数 (`topics.card_tone`) の高い順、同じなら公開日時の新しい順に並べる。
+  - 語の点数は、見出しと概要に含まれる `POSITIVE_WORDS` の語の数から、`NEGATIVE_WORDS` (事故・死亡・災害等) の語の数の 2 倍を引いたものである。
+  - 候補が 2 枚以上なら、上位 `topics.PICK_MAX`=8 件の見出しを LLM に渡し、一番明るいものを番号で答えさせる (`topics.pick_messages`)。
+  - 答えに範囲内の番号が無い・呼び出しが失敗したら、語の点数の 1 位を使う。
+  - 選んでいる最中に利用者が話し始めたら、LLM を止める。カードは使用済みにしない。
+  - 暗い記事は捨てない。他のカードが尽きたときに使う。
   - 使うのは、見出しと概要である。
   - 概要は、タグを除いて `CARD_FACTS_MAX`=200 字に切る。
   - 使ったカードには、その場で `used_at` を記録する。再利用しない。
@@ -837,7 +904,7 @@ flowchart TD
 
 - 利用者の操作 (発話・応答・設定変更) が `IDLE_TIMEOUT`=1800 秒無いと、休止 (`rest`) に入る。
 - 休止中は、自発発話も止まる。
-- ミュートなしの `ui` で待機に戻る。画面の「開始」による接続と、設定変更がこれにあたる。
+- ミュートなしの `ui` で待機に戻る。画面の接続トグルによる接続と、設定変更がこれにあたる。
 - 無操作・連続失敗による休止も、同じく `ui` で待機に戻る。
 - 準備中・再生中に利用者の発話を検知したら、`duck` する。
   - 認識で語が出たら、取り消す。反応ありとみなし、待ち時間を基本値に戻す。
@@ -975,6 +1042,45 @@ flowchart TD
 - LLM が書いた URL は使わない。
 - 話題カードで話すときは、聞かれる前に記事の URL を送る。
 
+### 見ているページ (`[search].read_window`)
+
+```mermaid
+flowchart TD
+  A["「このページどう思う？」<br/>(wants_page)"] --> B{"要約・まとめ?<br/>(wants_summary)"}
+  B -- はい --> S["ChatGPT のページを<br/>新しいタブで開く"]
+  B -- いいえ --> C["「ちょっと読んでみるね。」<br/>アドレスバーの URL を読む"]
+  C --> D{"本文が読めた?"}
+  D -- はい --> E["本文を添えて答える"]
+  D -- いいえ --> F{"LLM が画像を読める?"}
+  F -- はい --> G["前面のウィンドウを撮り<br/>画像で答える"]
+  F -- いいえ --> H["「見ているページが<br/>分からなかった」"]
+```
+
+- `read_window` は既定オンで、Windows だけで動く (`browser_page`)。
+- Director は、LLM の指示ではなく発話の文字で頼みを判定する (`wants_page`)。
+  - 「この (その・今見てる) ページ / 記事 / サイト」等と、意見・感想・要約の語を含めば頼みとみなす。
+  - 「見れる」「読める」も頼む語に含む。
+- 頼まれたら、`PAGE_NOTICE`「ちょっと読んでみるね。」を流す。
+- 前面から Z 順 (`EnumWindows`) で最初のブラウザを探す。
+  - ウィンドウクラスは `Chrome_WidgetWin_1` である。VS Code・Obsidian も同じクラスなので、タイトル末尾の「- Google Chrome」「- Microsoft Edge」で見分ける。
+  - idle-talk 自身と、`[screen].exclude` の語を含むウィンドウは読まない。
+- アドレスバーの値は、PowerShell の UI Automation で読む。値は `https://` が省かれる。
+- 読み取った URL は、すぐ `links` で画面の URL 欄に出す。
+- 本文は r.jina.ai (テキスト形式) で読む。上限は 15 秒である。
+  - 20 字未満の行 (メニュー等) を除く。
+  - ページのタイトルが出る位置から 1500 字を、最後の利用者発話に添える。
+  - 履歴は直近 4 ターンに絞る。答えは 3〜5 文にする (「返答の長さ」)。
+- 本文が読めなければ、LLM が画像を読めるときだけ前面のウィンドウを撮って画像で答える (`wincap.WindowCapture`)。
+- どちらも無ければ「見ているページが分からなかった」と言う。
+- 外部に出るのは、読むページの URL だけである。画面は外部に送らない。
+
+要約 (`wants_summary`、2026-10-21):
+
+- 頼みの発話が「要約」「まとめ」を含めば、本文を読まず、LLM も呼ばない。
+- 既定のブラウザの新しいタブで `https://chatgpt.com/?q=<URL> を日本語、小学生にも分かるように箇条書きで要約して` (URL エンコード) を開く (`webbrowser.open`)。
+- AI は「ChatGPT で要約を開いたよ。」と言う。
+- URL が取れなければ「見ているページが分からなかった」と言う。画面では答えない。
+
 ### 話題カードの補充
 
 ```mermaid
@@ -1027,8 +1133,19 @@ flowchart TD
 - 一致したら、その人の声の平均を更新する。
 - 過去分の重みは `MAX_WEIGHT`=20 で頭打ちにする。
 - 短い発話は判定しない。直前の相手を引き継ぐ。
+- 名前の無い登録済みの声への切り替えは、2 回続けて一致したときだけ行う (`director._switch_cand`)。1 回目は直前の相手のままにする。
+  - 利用者の声が 1 回だけ、テレビの名前なしの声に 0.67 で一致し、名前をまた尋ねたためである (2026-10-19 / 10-26)。
+  - 今回登録した声は既に `ENROLL_N` 回一致しているので、すぐ切り替える。
 - 知らない声が `ENROLL_N`=2 回続けて互いに一致したら、名前なしで `speakers` に登録する。
 - 物音やテレビの 1 回では登録しない。
+
+古い声の削除:
+
+- Director は起動時に、名前の無い古い声を消す。
+  - 最後に一致してから `forget_days` (既定 3) 日経った声
+  - 一致が `FEW_N`=3 回以下で、`forget_few_days` (既定 1) 日経った声 (物音・テレビの一言)
+- どちらも 0 なら消さない。
+- よく聞く声は、一致のたびに `updated_at` が新しくなるので残る。文字起こしの仮名も保たれる。
 
 名前の聞き方:
 
@@ -1144,9 +1261,27 @@ flowchart TD
 - マイクの認識結果が直近の台詞と連続一致したら、拾ったドラマの台詞とみなして捨てる。
   - 条件は、認識結果の `ECHO_RATIO`=6 割以上が一致することである。
   - 一致は `ECHO_MIN_CHARS`=4 字以上でなければならない。
-  - 捨てたときは `drama_echo_suppressed` を記録する。
-- ドラマ側の認識が後に届いた場合は、検出できない。
+  - 捨てたときは `drama_echo_suppressed` を記録する。payload の `by` は判定の方法 (`level` / `text` / `voice`) である。
+- マイクの発話がタブの音と重なっていたら (`sounding()` の間に発話中だった)、Director はドラマ側の認識を待ってから比べる (`director._after_drama`)。
+  - 待つのは、重なった台詞の区間が閉じて認識が出るまでである。上限は `max_seg_s`×2+2 秒である。
+  - 待つ間は、利用者への応答もその分遅れる。
+  - 2〜3 字の結果でも、台詞にそのまま含まれれば捨てる。
+  - Chrome の外のアプリ (動画ビュワー等) の音はブラウザの AEC で消えず、マイクの認識が先に出るためである (2026-10-19)。
+- 重なった発話は、文字より先に音量の比で見る (`drama.BleedMeter`)。
+  - 回り込みの比は、タブの音が鳴っている間の「マイクの音量 − タブの音量」(dB) の中央値である。タブの音量は直近 0.3 秒の最大を使う。
+  - 発話のうち「タブの音量 + 比 + 6dB」を超えるフレームが 3 割未満なら、待たずに捨てる。
+- 1.5 秒以上の重なった発話は、名前の分かった相手の声との類似度が `DRAMA_VOICE_MIN` (暫定 0.45) 未満でも捨てる。
+- 重なった発話からは、新しい声を登録しない。
+- ドラマモード中は、名前を尋ねない。
 - タブの音が鳴っている間は、マイクの VAD の閾値も上げる (「発話検出」節の `vad.bleed`)。
+
+AI の声の混入 (2026-10-17):
+
+- 画面全体をシステム音声つきで共有すると、idle-talk のタブが鳴らす AI の声もドラマの音に入る。
+- ブラウザは、共有の音声に `restrictOwnAudio` (Chrome 141+) を付けて、自分のタブの音を除く。
+- Director は、ドラマの認識結果が直近 2 回の AI 発話の本文と 6 割以上一致したら、台詞に足さない (`drama.is_ai_voice`)。
+  - 一致は 3 字以上の一致の合計で数える。対象は 4 字以上の結果だけである。
+  - 捨てたときは `drama_self_suppressed` を記録する。
 
 画面:
 
@@ -1180,6 +1315,30 @@ flowchart TD
 - `[drama].keep_snaps` が 1 以上なら、使った画面を `data/snaps/snap-<日時>-<id>.jpg` に保存する。
   - 新しい方から `keep_snaps` 枚だけ残し、古いものを消す。
   - 保存に失敗しても、ログだけ残して続ける。
+- 使った画面は `vision` で画面の「AI が見た画像」にも出す (「ブラウザ」節)。
+
+画面を撮る先 (2026-11-08 / 11-09):
+
+```mermaid
+flowchart TD
+  A{"ui.drama_window<br/>が 0 以外?"} -- はい --> W["その番号のウィンドウ"]
+  A -- いいえ --> B{"[drama].window<br/>がある?"}
+  B -- はい --> T["タイトルに語を含む<br/>最初のウィンドウ"]
+  B -- いいえ --> C{"[screen].follow_window?"}
+  C -- はい --> F["前面のウィンドウ"]
+  C -- いいえ --> S["ブラウザの共有 (snap)"]
+```
+
+- ウィンドウを共有したら、ブラウザは映像トラックの `label` (`window:<番号>:0`) から番号を取り、`ui.drama_window` で送る。番号は Windows のウィンドウハンドルである。
+- 画面全体やタブの共有では、番号は 0 である (トラック名 `screen:0:0`)。ドラマモードは音のために画面全体を共有することが多い。
+- `[drama].window` なら、`EnumWindows` の Z 順で、見えていてタイトルに語を含む最初のウィンドウを撮る。
+- 番号・タイトルで指定したウィンドウは、`PrintWindow` (`PW_RENDERFULLCONTENT`) で描かせる。前面でなくても、他のウィンドウが重なっていても写る。
+- 描いた画像が真っ黒 (描画に応じないアプリ) なら、画面から切り抜く。
+- `follow_window` は、前面のウィンドウを `wincap` で撮る (PNG)。フォーカスを移すと、そのウィンドウが撮られる。
+- ウィンドウが撮れなければ (除外・最小化・閉じた・失敗)、ブラウザの共有に `snap` で求める。
+- TVTest の映像は、Chrome の共有ではアイコンだけの黒い画面になる。`wincap` では写る (2026-11-08)。
+- 音は、どの場合もブラウザの共有から取る。
+- ログには共有の種類 (snap の `reason`、`drama window: none (screen or tab shared)`) を出す。
 
 プロンプトの記録 (`[drama].log_prompt`):
 
@@ -1294,6 +1453,220 @@ flowchart TD
 - 差は明るさの平均なので、配色の似たページ間の移動は小さく出る。
 - 通常応答には画面を添えない (G1 に足さない)。
 
+## カメラモード (設計書 §6.9)
+
+開始と終了:
+
+- 画面の「カメラで見てもらう」で始める。押すと `ui.camera=true` を送る。
+- 使えるのは、LLM が画像を読めるとき (`/config.json` の `vision`) だけである。読めなければカメラを開かずにエラーを出す。
+- ブラウザは、`cameras.toml` に `url = "browser"` のソースがあるとき (`camera_browser`) だけ、`getUserMedia` (映像のみ、640×360 を希望) で Web カメラを開く。
+- カメラモードは、ドラマ・画面・ブラウザ補正なし・文字起こしの各モードと同時に使えない。画面は他のボタンを無効にする。
+- 画面モードとカメラモードを切り替えたら、比べる相手の画像を捨てて見直す。
+
+見る流れ:
+
+- Director は画面モードと同じ経路で動く (`screen_on` と `camera_on` が立つ)。間隔・変化の判定は `[screen]` の `interval_s`・`min_diff` を使う。
+- 一言のプロンプトは `CAMERA_PROMPT` である。40 字以内・1〜2 文で、映像の説明と容姿の評価はしない。誰も映っていない・暗いときは「なし」と答えさせる。
+- `[screen].follow_window` がオンでも、カメラモードでは前面のウィンドウを撮らない。
+
+ソース (`cameras.toml`、2026-10-27):
+
+- `cameras.toml` は設定ファイルと同じフォルダに置く。パスワードを含むので git に入れない (書き方は `cameras.example.toml`)。
+- `[[source]]` ごとに 1 つのソースを書く。
+  - `label`: LLM に伝える名前 (40 字まで)。「このカメラ: 駐車場」のように添える
+  - `url`: `"browser"` ならブラウザの Web カメラ。それ以外は ffmpeg が読める URL (rtsp は TCP)
+  - `device`: この PC のカメラの DirectShow の機器名。idle-talk が直接撮る
+  - `url` と `device` は、どちらか 1 つだけを書く。
+- トップレベルの `ffmpeg` で、ffmpeg の実行ファイルを指定できる。
+- Director は `interval_s` ごとに、上から 1 つずつ順に見る。
+- 変化の判定は、ソースごとに、前に LLM に見せたそのソースの画像と比べる。
+- ブラウザ以外のソースは、`camera.grab` が ffmpeg で 1 コマを 640×360 の JPEG にする。その JPEG から 32×18 の縮小画像を作る。
+  - RTSP は 1 回 3〜4 秒かかる。上限は `GRAB_TIMEOUT_S`=15 秒である。取れなければ黙る。
+- ファイルが無ければ、ブラウザの Web カメラだけを見る。
+- URL のパスワードはログに出さない (`camera.mask_url`)。
+
+限界:
+
+- カメラの自動露出・ノイズで、縮小画像の差が出やすい。`min_diff` は画面モードと共通である。
+- 映像は外部に送らない。`keep_snaps` 以外では保存しない。
+
+## ブラウザ補正なしモード (設計書 §6.8)
+
+- スピーカーで鳴る別の音声 AI (ブラウザの ChatGPT 等) と、マイクとスピーカーで話すモードである。旧称は「PC と話す」である。
+- 画面の「ブラウザ補正なし」で `ui.pc=true` を送る。共有はしない。
+- 相手の声は、利用者の声と同じくマイクで聞く。
+
+音の出口と入口:
+
+- AI の声は、ブラウザではなく Director がスピーカーに鳴らす (`monitor.Monitor`、`sounddevice`)。
+  - 出力機器は `[pc].monitor` で選ぶ。空なら Windows の既定の再生機器である。
+  - ブラウザの ChatGPT のエコー除去は、Chrome の別のタブが鳴らした声も消す。Chrome の外から鳴らした声は消さない (2026-10-18)。
+  - モニターは、再生の報告をブラウザと同じ形で返す。履歴の確定は通常と同じ経路を通る。
+  - ブラウザには文字だけを送る。
+- マイクも Director が録る (`monitor.MicCapture`)。
+  - 入力機器は `[pc].mic` で選ぶ。空なら Windows の既定の録音機器である。
+  - モード中は、ブラウザの上りのマイクを捨てる。Chrome のエコー除去は、ブラウザの ChatGPT の声をほぼ消したためである (2026-10-19)。
+  - Python で録る音は、エコー除去も雑音抑制も通らない。
+  - モード中の E6 は、無音ではなく読み取りの失敗で判定する。静かな部屋の生の音は RMS 0.5 程度で、無音判定を誤って起こしたためである。
+- 機器が開けないとき (sounddevice が無い場合も含む)、Director はモードを始めず 5006 を返す。
+
+割り込みと回り込み:
+
+- モード中は、`duck` をモニターに渡さない。拾った AI の声で毎回音量が下がったためである。
+- AI の声の最中に始まった発話は、`STOP_WORDS` を含むときだけ割り込みにする。それ以外は捨てる (`pc_echo_suppressed`)。
+  - 拾った AI の声は「嬉しいわ」→「うれしい」のように聞き違えられ、文字の一致では捨てられなかったためである。
+
+記録と止める機能:
+
+- マイクの認識結果は、`turns` に role `pc`、talk.log に `PC:` で残す。LLM には user として渡す。
+- モード中は、普段の自発発話・`IDLE_TIMEOUT` 休止・相槌・名前の質問・記憶の抽出を止める。
+- 切り替えるときは、鳴っている途中の声を取り消す。前の出口から再生の報告が来ないためである。
+- events に `pc_mode` を残す。
+
+限界:
+
+- スピーカーでしか使えない。
+- AI の声の最中の発言は、停止語以外を聞き捨てる。止まるのは認識結果が出てからである。
+- 利用者と相手の声は区別しない。
+
+## 文字起こしモード (設計書 §6.10)
+
+```mermaid
+flowchart LR
+  M["マイク (補正なし)"] --> V["Silero VAD で区間化<br/>8 秒で静かな所で切る"]
+  V --> P["1 秒ごとに仮の文字<br/>(partial)"]
+  V --> F["区間を確定して認識"]
+  F --> G["仮の文字と合わせる<br/>(merge_final)"]
+  G --> T["話者つきで<br/>画面・talk.log・turns"]
+```
+
+開始と終了:
+
+- 画面の「文字起こし」で `ui.transcribe=true` を送る。共有はしない。
+- ドラマ・画面・カメラ・ブラウザ補正なしモードとは同時に使えない。
+- オンにしたら、鳴っている途中の声と作りかけの自発発話を取り消す。
+- AI は話さない。認識結果を LLM に渡さず、待機に戻る (`_on_transcript` が False を返す)。
+  - 応答・相槌・自発発話・名前の質問・記憶の抽出・`IDLE_TIMEOUT` 休止をしない。
+- events に `transcribe_mode` を残す。
+
+マイクと発話検出:
+
+- ブラウザは、モード中だけマイクをエコー除去・雑音抑制なしで開き直す (`micConstraints(raw)`)。Chrome のエコー除去は、別のタブの動画の声も消すためである。
+- モード中は、E6 の無音判定を切る。
+- 音量の VAD を Silero VAD (`silero_vad.SileroVad`、`data/models/silero_vad_v6.onnx`) に差し替える (`Ingress.set_vad`)。
+  - 声らしさ 0.5 以上で開始し、0.35 未満が 300ms 続いたら終える。
+  - モデルが無ければ音量の VAD を使う。そのときは雑音の推定を直近 10 秒の下位 5% で頭打ちにする (`EnergyVad.floor_track`)。閾値の倍率は `[transcribe].vad_ratio` である。
+- モード中は、文脈の無い短い認識結果を捨てない。
+- 5 秒ごとに、閾値・雑音の推定・音量の最大・閾値を超えた割合を idle_talk.log に `transcribe level` で出す。
+
+区間の切り方:
+
+- 溜めた音が `TRANSCRIBE_SPLIT_MS`=8 秒に達したら、直近 2 秒 (`ingress.SPLIT_LOOK_MS`) で一番静かなフレームの後で切って確定する (`Ingress._split`)。残りは次の区間の頭にする。
+- 話者の切り替わり (下記の SPEAKER 行) が出たら、溜めている区間をその時刻の前後 0.5 秒で一番静かな所で切る (`Ingress.split_at`)。前後が 1 秒未満なら切らない。
+
+仮の文字と確定:
+
+- 溜めている間も `PARTIAL_MS`=1 秒ごとに、そこまでの音を認識し直して `partial` で画面に出す。前の分の認識が終わっていなければ飛ばす。
+- 確定の `transcript` には `uid` を付ける。画面は `uid` 以下の仮の文字を消す。
+- 確定の文字は、同じ区間の最後の仮の文字と合わせる (`merge_final`)。
+  - 確定が仮の 9 割 (`PARTIAL_KEEP_RATIO`) 以上の長さなら、確定を使う。
+  - 確定が短く、その 6 割 (`PARTIAL_COVER`) 以上が仮に順に含まれれば、仮を使う。
+  - 含まれなければ「仮 確定」とつなぐ。
+  - ReazonSpeech は、話者が交代する区間を全体で認識すると前の部分を落としたためである (2026-10-28)。
+- 確定が認識の失敗・幻聴・語なしで捨てられたときも、仮の文字を確定にする (`Ingress.on_discard`)。
+- 仮の文字は、talk.log・`turns` に残さない。
+
+話者:
+
+- 話者は「話者識別」節の仕組みで見分ける (`[voice_id].on` が要る)。無ければ「不明」とする。
+- 照合の閾値は `[transcribe].threshold` (既定 0.45) である。スピーカー越しの動画の声は、同じ人でも類似度が 0.4〜0.5 に下がったためである。
+- 知らない声は `ENROLL_N` 回続けて一致したら登録する。それまでは「不明」とする。
+- 声の特徴は、発話の頭から `[transcribe].voice_max_s` (既定 8 秒) までで測る。認識は区間全体で行う。
+- 1.5 秒未満の発話は、直前の話者を引き継ぐ。
+- 話者の切り替わりは、区間とは別に追う (`speaker_track.SpeakerTrack`)。
+  - マイクの音を 1.5 秒の窓で 0.5 秒ずつずらし、声の特徴を別スレッドで計算する。
+  - 声らしいフレームが半分以上の窓だけを照合する。窓では登録しない。
+  - 別の話者が 2 窓続いたら、talk.log に `SPEAKER(時刻): 前の話者 → 新しい話者` を出す。
+- 表示名は、名前があれば名前、無ければ仮名 (`speakers.alias`) である。
+  - 仮名の無い声には、初めて聞いた発話の音から「言葉 + 通し番号」を付けて保存する (例「低く落ち着いた声1」)。
+  - 言葉は、声の高さ (有声フレームの F0 の中央値) と抑揚 (F0 の標準偏差、半音) から選ぶ。
+  - 高さの区切りは 125Hz・165Hz・220Hz、抑揚の区切りは 2.0・3.5 半音である (暫定)。
+  - 有声部分が 0.2 秒未満なら「声」とする。番号は、これまでの仮名の最大 + 1 である。
+
+記録:
+
+- 1 発話ごとに `transcript` (話者・本文・時刻) を画面に送る。
+- talk.log に `TEXT(始まり-終わり): 本文` を書く。話者は書かない。
+- `turns` に role `transcript`、本文 `話者: 本文` で残す。この行は会話の履歴に入れない。
+
+## ChatGPT への引き渡し (設計書 §6.11)
+
+```mermaid
+stateDiagram-v2
+  [*] --> 待機
+  待機 --> 休止: 呼びかけ (Ev.HANDOFF)
+  休止 --> 会話中: 音声ボタンを押せた
+  休止 --> 待機: 始められない (login など)
+  会話中 --> 待機: 無操作・ChatGPT 側で終了・max_s・タブ喪失 (Ev.WAKE)
+```
+
+- `[chatgpt].on` のときだけ有効である (`chatgpt_voice.py`)。
+- 利用者が「チャッピー」と呼ぶと、AI は応答せず、ChatGPT の音声会話を始める。
+
+呼びかけの判定 (`wake_match`):
+
+- 対象は、自声・ドラマの回り込み・文脈の無い短い結果を除いた認識結果である。
+- 文字起こし・ブラウザ補正なしモードでは見ない。
+- 発話と `phrases` を正規化して比べる。NFKC、カタカナ→ひらがな、英字は小文字、空白・句読点・長音を除く。
+- 発話が呼びかけを含み、前後の言葉を除いた残りが `WAKE_EXTRA`=2 字以下なら一致とする。
+  - 前の呼びかけ語 (`WAKE_LEADS`: おーい・ねえ・ちょっと等) と、後ろの頼む語 (`WAKE_TAILS`: を起動して・呼んで・お願い・さん等) を、それぞれ 2 つまで除く。
+  - 「おーいチャッピー」「チャッピーを起動して」は一致する。「チャッピーさんがいます」は一致しない。
+- あいまい一致はしない。長音を除いた「ちゃっぴ」の 1 字違いを許すと「〜ちゃった」が当たったためである。聞き違いは `phrases` に足す。
+- 一致しないが呼びかけらしい発話は、起こさずに記録する (`wake_near`)。
+  - 呼びかけを含むが余りが多い、または呼びかけと 3/4 以上同じ字並びでパ行・バ行を含むものである。
+  - idle_talk.log に `wake near-miss`、talk.log に `HANDOFF?:`、events に `handoff` (phase `near`) を残す。
+  - 画面には `wake` (matched 偽) を送る。`phrases` の調整に使う。
+
+引き渡しと会話中:
+
+- 一致したら応答しない。履歴・turns にも残さない。
+- `wake` (matched 真) と `handoff` (active 真) を送り、`Ev.HANDOFF` で休止に入る。鳴っている声と作りかけの生成は取り消す。
+- ブラウザは、上がる 2 音を鳴らす。
+- 会話中は、上りの音 (マイク・タブ) を VAD にも ASR にも入れずに捨てる。ChatGPT の声を拾えば、利用者の発話になるためである。
+- マイクの音量だけを見て、閾値以上が 200ms 続けば、無操作の締め切りを延ばす。
+- 再接続とミュート解除では、休止から戻さない。自発発話・無操作休止もしない。
+
+ChatGPT の操作:
+
+- 専用プロファイル (`data/chatgpt-chrome`) の Chrome を、`--remote-debugging-port` (127.0.0.1、`[chatgpt].port`) と `--app=<url>` で起動しておく。
+- CDP で chatgpt.com のタブの状態を判定する (`PROBE_JS`)。状態は Ready・Active・Login・NeedsAction・Unsupported・Loading である。
+  - 読み込みの途中は一瞬 NeedsAction になる。Login・NeedsAction・Unsupported は 2 秒続いたときだけ確定する。
+  - 案内の吹き出し (`[data-radix-popper-content-wrapper]` の中の dialog) は、操作を妨げないので除く。
+- Ready なら、音声ボタンを `Input.dispatchMouseEvent` で押す。マイクは `Browser.grantPermissions` で許可しておく。
+- 開始ボタンが `RELOAD_S`=4 秒出なければ、ページを 1 回開き直す。
+- 開始の結果は、talk.log の `HANDOFF: start (結果)`、events の `handoff` (phase `started`)、画面の `handoff` (active 真、reason に結果) で出す。
+
+終わり:
+
+- 0.5 秒ごとに状態を見る。
+- 声も応答の更新も無いまま、最初は `first_timeout_s`、声を聞いた後は `idle_timeout_s` 経ったら、終了ボタンを押す。
+  - 応答の更新は、生成中の表示と、全ターンの文字数の合計 (応答の版) で見る。タスクの作業中の表示が増えても更新とみなす。
+  - 開始ボタンに 0.5 秒戻ったのを確かめる。押せなければページを開き直してマイクを切る。
+- 音声の画面が 2 秒続けて無ければ、ChatGPT 側で終えたとみなす。
+- `max_s` で終了ボタンを押す。タブが失われたら (`lost`)、すぐ戻る。
+- 戻るときは `handoff` (active 偽と理由) を送り、`Ev.WAKE` で待機に戻る。
+  - 直後の `HANDOFF_TAIL_S`=2 秒も、上りの音を捨てる。
+  - ブラウザは下がる 2 音、始められなかったときは低い 2 音を鳴らし、理由を文字起こし欄に出す。
+- 終わりの理由は idle / closed / max / lost、始められなかった理由は login / needs_action / unsupported / timeout / no_browser / error である。
+
+限界:
+
+- 呼びかけは、発話の終わり (`T_silence`) の後に判定する。
+- 呼びかけに続けて言った用件は、ChatGPT に届かない。
+- ChatGPT の画面が変わると、`PROBE_JS` の判定が外れる。始められないときは、音声らしいボタンの名前を warn に出す。
+- ヘッドホンでは ChatGPT の声をマイクで拾えない。そのとき延長は ChatGPT の画面の更新だけに頼る。
+- Chrome の remote debugging のポートは、同じ PC の他のプロセスからも操作できる。
+
 ## データモデル (SQLite, 設計書 §3.4)
 
 - DB は `<data-dir>/idle_talk.db` である。
@@ -1306,9 +1679,11 @@ flowchart TD
 | `turns` | id, ts, role, text, completed(0/1), stop_position_ms, utterance_id |
 | `topic_cards` | id, hook, facts, source_url, published_at, expires_at, angle, used_at, user_reaction |
 | `memories` | id, content, evidence_utterance_id, updated_at, deletable, persona (ペルソナの id。NULL は共通、スキーマ v3) |
-| `speakers` | id, name (NULL = 名前未登録), embedding (float32 単位ベクトルの BLOB), n (平均に使った発話数), updated_at |
+| `speakers` | id, name (NULL = 名前未登録), embedding (float32 単位ベクトルの BLOB), n (平均に使った発話数), updated_at, alias (文字起こしの仮名、スキーマ v4) |
 
-- スキーマ版は `PRAGMA user_version` = 2 である。版 2 で `speakers` を追加した。
+- スキーマ版は `PRAGMA user_version` = 4 である。版 2 で `speakers`、版 3 で `memories.persona`、版 4 で `speakers.alias` を追加した。
+- 古い版の DB は、起動時に列を足して移行する。
+- `turns` の role は `user` / `ai` のほか、`pc` (ブラウザ補正なしモードのマイク) と `transcript` (文字起こし) がある。`transcript` の行は会話の履歴に入れない。
 - 全削除 (`delete_all`) は `speakers` も消す。
 
 ### 起動時の検査と復元
@@ -1376,9 +1751,14 @@ flowchart LR
 | `drama_mode` | `{on}` | ドラマモードのオン / オフ |
 | `drama_react` / `drama_finale` | `{}` / `{notes, rest}` | 一言 / 総合的な感想の発火 |
 | `drama_skip` | `{text, held_s}` | 生成した一言を、台詞の再開で言わずに捨てた |
-| `drama_echo_suppressed` | — | マイクが拾ったドラマの台詞を捨てた 1 回につき 1 行 |
+| `drama_echo_suppressed` | `{by, ...}` | マイクが拾ったドラマの台詞を捨てた 1 回につき 1 行。`by` は `level` / `text` / `voice` |
+| `drama_self_suppressed` | — | ドラマの音に入った AI の声を台詞から捨てた 1 回につき 1 行 |
 | `short_discarded` | `{utterance_id, text}` | 文脈の無い短い認識結果を捨てた 1 回につき 1 行 |
-| `screen_mode` | `{on}` | 画面モードのオン / オフ |
+| `screen_mode` | `{on, camera}` | 画面モード・カメラモードのオン / オフ |
+| `pc_mode` | `{on}` | ブラウザ補正なしモードのオン / オフ |
+| `pc_echo_suppressed` | — | ブラウザ補正なしモードで、AI の声の最中に始まった発話を捨てた 1 回につき 1 行 |
+| `transcribe_mode` | `{on}` | 文字起こしモードのオン / オフ |
+| `handoff` | `{phase, ...}` | ChatGPT への引き渡し。phase は `near` / `start` / `started` / `end` |
 | `screen_skip` | `{diff, image}` / `{diff, text}` | 画面モードで話さなかった (変化が小さい・画像なし / LLM が「なし」) |
 | `run_meta` | `{host, started_at, ended_at, app_commit, sample_count}` | 終了時に 1 行。記録の出所を検証するのに使う |
 
@@ -1426,10 +1806,14 @@ flowchart LR
 - 画面は WS の接続・再接続を行い、state と error を表示する。
 - 設定欄の項目: ミュート・自発発話・ラジオ・間隔・休止時間帯・声・ペルソナ・音量。
 - 接続先ポートは `?port=` で決める。無ければ配信元の `/config.json` の `ws_port` を使う。
-- 「開始」ボタンは、押したら無効にする。押し直すと、マイク取り込みと接続が二重になるためである。
-- 接続までに失敗したときだけ、作りかけの WS を閉じ、「開始」を押せる状態に戻す。
-- 接続後に、「ドラマを一緒に見る」と「画面を一緒に見る」が押せるようになる。片方の使用中は、もう片方を押せない。
-- 状態欄の下に、「ドラマ視聴中」「画面を見ています」「前面のウィンドウを見ています」を出す。
+- 画面の右上の接続トグルで、接続と停止を切り替える (2026-10-19 に「開始」ボタンから変えた)。
+  - 接続にすると、マイクを開いて WS をつなぐ。操作中はトグルを押せない。マイク取り込みと接続が二重になるためである。
+  - 停止にすると、WS を閉じ、録音・共有・再生を解放する。停止後は送信も再接続もしない。
+  - 停止は休止 (ミュート) と違う。休止は接続したまま背景処理を止める。
+- モードのボタン (ドラマ・画面・カメラ・ブラウザ補正なし・文字起こし) は、hello を済ませた間 (`linked`) だけ押せる (2026-11-20)。
+  - 起動中の `/config.json` は `vision` を偽で返すことがある。その間に共有を始めると、映像トラックを止めてしまうためである。
+  - 使用中のモードがあれば、他のモードのボタンは押せない。
+- 状態欄の下に、「ドラマ視聴中」「画面を見ています」「前面のウィンドウを見ています」等を出す。
 - `snap` を受けたら、共有中のドラマか画面から 1 枚を返す。どちらも無ければ `reason`「not sharing」を返す。
 - WS が切れた・つながらなかったときは、状態を「再接続中…」にし、2 秒 (`RECONNECT_MS`) ごとにつなぎ直す。マイクと共有中のタブの音はそのまま使い続ける。
 - 切断中と hello 前は、マイクのフレームも JSON も送らない。
@@ -1447,6 +1831,24 @@ URL 欄:
 - 新しいものを先頭に積む。
 - 100 行を超えたら、古い順に消す。
 - 同じ URL は、先頭へ付け直す。
+
+文字起こし欄 (URL 欄の下):
+
+- `transcript` の発話を、話者のラベルつきで出す。
+- 文字起こしモード以外でも、Director は応答に使った認識結果を送る (`_show_heard`、2026-11-04)。会話中に何と聞き取られたかを確かめるためである。
+  - 話者は名前、無ければ「あなた」、ブラウザ補正なしモードでは「PC」である。
+  - ドラマモードでは、タブの台詞も「ドラマ」で送る。AI の声として捨てた分は除く。
+  - これらは画面に出すだけで、turns・talk.log は従来どおりである。
+- 文字起こしモードの `partial` は、灰色の破線の 1 行で出す。確定の `uid` 以下の仮の文字を消す。
+- `wake` と `handoff` の結果も、「呼びかけ」「ChatGPT」の話者でこの欄に出す。
+
+AI が見た画像 (2026-11-20):
+
+- `vision` を受けたら、画面の「AI が見た画像」に最新の 1 枚だけを出す。保存はしない。
+- Director が送るのは、LLM に見せた画像である。
+  - ドラマの一言・感想に使った画面
+  - 画面・カメラモードで、変化ありと判定した 1 枚
+  - 見ているページの代わりに撮った画面
 
 マイク:
 
@@ -1495,6 +1897,15 @@ flowchart LR
   - C3: 連番の連続性
   - C4: フレーム長
 - `aec_probe.js` は、AEC の実測プローブである。`getUserMedia({echoCancellation:true})` を使う。
+- `partner_probe.html` は、相手の AI のマイクに AI の声が届くかを測るページである。ボタンは利用者の操作で押す。
+
+## Agent Plugins (`agent-plugins/idle-talk/`)
+
+- `agent-plugins/idle-talk/` は、エージェントに idle-talk を使わせるためのパッケージである。
+- `plugin.json` が、導入スキルを指定する。
+- `skills/idle-talk/SKILL.md` が、接続・モード選択・取消・権限の境界を定める。
+- `tests/test_agent_plugin_manifest.py` が manifest とパスの境界を、`tests/test_agent_plugin_skill.py` がスキルの約束事を検査する。
+- 設計の案は `docs/plans/2026-10-20-agent-plugins.md` (status: draft) にある。
 
 ## テスト
 
@@ -1537,3 +1948,14 @@ flowchart LR
 | 縮小画像 (`thumb`) | 画面を 32×18 の明るさ 1 バイトずつに縮めたもの。画面モードの変化の判定に使う |
 | タブの音の回り込み | ドラマモードで、スピーカーから出たタブの音をマイクが拾うこと。AEC で消えないので、閾値を上げて抑える |
 | 文脈の無い短い認識結果 | AI の声と関係の無い時点の、`short_chars` 字以下の認識結果。物音の聞き違いとして捨てる |
+| カメラモード | Web カメラ・ネットワークカメラの映像をときどき見て、変化があれば一言話しかけるモード |
+| ソース | カメラモードで見る 1 つのカメラ。`cameras.toml` の `[[source]]` |
+| 見ているページ | 前面のブラウザで開いているページ。頼まれたら本文を読んで答える |
+| ブラウザ補正なしモード | スピーカーで鳴る別の音声 AI と話すモード。AI の声とマイクを Director が扱う。旧称「PC と話す」 |
+| モニター | ブラウザ補正なしモードで、AI の声を Chrome の外からスピーカーに鳴らす仕組み (`monitor.Monitor`) |
+| 文字起こしモード | AI が話さず、聞こえた声を話者のラベルつきで文字にするモード |
+| 仮の文字 (`partial`) | 文字起こしモードで、区間を確定する前に 1 秒ごとに出す途中の認識結果 |
+| 仮名 (`alias`) | 名前の無い声に、声の高さと抑揚から付ける「低く落ち着いた声1」のような呼び名 |
+| 呼びかけ | ChatGPT の音声会話を始める言葉 (`[chatgpt].phrases`、既定「チャッピー」) |
+| 引き渡し (handoff) | 呼びかけで idle-talk が休止し、ChatGPT の音声会話に代わること |
+| 接続トグル | 画面の右上で、マイクと WS の接続・停止を切り替える操作 |
