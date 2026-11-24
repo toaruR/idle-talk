@@ -24,6 +24,7 @@ def test_schema_columns(store):
     assert _cols(store, "topic_cards") == {
         "id", "hook", "facts", "source_url", "published_at", "expires_at", "angle", "used_at", "user_reaction"}
     assert _cols(store, "memories") == {"id", "content", "evidence_utterance_id", "updated_at", "deletable", "persona", "speaker_id"}
+    assert _cols(store, "knowledge") == {"id", "content", "evidence_utterance_id", "updated_at", "deletable"}
 
 
 def test_migrates_memories_persona(tmp_path):
@@ -112,6 +113,23 @@ def test_delete_all(store):
     store.add_turn(1, "user", "a", 1)
     store.execute("INSERT INTO topic_cards(hook) VALUES ('h')")
     store.execute("INSERT INTO memories(content, evidence_utterance_id, updated_at, deletable) VALUES ('c',1,1,1)")
+    store.execute("INSERT INTO knowledge(content, evidence_utterance_id, updated_at, deletable) VALUES ('shared',1,1,1)")
     store.delete_all()
-    for t in ("events", "turns", "topic_cards", "memories"):
+    for t in ("events", "turns", "topic_cards", "memories", "knowledge"):
         assert store.count(t) == 0
+
+
+def test_migrates_v5_to_shared_knowledge_without_reclassifying_existing_memories(tmp_path):
+    path = tmp_path / "v5.db"
+    s = Store(path, db_backup=False)
+    s.execute("INSERT INTO memories VALUES (7, '利用者は猫好き。', 8, 9, 1, 'a', NULL)")
+    s.execute("DROP TABLE knowledge")
+    s.execute("PRAGMA user_version=5")
+    s.close()
+    again = Store(path, db_backup=False)
+    try:
+        assert tuple(again.query("SELECT * FROM memories")[0]) == (7, "利用者は猫好き。", 8, 9, 1, "a", None)
+        assert again.count("knowledge") == 0
+        assert again.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
+    finally:
+        again.close()

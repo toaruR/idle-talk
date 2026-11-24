@@ -1,5 +1,6 @@
 """長期記憶: 抽出結果の整形・保存・プロンプト注入と Director 結線 (設計書 3.4)。"""
 import asyncio
+import json
 import threading
 
 import numpy as np
@@ -248,6 +249,109 @@ def test_background_follows_name_merge_for_pending_memory(tmp_path):
             await d._mem_task
             assert d._speaker == a and d._mem_pending == []
             assert [r["speaker_id"] for r in memory.list_memories(store)] == [a]
+        finally:
+            d.close()
+            store.close()
+    asyncio.run(run())
+
+
+def test_director_short_correction_is_extracted_and_used_in_next_response(tmp_path):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        seen = []
+        mid = memory.add_memory(store, "利用者は猫が好き。", 1, 1, persona=d.personas.current_id)
+
+        def llm(messages):
+            seen.append(messages)
+            yield json.dumps(dict(kind="speaker", id=mid, content="利用者は猫が嫌い。", evidence="猫は嫌い"))
+
+        d._llm = llm
+        try:
+            assert d._on_transcript(2, "猫は嫌い")
+            assert d._mem_pending == [(2, "猫は嫌い", None)]
+            d._start_memory()
+            await d._mem_task
+            assert "利用者は猫が好き。" in seen[0][1]["content"]
+            prompt = d._chat_messages()[0]["content"]
+            assert "猫が嫌い" in prompt and "猫が好き" not in prompt
+            assert d._mem_pending == []
+        finally:
+            d.close()
+            store.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["speaker", "shared"])
+def test_correction_cancelled_during_generation_is_only_applied_on_retry(tmp_path, kind):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        gate = threading.Event()
+        started = threading.Event()
+        old = "利用者は横浜に住む。" if kind == "speaker" else "作品の舞台は横浜。"
+        new = "利用者は大阪に住む。" if kind == "speaker" else "作品の舞台は大阪。"
+        if kind == "speaker":
+            mid = memory.add_memory(store, old, 1, 1, persona=d.personas.current_id)
+        else:
+            mid, = memory.remember_knowledge(store, [old], 1, 1)
+
+        def llm(messages):
+            started.set()
+            gate.wait(10)
+            yield json.dumps(dict(kind=kind, id=mid, content=new, evidence="横浜ではなく大阪です"))
+
+        d._llm = llm
+        try:
+            d._mem_pending = [(2, "横浜ではなく大阪です", None)]
+            d._start_memory()
+            await until(started.is_set)
+            d._cancel_memory()
+            gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await d._mem_task
+            assert old in memory.memory_prompt(store, d.personas.current_id)
+            assert new not in memory.memory_prompt(store, d.personas.current_id)
+            assert len(d._mem_pending) == 1
+            d._start_memory()
+            await d._mem_task
+            assert old not in memory.memory_prompt(store, d.personas.current_id)
+            assert new in memory.memory_prompt(store, d.personas.current_id)
+            assert d._mem_pending == []
+        finally:
+            gate.set()
+            d.close()
+            store.close()
+    asyncio.run(run())
+
+
+def test_unknown_voice_uses_shared_knowledge_without_personal_memories(tmp_path):
+    d, _, store, _, _ = make(tmp_path)
+    try:
+        d.voices = VoiceBook(store)
+        memory.remember(store, [FACT], 1, 1, d.personas.current_id)
+        memory.remember_knowledge(store, ["この作品の舞台は大阪。"], 1, 1)
+        prompt = d._chat_messages()[0]["content"]
+        assert "この作品の舞台は大阪。" in prompt and FACT not in prompt
+    finally:
+        d.close()
+        store.close()
+
+
+def test_speaker_deleted_during_extraction_drops_pending_without_learning(tmp_path):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        sid = add_speaker(store, "太郎")
+
+        def llm(messages):
+            store.execute("DELETE FROM speakers WHERE id=?", (sid,))
+            yield json.dumps(dict(kind="shared", id=None, content="作品の舞台は大阪。", evidence="作品の舞台は大阪です"))
+
+        d._llm = llm
+        try:
+            d._mem_pending = [(2, "作品の舞台は大阪です", sid)]
+            d._start_memory()
+            await d._mem_task
+            assert d._mem_pending == []
+            assert store.count("knowledge") == store.count("memories") == 0
         finally:
             d.close()
             store.close()

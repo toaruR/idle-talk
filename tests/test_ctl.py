@@ -92,6 +92,41 @@ def test_memories_list_delete_clear(tmp_path, capsys):
     assert "固定" in out and "朝型" not in out and "猫" not in out
 
 
+def test_knowledge_list_delete_clear_does_not_change_personal_memories(tmp_path, capsys):
+    from idle_talk import memory
+    from idle_talk.main import DB_FILE
+    from idle_talk.store import Store
+    s = Store(tmp_path / DB_FILE, db_backup=False)
+    try:
+        memory.add_memory(s, "利用者は猫が好き。", 1, 1)
+        mid, = memory.remember_knowledge(s, ["作品の舞台は横浜。"], 1, 1)
+        s.execute("INSERT INTO knowledge VALUES (99, '固定の知識', 1, 1, 0)")
+        assert run_ctl(tmp_path, "knowledge") == 0
+        out = capsys.readouterr().out
+        assert "全員共通" in out and "横浜" in out and "猫" not in out
+        assert run_ctl(tmp_path, "knowledge", "--delete", str(mid)) == 0
+        assert run_ctl(tmp_path, "knowledge", "--delete", str(mid)) == 1
+        assert run_ctl(tmp_path, "knowledge", "--delete", "99") == 1
+        memory.remember_knowledge(s, ["作品の舞台は大阪。"], 2, 2)
+        assert run_ctl(tmp_path, "knowledge", "--clear") == 0
+        assert [r["content"] for r in s.query("SELECT content FROM knowledge")] == ["固定の知識"]
+        assert s.count("memories") == 1
+        assert run_ctl(tmp_path, "memories", "--clear") == 0
+        assert s.count("knowledge") == 1
+    finally:
+        s.close()
+
+
+def test_knowledge_on_old_database_is_empty_without_migration(tmp_path, capsys):
+    import sqlite3
+    from idle_talk.main import DB_FILE
+    with sqlite3.connect(tmp_path / DB_FILE):
+        pass
+    assert run_ctl(tmp_path, "knowledge") == 0
+    assert "no shared knowledge" in capsys.readouterr().out
+    assert run_ctl(tmp_path, "knowledge", "--delete", "1") == 1
+
+
 def test_start_launches_aivis_engine_then_stop_kills_it(tmp_path, monkeypatch, capsys):
     cfg = tmp_path / "s.toml"
     cfg.write_text('[ports]\ntts = 10199\n[aivis]\nengine = "C:/a/run.exe"\n', encoding="utf-8")

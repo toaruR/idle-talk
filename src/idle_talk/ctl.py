@@ -1,4 +1,4 @@
-"""起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status|memories|speakers|asr。
+"""起動・停止ラッパー: python -m idle_talk.ctl start|stop|restart|status|memories|knowledge|speakers|asr。
 
 asr_worker と main をバックグラウンドで起動し、出力は data_dir の asr_worker.log / idle_talk.log に追記する。
 [aivis].engine があれば、その前に AivisSpeech Engine を起動して応答を待つ (main の起動時の空合成と声の一覧取得に間に合わせる)。
@@ -6,7 +6,7 @@ asr_worker と main をバックグラウンドで起動し、出力は data_dir
 二重起動は各プロセスが書く PID ファイル (idle_talk.pid / asr_worker.pid) の生存確認で拒否する。
 停止は main に停止ファイルを置いて正常終了 (run_meta 記録・llama-server 停止) を待ち、
 STOP_TIMEOUT_S 内に終わらなければ強制終了する。asr_worker は保存する状態が無いので即終了する。
-memories は保存された記憶の一覧表示と削除 (--delete ID / --clear)。起動中でも使える (WAL)。
+memories は話者の記憶、knowledge は全員の共有知識の一覧表示と削除 (--delete ID / --clear)。起動中でも使える (WAL)。
 speakers は覚えた声 (話者識別、設計書 6.4) の一覧表示と削除 (--delete ID / --clear)。起動中の削除は再起動後に効く。
 asr は音声認識のエンジンの表示と切り換え (asr reazon / asr haas)。設定ファイルの [asr].engine を書き換え、
 asr_worker だけを再起動する (会話・LLM は止めない。再起動中の数秒は認識できない)。
@@ -283,6 +283,35 @@ def cmd_memories(args: argparse.Namespace, data_dir: Path) -> int:
     return 0
 
 
+def cmd_knowledge(args: argparse.Namespace, data_dir: Path) -> int:
+    """全話者・全ペルソナ共通の知識の確認・削除。個人の記憶には触れない。"""
+    db = data_dir / DB_FILE
+    if not db.exists():
+        print(f"no database: {db}")
+        return 1
+    con = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge'").fetchone():
+            print("no shared knowledge")
+            return 1 if args.delete is not None else 0
+        if args.clear:
+            n = con.execute("DELETE FROM knowledge WHERE deletable=1").rowcount
+            print(f"deleted {n} shared knowledge records")
+        elif args.delete is not None:
+            n = con.execute("DELETE FROM knowledge WHERE id=? AND deletable=1", (args.delete,)).rowcount
+            print(f"deleted shared knowledge {args.delete}" if n else f"shared knowledge {args.delete}: not found or not deletable")
+            return 0 if n else 1
+        else:
+            rows = con.execute("SELECT id, content, deletable FROM knowledge ORDER BY id").fetchall()
+            for mid, content, deletable in rows:
+                print(f"{mid:4d}{'' if deletable else ' (固定)'}  [全員共通]  {content}")
+            if not rows:
+                print("no shared knowledge")
+    finally:
+        con.close()
+    return 0
+
+
 def cmd_speakers(args: argparse.Namespace, data_dir: Path) -> int:
     """覚えた声と名前の確認・削除。声の特徴そのものは表示しない。"""
     db = data_dir / DB_FILE
@@ -321,12 +350,12 @@ def main(argv: list[str] | None = None) -> int:
 
         return remo_main(argv[1:])
     p = argparse.ArgumentParser(prog="idle-talk-ctl")
-    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories", "speakers", "asr", "remo"))
+    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories", "knowledge", "speakers", "asr", "remo"))
     p.add_argument("engine", nargs="?", choices=ASR_ENGINES, help="asr: 切り換え先の音声認識エンジン")
     p.add_argument("--config", default=SETTINGS_FILE)
     p.add_argument("--data-dir", default="data")
-    p.add_argument("--delete", type=int, metavar="ID", help="memories / speakers: 指定 id を削除")
-    p.add_argument("--clear", action="store_true", help="memories: 削除可能な記憶をすべて削除 / speakers: 覚えた声をすべて削除")
+    p.add_argument("--delete", type=int, metavar="ID", help="memories / knowledge / speakers: 指定 id を削除")
+    p.add_argument("--clear", action="store_true", help="memories / knowledge: 削除可能な行をすべて削除 / speakers: 覚えた声をすべて削除")
     args = p.parse_args(argv)
     args.config = Path(args.config).resolve()
     data_dir = Path(args.data_dir).resolve()
@@ -334,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd_stop(args, data_dir)
         return cmd_start(args, data_dir)
     return {"start": cmd_start, "stop": cmd_stop, "status": cmd_status,
-            "memories": cmd_memories, "speakers": cmd_speakers, "asr": cmd_asr}[args.command](args, data_dir)
+            "memories": cmd_memories, "knowledge": cmd_knowledge, "speakers": cmd_speakers, "asr": cmd_asr}[args.command](args, data_dir)
 
 
 if __name__ == "__main__":

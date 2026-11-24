@@ -153,6 +153,8 @@ idle-talk.cmd start     # 起動（AivisSpeech Engine・音声認識・本体を
 idle-talk.cmd stop      # 停止
 idle-talk.cmd restart   # 再起動
 idle-talk.cmd status    # 動いているかを表示
+idle-talk.cmd memories  # 話者・ペルソナごとの記憶を表示
+idle-talk.cmd knowledge # 全話者・全ペルソナ共通の知識を表示
 idle-talk.cmd asr haas  # 音声認識を Haas-ja に切り換え（reazon で戻す）
 ```
 

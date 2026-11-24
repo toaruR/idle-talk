@@ -14,8 +14,8 @@ from typing import Any
 
 from .errors import ERR_DB
 
-SCHEMA_VERSION = 5  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)、
-# 4: speakers.alias (文字起こしモードの仮名、設計書 6.10)、5: memories.speaker_id (声に紐づく記憶)
+SCHEMA_VERSION = 6  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)、
+# 4: speakers.alias (文字起こしモードの仮名、設計書 6.10)、5: memories.speaker_id (声に紐づく記憶)、6: knowledge (共有知識)
 
 log = logging.getLogger("idle_talk.store")
 
@@ -64,9 +64,16 @@ CREATE TABLE IF NOT EXISTS speakers (
     updated_at INTEGER,
     alias TEXT NULL
 );
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY,
+    content TEXT NOT NULL,
+    evidence_utterance_id INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deletable INTEGER NOT NULL CHECK (deletable IN (0, 1))
+);
 """
 
-TABLES = ("events", "turns", "topic_cards", "memories", "speakers")
+TABLES = ("events", "turns", "topic_cards", "memories", "knowledge", "speakers")
 
 
 def _integrity_ok(path: Path) -> bool:

@@ -40,7 +40,7 @@ from .fsm import Director as FsmDirector
 from .history import PlaybackHistory, history_window, talk_log
 from .ingress import Ingress
 from .interrupt import is_stop_word, judge
-from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, parse_extracted, remember
+from .memory import MIN_UTTERANCE_CHARS, extract_messages, memory_prompt, memory_snapshot, remember_extracted
 from .metrics import MetricsRecorder
 from .monitor import MicCapture, Monitor
 from .persona import PersonaBook
@@ -768,7 +768,9 @@ class IdleTalkDirector:
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
         if self._ask_sid is not None and self._speaker == self._ask_sid:  # 名前を尋ねた相手の返事
             self._name_pending = self._name_pending[-1:] + [text]
-        if len(text) >= MIN_UTTERANCE_CHARS and (self.voices is None or self._speaker is not None):
+        if ((self.voices is None or self._speaker is not None)
+                and (len(text) >= MIN_UTTERANCE_CHARS
+                     or (text and memory_snapshot(self.store, self.personas.current_id, self._speaker)))):
             # 話者は受信時に固定する。未知の声の情報を直前の人や共通の記憶にしない。
             self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text, self._speaker)]
         return True
@@ -1837,8 +1839,8 @@ class IdleTalkDirector:
         rows = history_window(self.store, self.cfg)
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in rows if t["text"]]
-        memories = (memory_prompt(self.store, self.personas.current_id, self._speaker)
-                    if self.voices is None or self._speaker is not None else "")
+        memories = memory_prompt(self.store, self.personas.current_id, self._speaker,
+                                 include_speaker=self.voices is None or self._speaker is not None)
         system = (self.personas.system_prompt() + memories
                   + self._speaker_section(ask) + self._mode_section() + self._question_note(rows))
         lines = self.drama.context_text() if self.drama_on else ""
@@ -1891,19 +1893,25 @@ class IdleTalkDirector:
     async def _extract_memory(self, batch: list[tuple[int, str]], stop: threading.Event, persona: str,
                               speaker_id: int | None = None) -> None:
         """受信時の話者と、抜き出し開始時点のペルソナに紐づける。別の話者の発話は混ぜない。"""
+        snapshot = memory_snapshot(self.store, persona, speaker_id)
         try:
-            text = await asyncio.to_thread(self._collect, extract_messages([t for _, t in batch]), stop)
+            text = await asyncio.to_thread(self._collect, extract_messages([t for _, t in batch], snapshot), stop)
         except Exception as e:  # noqa: BLE001  LLM の失敗で会話を止めない (未処理分は次回に回す)
             log.warning("memory extraction failed: %s", e)
             return
         if text is None or stop.is_set() or asyncio.current_task() is not self._mem_task:
             return
         done = {uid for uid, _ in batch}
+        if speaker_id is not None and not self.store.query("SELECT id FROM speakers WHERE id=?", (speaker_id,)):
+            self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
+            return
+        try:
+            remember_extracted(self.store, text, batch, snapshot, self.now_ms(), persona, speaker_id)
+        except Exception as e:  # noqa: BLE001 保存失敗時も会話を止めず、未処理分を次回に回す
+            log.warning("memory save failed: %s", e)
+            return
         self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
-        items = parse_extracted(text)
-        if items and (speaker_id is None or self.store.query("SELECT id FROM speakers WHERE id=?", (speaker_id,))):
-            remember(self.store, items, batch[-1][0], self.now_ms(), persona, speaker_id)
-            log.info("memory saved (%s, speaker %s): %s", persona, speaker_id, " / ".join(items))
+        log.info("memory extraction processed (%s, speaker %s)", persona, speaker_id)
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:
