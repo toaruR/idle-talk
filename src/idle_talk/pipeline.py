@@ -87,13 +87,13 @@ class ResponsePipeline:
 
     def _llm_clauses(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
                      emit: Callable[[dict], None] | None = None, page: Callable[[], dict | None] | None = None,
-                     shot: Callable[[], tuple[str, str] | None] | None = None):
+                     shot: Callable[[], tuple[str, str] | None] | None = None, control=None):
         """LLM 出力を節にする (別スレッドで回る)。emit はイベントループへ渡すメッセージ送出。
         LLM が失敗したら 5001 を送り、途中まで話したか (お知らせの定型文は数えない) で選んだ一言を読む。"""
         emit = emit or self._emit
         spoke = False
         try:
-            for clause in self._llm_body(messages, search, emit, page, shot):
+            for clause in self._llm_body(messages, search, emit, page, shot, control):
                 spoke = spoke or clause not in _NOTICES
                 yield clause
         except (ClientError, OSError, ValueError, TimeoutError) as e:  # LlmTimeout 等/接続断
@@ -103,10 +103,22 @@ class ResponsePipeline:
 
     def _llm_body(self, messages: list[dict], search: Callable[[str], list[dict]] | None,
                   emit: Callable[[dict], None], page: Callable[[], dict | None] | None,
-                  shot: Callable[[], tuple[str, str] | None] | None):
+                  shot: Callable[[], tuple[str, str] | None] | None, control=None):
         sp = ClauseSplitter()
         ep = self.epoch.current
         last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        if control is not None and isinstance(last, str):
+            answer = control(last, self._llm, lambda: self.epoch.is_current(ep))
+            if answer is not None:
+                if answer and self.epoch.is_current(ep):
+                    yield answer
+                return
+            # 操作しなかった発話への普通の返答で、操作成功を作り話にしない。
+            note = "\n今回は家電操作を実行していません。家電を操作したと答えないでください。"
+            if messages and messages[0]["role"] == "system":
+                messages = [dict(messages[0], content=messages[0]["content"] + note)] + messages[1:]
+            else:
+                messages = [{"role": "system", "content": note}] + messages
         summarize = getattr(page, "summarize", None)
         if summarize is not None and isinstance(last, str) and wants_summary(last):
             yield from self._summary_clauses(summarize, ep, emit)
@@ -266,13 +278,19 @@ class ResponsePipeline:
 
     async def respond(self, messages: list[dict], search: Callable[[str], list[dict]] | None = None,
                       tail: str = "", page: Callable[[], dict | None] | None = None,
-                      shot: Callable[[], tuple[str, str] | None] | None = None) -> int:
+                      shot: Callable[[], tuple[str, str] | None] | None = None, control=None) -> int:
         """search を渡すと、LLM が「検索: 語」と答えたときに Web 検索してから答える。tail は返答の後に必ず読む定型文。
         page を渡すと、利用者が「このページどう思う？」等と頼んだときに見ているページを読んで答える。
         shot は本文が読めないときに代わりに見る前面のウィンドウの画面。"""
         loop = asyncio.get_running_loop()
         emit = lambda m: loop.call_soon_threadsafe(self._emit, m)  # noqa: E731  節の生成は別スレッドで回る
-        clauses = self._llm_clauses(messages, search, emit, page, shot)
+        # イテレータの初回実行より前に cancel されても、開始時の世代で判定する。
+        ep = self.epoch.current
+        guarded = None
+        if control is not None:
+            def guarded(text, llm, current):
+                return control(text, llm, lambda: self.epoch.is_current(ep)) if self.epoch.is_current(ep) else ""
+        clauses = self._llm_clauses(messages, search, emit, page, shot, guarded)
         if tail:
             clauses = _then(clauses, tail)
         return await self.play_utterance(clauses)

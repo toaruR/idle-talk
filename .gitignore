@@ -35,6 +35,11 @@ data/
 # カメラモードのソース (パスワードを含む)
 cameras.toml
 
+# LAN 内の Remo 接続先と学習した赤外線
+remo.toml
+remo-signals.json
+remo-signals.json.tmp
+
 # 作業用の一時ファイル
 tmp/
 # Unsloth が学習時に作業フォルダへ作るコンパイル済みコード (tools/dialect/train.sh)

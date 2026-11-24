@@ -309,8 +309,13 @@ def cmd_speakers(args: argparse.Namespace, data_dir: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "remo":
+        from .remo import main as remo_main
+
+        return remo_main(argv[1:])
     p = argparse.ArgumentParser(prog="idle-talk-ctl")
-    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories", "speakers", "asr"))
+    p.add_argument("command", choices=("start", "stop", "restart", "status", "memories", "speakers", "asr", "remo"))
     p.add_argument("engine", nargs="?", choices=ASR_ENGINES, help="asr: 切り換え先の音声認識エンジン")
     p.add_argument("--config", default=SETTINGS_FILE)
     p.add_argument("--data-dir", default="data")

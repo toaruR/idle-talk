@@ -1,0 +1,8 @@
+# コピーして remo.toml にする。Nature Remo mini の LAN 内 IPv4 を指定。
+# 信号登録が済んでから true にし、idle-talk を再起動する。
+on = false
+host = "192.168.11.123"
+
+# 最後に送った設定を相対指定の基準にする秒数。実際の家電の状態ではない。
+# リモコンや Nature アプリから操作すると、この推定値と食い違う。
+state_ttl_s = 900

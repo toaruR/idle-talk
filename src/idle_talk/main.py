@@ -31,6 +31,7 @@ from .monitor import open_device, open_input
 from .persona import PERSONAS_FILE, PersonaBook
 from .portlock import acquire_or_exit
 from .resource_sampler import SAMPLE_INTERVAL_MS, ResourceSampler
+from .remo import SETTINGS_FILE as REMO_FILE, load_control
 from .camera import CAMERAS_FILE, CameraCycle, load_cameras
 from .camera import describe as describe_camera
 from .screen import ScreenWatcher
@@ -174,6 +175,12 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
                                 metrics=MetricsRecorder(store), app_commit=git_commit())
     director.set_speaker = reloader.set_speaker
     director.personas = args.personas
+    director.remo = load_control(Path(args.config).with_name(REMO_FILE))
+    if director.remo is None:
+        log.info("Remo voice control disabled (config missing or on=false): %s", Path(args.config).with_name(REMO_FILE))
+    else:
+        log.info("Remo voice control enabled: %d registered profiles (%s)", len(director.remo.signals),
+                 Path(args.config).with_name(REMO_FILE))
     drama = load_drama(args.config)
     director.drama_mic = drama.mic  # 画面の「ドラマ中もマイク」の初期値 (接続時に ui で上書きされる)
     director.drama = DramaListener(drama, EnergyVad(adaptive=True, ratio=vad.ratio,

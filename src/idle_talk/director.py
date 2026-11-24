@@ -276,6 +276,7 @@ class IdleTalkDirector:
         self.pipeline.fallback = lambda spoke: self.personas.fallback(spoke)  # 差し替え後も今のペルソナで選ぶ
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
         self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
+        self.remo = None  # RemoControl。利用者への通常応答だけで家電操作する (main が結線)
         self.page_reader: Callable[[], dict | None] | None = None  # 「このページどう思う？」で見ているページを読む (main が結線)
         self.page_capture: Callable[[], object] | None = None  # 本文が読めないとき代わりに撮る前面のウィンドウ (wincap.WindowCapture.grab)
         # 話者識別 (設計書 6.4)。enable_voice_id で有効にする
@@ -1901,6 +1902,7 @@ class IdleTalkDirector:
         self._loop_main = asyncio.get_running_loop()
         try:
             await self.pipeline.respond(messages, search=self.web_search, page=self.page_reader,
+                                        control=self.remo if not (self.pc_on or self.drama_on) else None,
                                         shot=self._page_shot if self.page_capture and self.drama_vision else None,
                                         tail=ASK_QUESTION if self._ask_plan is not None else "")
         except asyncio.CancelledError:  # 準備中の再発話で生成が取り消された: 旧世代の結果は破棄扱い (E15)

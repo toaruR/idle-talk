@@ -13,6 +13,7 @@ Windows PC に常駐して、日本語で気軽に雑談できる音声アプリ
 - **ドラマを一緒に見ます。** 流しているタブの音を聞いて、場面の切れ目にたまに一言つぶやきます。
 - **画面を一緒に見ます。** ときどき画面をのぞいて、変化があれば話しかけます。
 - **人物設定（ペルソナ）と声を、画面で切り替えられます。**
+- **Nature Remo mini を LAN 内で操作できます。**「照明を50%にして」「暑いから温度下げて」など、登録した赤外線信号を自然言語で送れます（[設定手順](#nature-remo-mini-を-lan-内で操作する)）。
 
 構成: ブラウザ（マイク・再生）⇄ Director（Python）⇄ llama-server（LLM）/ AivisSpeech（声）/ ReazonSpeech（音声認識）。
 設計は [docs/spec/design-idle-talk.md](docs/spec/design-idle-talk.md)、細かい動きは [docs/spec/specification.md](docs/spec/specification.md) にあります。
@@ -99,6 +100,49 @@ Haas-ja-v1.0 は GPU で動く音声認識です。ReazonSpeech と切り換え�
    - 使う GPU は `[asr].gpu`（既定 0、`nvidia-smi` の番号）。重みだけで VRAM を約 2.4GB 使います。
    - 実際に GPU で動いているかは `data/asr_worker.log` の `haas on CUDAExecutionProvider` で確かめられます。
      `CPUExecutionProvider` と出たら GPU 版の onnxruntime が読めていません（CPU でも動きますが、1 発話に 1〜2 秒かかります）。
+
+## Nature Remo mini を LAN 内で操作する
+
+音声認識・ローカルLLM・RemoのLocal APIを使います。この機能はクラウドAPIやトークンを使いません。既存のニュース検索などの通信設定は別です。
+
+1. `remo.example.toml` を `remo.toml` にコピーし、`host` に Remo mini の IPv4 アドレスを書きます（ルーターの接続端末一覧で確認し、DHCP予約を推奨）。`idle_talk.toml` と同じ場所に置きます。
+2. Remo に向けて**実物のリモコンを押し、信号を登録**します。下記コマンドはまず現在の受信信号を読み、案内を出します。案内後に対応するボタンを押して Enter を押してください。コマンド自体は赤外線を送信しませんが、リモコンの操作で家電は動きます。
+   ```powershell
+   idle-talk.cmd remo learn light:on
+   idle-talk.cmd remo learn light:off
+   idle-talk.cmd remo learn light:level:100
+   idle-talk.cmd remo learn light:level:50
+   idle-talk.cmd remo learn light:up
+   idle-talk.cmd remo learn light:down
+   idle-talk.cmd remo learn ac:cool:26
+   idle-talk.cmd remo learn ac:cool:25
+   idle-talk.cmd remo learn ac:heat:24
+   idle-talk.cmd remo learn ac:off
+   ```
+   - 必要な信号だけ登録します。照明の `level:N` は1〜100%、エアコンの `cool:N` / `heat:N` は16〜32度の0.5度刻みです。**その家電で実際に設定できる値に対応する信号だけ**登録してください。
+   - エアコンは**モード・設定温度・風量・風向などをまとめた信号**です。登録時は同じ風量・風向にそろえ、最後の温度変更ボタンなどで目的の設定を送ってください。温度だけを変える場合も、登録時のほかの設定が一緒に送られます。
+   - `light:up` / `light:down` は明るく／暗くするボタンを一段階分登録します。絶対の明るさボタンがない機器ではパーセント指定は使えません。オン／オフも別々の信号が必要です。電源トグルを両方の名前で登録しないでください。
+   - `ac:on` は任意です。登録した時点の設定で運転する信号になり、その後の相対温度指定には使えません。代わりに「冷房26度にして」のような指定を推奨します。
+3. `idle-talk.cmd remo status` で登録信号名を確認します。必要なら `idle-talk.cmd remo send ac:cool:26` などで**一度送信し、実物の動作を確認**します。
+4. `remo.toml` の `on = true` にし、`idle-talk.cmd restart` で読み直します。
+
+話し方の例:
+
+- 「冷房を26度にして」→ `ac:cool:26` を送信。
+- 続けて「暑いから温度下げて」→ 最後に送った温度から1度下げ、`ac:cool:25` を送信。
+- 「照明を100%にして」、続けて「少し暗くして」→ 登録した明るさのうち一つ下の段階へ。
+- 明るさが不明でも、`light:down` があれば「少し暗くして」で一段階分の信号を送信。
+- 「照明を暗くできる？」など質問形の操作依頼にも対応します。「暗くする方法は？」など説明を求める質問では操作しません。
+- 絶対明るさが100%しか登録されていない場合も、`light:down` があれば一段階暗くできます。
+- 「エアコン消して」「電気消して」→ 対応するオフ信号を送信。
+
+**家電の実際の状態は取得できません。**相対指定の基準はこのアプリから最後に送った設定だけで、既定15分で不明に戻ります（`state_ttl_s`、1〜3600秒）。再起動・送信失敗の後も不明に戻り、温度や明るさを推測して送りません。リモコンやNatureアプリで変更した後は「冷房26度にして」など絶対値で指定し直してください。未登録の設定は送信せず、登録を案内します。
+
+操作の解釈はローカルLLMを使います。解釈できない・複数操作・曖昧な指示は言い直しを求めます。ドラマ・ブラウザ補正なしモード・AIからの自発発話では機器を操作しません。送信成功の返答は**Remoが信号を受け付けたこと**を表し、家電の動作確認ではありません。タイムアウト時は到達が不明なため自動再送しません。
+
+`remo.toml`・`remo-signals.json` はGit対象外です。登録済みの信号を置き換える場合は、`remo-signals.json` の該当項目を削除して登録し直します。`--config <path>` で別の設定ファイルを指定できます（サブコマンドの前に指定）。
+
+Local APIの仕様: [Nature公式API概要](https://developer.nature.global/) / [Local API仕様](https://local-swagger.nature.global/)。Local APIでは家電名や設定温度を直接指定できないため、受信した赤外線を設定ごとに登録して使います。
 
 ## 起動と停止
 
