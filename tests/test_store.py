@@ -23,7 +23,7 @@ def test_schema_columns(store):
     assert _cols(store, "turns") == {"id", "ts", "role", "text", "completed", "stop_position_ms", "utterance_id"}
     assert _cols(store, "topic_cards") == {
         "id", "hook", "facts", "source_url", "published_at", "expires_at", "angle", "used_at", "user_reaction"}
-    assert _cols(store, "memories") == {"id", "content", "evidence_utterance_id", "updated_at", "deletable", "persona"}
+    assert _cols(store, "memories") == {"id", "content", "evidence_utterance_id", "updated_at", "deletable", "persona", "speaker_id"}
 
 
 def test_migrates_memories_persona(tmp_path):
@@ -38,8 +38,8 @@ def test_migrates_memories_persona(tmp_path):
     con.close()
     s = Store(path, db_backup=False)
     try:
-        assert "persona" in _cols(s, "memories")
-        assert [tuple(r) for r in s.query("SELECT content, persona FROM memories")] == [("利用者は猫好き。", None)]
+        assert {"persona", "speaker_id"} <= _cols(s, "memories")
+        assert [tuple(r) for r in s.query("SELECT content, persona, speaker_id FROM memories")] == [("利用者は猫好き。", None, None)]
     finally:
         s.close()
 
@@ -47,6 +47,21 @@ def test_migrates_memories_persona(tmp_path):
 def test_wal_and_user_version(store):
     assert store.query("PRAGMA journal_mode")[0][0].lower() == "wal"
     assert store.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
+
+
+def test_migrates_v4_preserving_unassigned_memories(tmp_path):
+    path = tmp_path / "v4.db"
+    with sqlite3.connect(path) as con:
+        con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, content TEXT, evidence_utterance_id INTEGER, "
+                    "updated_at INTEGER, deletable INTEGER, persona TEXT)")
+        con.execute("INSERT INTO memories VALUES (7, '利用者は猫好き。', 8, 9, 1, 'a')")
+        con.execute("PRAGMA user_version=4")
+    s = Store(path, db_backup=False)
+    try:
+        assert tuple(s.query("SELECT * FROM memories")[0]) == (7, "利用者は猫好き。", 8, 9, 1, "a", None)
+        assert s.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
+    finally:
+        s.close()
 
 
 def test_writer_thread_differs(store):

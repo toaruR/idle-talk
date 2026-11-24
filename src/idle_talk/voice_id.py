@@ -198,6 +198,7 @@ class VoiceBook:
         a["alias"] = a["alias"] or b["alias"]
         self.store.execute("UPDATE speakers SET embedding=?, n=?, updated_at=? WHERE id=?",
                            (a["emb"].tobytes(), a["n"], now_ms, same))
+        self.store.execute("UPDATE memories SET speaker_id=? WHERE speaker_id=?", (same, sid))
         self.store.execute("DELETE FROM speakers WHERE id=?", (sid,))
         return same
 

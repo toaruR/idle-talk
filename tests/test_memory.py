@@ -2,6 +2,7 @@
 import asyncio
 import threading
 
+import numpy as np
 import pytest
 from mocks import FakeClock, mock_asr_send
 from mocks_browser import MockBrowser
@@ -11,8 +12,14 @@ from idle_talk.clients import AsrClient
 from idle_talk.director import IdleTalkDirector
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
+from idle_talk.voice_id import NAME_PROMPT, VoiceBook
 
 FACT = "利用者は毎朝コーヒーを飲む。"
+
+
+def add_speaker(store, name):
+    return store.execute("INSERT INTO speakers(name, embedding, n, updated_at) VALUES (?, ?, 2, 0)",
+                         (name, np.array([1, 0], dtype=np.float32).tobytes()))
 
 
 @pytest.fixture
@@ -66,6 +73,36 @@ def test_memory_prompt(store):
     assert memory.memory_prompt(store) == ""
     memory.remember(store, [FACT], 1, 100)
     assert f"- {FACT}" in memory.memory_prompt(store)
+
+
+def test_memories_isolate_speakers_and_legacy_and_persist(store):
+    a, b = add_speaker(store, "太郎"), add_speaker(store, "花子")
+    region, like = "利用者は横浜に住んでいる。", "利用者は猫が好き。"
+    memory.remember(store, ["利用者は昔の話者未割当。"], 1, 1, "a")
+    memory.remember(store, [region, like], 2, 2, "a", a)
+    memory.remember(store, [like], 3, 3, "a", b)  # 同じ好みも別の人の根拠として保存
+    memory.remember(store, ["利用者は犬が好き。"], 4, 4, "b", a)
+    assert region in memory.memory_prompt(store, "a", a)
+    assert region not in memory.memory_prompt(store, "a", b)
+    assert "未割当" not in memory.memory_prompt(store, "a", a)
+    assert "犬" not in memory.memory_prompt(store, "a", a)
+    assert "横浜" not in memory.memory_prompt(store, "a")
+    assert len(store.query("SELECT id FROM memories WHERE content=?", (like,))) == 2
+    again = Store(store.path, db_backup=False)
+    try:
+        assert region in memory.memory_prompt(again, "a", a)
+        assert region not in memory.memory_prompt(again, "a", b)
+    finally:
+        again.close()
+
+
+def test_speaker_limit_does_not_evict_another_person(store):
+    a, b = add_speaker(store, "太郎"), add_speaker(store, "花子")
+    memory.remember(store, [FACT], 1, 0, "a", b)
+    for i in range(memory.MAX_MEMORIES + 1):
+        memory.remember(store, [f"利用者は{i}が好き。"], 2, i + 1, "a", a)
+    assert len(store.query("SELECT id FROM memories WHERE speaker_id=?", (a,))) == memory.MAX_MEMORIES
+    assert FACT in memory.memory_prompt(store, "a", b)
 
 
 def make(tmp_path, gate=None):
@@ -152,5 +189,66 @@ def test_short_utterance_not_extracted(tmp_path):
             await asyncio.sleep(0.05)
             assert extracts == [] and store.count("memories") == 0
         finally:
+            store.close()
+    asyncio.run(run())
+
+
+def test_director_batches_by_received_speaker_not_current_speaker(tmp_path):
+    async def run():
+        d, _, store, _, extracts = make(tmp_path)
+        try:
+            a, b = add_speaker(store, "太郎"), add_speaker(store, "花子")
+            d._speaker = b
+            d._mem_pending = [(1, "横浜に住んでいます", a), (2, "猫が大好きです", b)]
+            d._start_memory()
+            await d._mem_task
+            assert len(extracts) == 2
+            assert "横浜" in extracts[0][1]["content"] and "猫" not in extracts[0][1]["content"]
+            assert "猫" in extracts[1][1]["content"] and "横浜" not in extracts[1][1]["content"]
+            assert [(r["speaker_id"], r["evidence_utterance_id"]) for r in memory.list_memories(store)] == [(a, 1), (b, 2)]
+            assert d._mem_pending == []
+        finally:
+            d.close()
+            store.close()
+    asyncio.run(run())
+
+
+def test_unknown_voice_does_not_learn_or_use_legacy_memory(tmp_path):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        try:
+            d.voices = VoiceBook(store)
+            memory.remember(store, [FACT], 1, 1, d.personas.current_id)
+            assert d._on_transcript(2, "横浜に住んでいます")
+            assert d._mem_pending == []
+            assert FACT not in d._chat_messages()[0]["content"]
+            a, b = add_speaker(store, "太郎"), add_speaker(store, "花子")
+            memory.remember(store, ["利用者は横浜に住んでいる。"], 3, 2, d.personas.current_id, a)
+            d._speaker = a
+            assert "横浜" in d._chat_messages()[0]["content"]
+            d._speaker = b
+            assert "横浜" not in d._chat_messages()[0]["content"]
+        finally:
+            d.close()
+            store.close()
+    asyncio.run(run())
+
+
+def test_background_follows_name_merge_for_pending_memory(tmp_path):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        try:
+            a, b = add_speaker(store, "太郎"), add_speaker(store, None)
+            d.voices = VoiceBook(store)
+            d._speaker = d._ask_sid = b
+            d._name_pending = ["太郎です。横浜に住んでいます"]
+            d._mem_pending = [(1, d._name_pending[0], b)]
+            d._llm = lambda messages: iter(["太郎" if messages[0]["content"] == NAME_PROMPT else FACT])
+            d._start_memory()
+            await d._mem_task
+            assert d._speaker == a and d._mem_pending == []
+            assert [r["speaker_id"] for r in memory.list_memories(store)] == [a]
+        finally:
+            d.close()
             store.close()
     asyncio.run(run())

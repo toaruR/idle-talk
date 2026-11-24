@@ -268,7 +268,7 @@ class IdleTalkDirector:
         self._spont_task: asyncio.Task | None = None
         self._last_op = clock()  # 最後の利用者操作時刻 (IDLE_TIMEOUT 判定)
         self._idle_since: float | None = clock()  # IDLE になった時刻 (自発発話の沈黙計測)。IDLE 以外は None
-        self._mem_pending: list[tuple[int, str]] = []  # 記憶抽出待ちの利用者発話 (utterance_id, text)
+        self._mem_pending: list[tuple[int, str, int | None]] = []  # 記憶抽出待ち (utterance_id, text, speaker_id)
         self._mem_task: asyncio.Task | None = None
         self._mem_stop = threading.Event()  # 取消時に抽出スレッドの LLM 受信を打ち切る (llama-server を応答に譲る)
         self.set_speaker: Callable[[int], None] | None = None  # 画面で選んだ話者 ID を TTS へ (main が結線)
@@ -768,8 +768,9 @@ class IdleTalkDirector:
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
         if self._ask_sid is not None and self._speaker == self._ask_sid:  # 名前を尋ねた相手の返事
             self._name_pending = self._name_pending[-1:] + [text]
-        if len(text) >= MIN_UTTERANCE_CHARS:  # 古い分は捨て、直近 MEM_BATCH 発話だけ抽出に回す
-            self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text)]
+        if len(text) >= MIN_UTTERANCE_CHARS and (self.voices is None or self._speaker is not None):
+            # 話者は受信時に固定する。未知の声の情報を直前の人や共通の記憶にしない。
+            self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text, self._speaker)]
         return True
 
     # ---- ChatGPT への引き渡し (設計書 6.11) ----
@@ -1092,7 +1093,7 @@ class IdleTalkDirector:
         self._asks[sid] += 1
         self._ask_sid, self._name_pending = sid, []
 
-    async def _learn_name(self, utterances: list[str], stop: threading.Event) -> None:
+    async def _learn_name(self, utterances: list[str], stop: threading.Event) -> tuple[int, int] | None:
         sid = self._ask_sid
         try:
             text = await asyncio.to_thread(self._collect, name_messages(utterances), stop)
@@ -1106,9 +1107,12 @@ class IdleTalkDirector:
         if name is None:
             return
         kept = self.voices.set_name(sid, name, self.now_ms())
+        self._mem_pending = [(uid, text, kept if speaker == sid else speaker)
+                             for uid, text, speaker in self._mem_pending]
         if self._speaker == sid:
             self._speaker = kept
         log.info("speaker %d named %r%s", sid, name, f" (merged into {kept})" if kept != sid else "")
+        return sid, kept
 
     def _is_echo(self, uid: int, text: str) -> bool:
         """AI 再生中に始まった発話の認識結果が直近 AI 発話の本文に含まれる = スピーカーから回り込んだ自声 (§6.2)。
@@ -1833,7 +1837,9 @@ class IdleTalkDirector:
         rows = history_window(self.store, self.cfg)
         history = [{"role": "assistant" if t["role"] == "ai" else "user", "content": t["text"]}
                    for t in rows if t["text"]]
-        system = (self.personas.system_prompt() + memory_prompt(self.store, self.personas.current_id)
+        memories = (memory_prompt(self.store, self.personas.current_id, self._speaker)
+                    if self.voices is None or self._speaker is not None else "")
+        system = (self.personas.system_prompt() + memories
                   + self._speaker_section(ask) + self._mode_section() + self._question_note(rows))
         lines = self.drama.context_text() if self.drama_on else ""
         if lines:
@@ -1855,13 +1861,19 @@ class IdleTalkDirector:
             self._background(list(self._mem_pending), list(self._name_pending), self._mem_stop,
                              self.personas.current_id))
 
-    async def _background(self, batch: list[tuple[int, str]], names: list[str], stop: threading.Event,
+    async def _background(self, batch: list[tuple[int, str, int | None]], names: list[str], stop: threading.Event,
                           persona: str) -> None:
         """名前の抜き出し (尋ねた直後なので先に) と記憶の抽出を順に行う。"""
         if names:
-            await self._learn_name(names, stop)
-        if batch and not stop.is_set():
-            await self._extract_memory(batch, stop, persona)
+            merged = await self._learn_name(names, stop)
+            if merged is not None:
+                old, kept = merged
+                batch = [(uid, text, kept if sid == old else sid) for uid, text, sid in batch]
+        for sid in dict.fromkeys(sid for _, _, sid in batch):
+            if stop.is_set():
+                return
+            await self._extract_memory([(uid, text) for uid, text, speaker in batch if speaker == sid],
+                                       stop, persona, sid)
 
     def _cancel_memory(self) -> None:
         self._mem_stop.set()
@@ -1876,21 +1888,22 @@ class IdleTalkDirector:
             out.append(tok)
         return "".join(out)
 
-    async def _extract_memory(self, batch: list[tuple[int, str]], stop: threading.Event, persona: str) -> None:
-        """記憶は抜き出しを始めた時点のペルソナのものとして保存する (設計書 6.6)。"""
+    async def _extract_memory(self, batch: list[tuple[int, str]], stop: threading.Event, persona: str,
+                              speaker_id: int | None = None) -> None:
+        """受信時の話者と、抜き出し開始時点のペルソナに紐づける。別の話者の発話は混ぜない。"""
         try:
             text = await asyncio.to_thread(self._collect, extract_messages([t for _, t in batch]), stop)
         except Exception as e:  # noqa: BLE001  LLM の失敗で会話を止めない (未処理分は次回に回す)
             log.warning("memory extraction failed: %s", e)
             return
-        if text is None or asyncio.current_task() is not self._mem_task:
+        if text is None or stop.is_set() or asyncio.current_task() is not self._mem_task:
             return
         done = {uid for uid, _ in batch}
         self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
         items = parse_extracted(text)
-        if items:
-            remember(self.store, items, batch[-1][0], self.now_ms(), persona)
-            log.info("memory saved (%s): %s", persona, " / ".join(items))
+        if items and (speaker_id is None or self.store.query("SELECT id FROM speakers WHERE id=?", (speaker_id,))):
+            remember(self.store, items, batch[-1][0], self.now_ms(), persona, speaker_id)
+            log.info("memory saved (%s, speaker %s): %s", persona, speaker_id, " / ".join(items))
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:

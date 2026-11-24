@@ -145,12 +145,12 @@ flowchart LR
 
 ### 記憶と声の管理 (`ctl memories` / `ctl speakers`)
 
-- `ctl memories` は保存した記憶を一覧にする。
+- `ctl memories` は保存した記憶を、ペルソナ・話者 ID・名前つきで一覧にする。古い記憶は「話者未割当」と出す。
 - `ctl speakers` は覚えた声を一覧にする。表示は名前・文字起こしの仮名と、平均に使った発話数である。
 - `ctl speakers` は声の特徴そのものを表示しない。
 - どちらも `--delete ID` で 1 件、`--clear` で全件を削除する。
 - どちらも起動中に使える。
-- `speakers` の削除は、再起動後に効く。
+- `speakers` を削除すると、その声に紐づく記憶も削除する。声の照合への反映は再起動後である。
 
 ### ログと記録
 
@@ -445,7 +445,7 @@ LoRA (`lora`、2026-11-08):
 - 画面の「ペルソナ」は `ui.persona` を送る。次の応答から切り替わる。
 - 一覧に無い id は 5006 になる。
 - 切り替えても、会話の履歴は残す。
-- 記憶 (`memories`) はペルソナごとに分ける。抜き出しを始めた時点のペルソナの id を `persona` 列に入れ、応答には今のペルソナの記憶だけを添える。上限 `MAX_MEMORIES` もペルソナごとである。`persona` が NULL の行 (スキーマ v2 以前の記憶) は全ペルソナ共通とする。id を変えると記憶を引き継がない。
+- 記憶 (`memories`) は話者とペルソナごとに分ける。発話受信時の話者 ID を `speaker_id`、抜き出し開始時のペルソナ ID を `persona` に入れ、応答には今の話者・ペルソナの記憶だけを添える。上限 `MAX_MEMORIES` もこの組み合わせごとである。`persona` が NULL の行は同じ話者の全ペルソナ共通とする。ペルソナの id を変えると記憶を引き継がない。
 - `PersonaBook` は、system プロンプトを作るたびにファイルの更新時刻を見る。変わっていれば読み直す。
 - そのため、`prompt` と `style_rules` の編集は再起動なしで次の応答から効く。
 - 読み直した内容が不正なら warn し、前の内容を使い続ける。
@@ -799,7 +799,9 @@ AivisSpeech の呼び方:
 - 応答の再生が完了して IDLE に戻ったとき、Director は記憶を抽出する。
 - 対象は、未処理の利用者発話の直近 `MEM_BATCH`=4 件である。
 - `MIN_UTTERANCE_CHARS`=6 文字未満の発話は対象外である。
-- LLM は、本人が明言した好み・習慣・予定・続いている出来事を抜き出す。
+- LLM は、本人が明言した住んでいる地域・好きなもの・嫌いなもの・趣味・習慣・予定・続いている出来事を抜き出す。出身地・旅行先と居住地を区別し、他人の情報・引用・質問・推測は保存しないよう指示する。
+- 例えば「横浜に住んでいて、猫が好き」から「利用者は横浜に住んでいる。」「利用者は猫が好き。」を、その声の記憶として保存する。名前の登録前でも、声の登録が済んでいれば対象になる。
+- 話者識別が有効な間、未登録・判定できない声からは保存しない。短い発話では従来どおり直前の話者を引き継ぐため、記憶の紐づけもその識別結果に従う。
 - 形式は「利用者は〜」の 1 文である。
 
 保存の規則:
@@ -807,9 +809,10 @@ AivisSpeech の呼び方:
 - 「利用者」で始まる行だけを採用する。
 - 1 回に `MAX_PER_UTTERANCE`=3 件までである。
 - 1 件は `MAX_CHARS`=60 文字までである。
-- 句読点・空白を除いて同じ内容なら、更新時刻だけを進める。
-- 根拠は、最後の発話の utterance_id である。
-- 保存は `MAX_MEMORIES`=30 件までである。
+- 同じ話者・ペルソナで句読点・空白を除いて同じ内容なら、更新時刻と根拠を更新する。
+- 抽出待ちの発話は受信時の話者ごとに分け、別の人の発話をまとめて LLM に渡さない。根拠は、その話者のバッチの最後の発話の utterance_id である。
+- 保存は話者・ペルソナの組み合わせごとに `MAX_MEMORIES`=30 件までである。
+- 同名の声を統合すると、保存済み・抽出待ちの記憶も残る声の ID へ移す。
 - 超えたら、更新時刻が古い `deletable=1` の行から消す。
 
 取消と失敗:
@@ -823,6 +826,8 @@ AivisSpeech の呼び方:
 プロンプトへの使い方:
 
 - 通常応答と自発発話の system プロンプトに、記憶を箇条で添える。
+- 今の話者に紐づく記憶だけを使う。話者識別が有効で話者未判定なら記憶を添えない。これは長期記憶の選別であり、同じ会話の直近履歴を話者別に分割するものではない。
+- 既存の `speaker_id` が NULL の記憶は保持するが、誰の話か確定できないため自動で人に割り当てず、話者識別が無効のときだけ使う。
 - 記憶は更新が新しい順に並べる。
 - LLM には「関係するときだけ触れる」「無いことを覚えているふりはしない」と指示する。
 - `idle-talk memories` で一覧を見る。`--delete ID` / `--clear` で削除する (`deletable=1` のみ)。
@@ -1678,10 +1683,10 @@ ChatGPT の操作:
 | `events` | id, ts, epoch, kind, payload_json |
 | `turns` | id, ts, role, text, completed(0/1), stop_position_ms, utterance_id |
 | `topic_cards` | id, hook, facts, source_url, published_at, expires_at, angle, used_at, user_reaction |
-| `memories` | id, content, evidence_utterance_id, updated_at, deletable, persona (ペルソナの id。NULL は共通、スキーマ v3) |
+| `memories` | id, content, evidence_utterance_id, updated_at, deletable, persona (ペルソナの id。NULL は共通、スキーマ v3), speaker_id (speakers.id。NULL は話者未割当、スキーマ v5。声の削除で連動削除) |
 | `speakers` | id, name (NULL = 名前未登録), embedding (float32 単位ベクトルの BLOB), n (平均に使った発話数), updated_at, alias (文字起こしの仮名、スキーマ v4) |
 
-- スキーマ版は `PRAGMA user_version` = 4 である。版 2 で `speakers`、版 3 で `memories.persona`、版 4 で `speakers.alias` を追加した。
+- スキーマ版は `PRAGMA user_version` = 5 である。版 2 で `speakers`、版 3 で `memories.persona`、版 4 で `speakers.alias`、版 5 で `memories.speaker_id` を追加した。
 - 古い版の DB は、起動時に列を足して移行する。
 - `turns` の role は `user` / `ai` のほか、`pc` (ブラウザ補正なしモードのマイク) と `transcript` (文字起こし) がある。`transcript` の行は会話の履歴に入れない。
 - 全削除 (`delete_all`) は `speakers` も消す。

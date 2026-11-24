@@ -267,10 +267,15 @@ def cmd_memories(args: argparse.Namespace, data_dir: Path) -> int:
             return 0 if n else 1
         else:
             has_persona = "persona" in {r[1] for r in con.execute("PRAGMA table_info(memories)")}  # v2 以前の DB
-            rows = con.execute(f"SELECT id, content, deletable, {'persona' if has_persona else 'NULL'} "
-                               "FROM memories ORDER BY id").fetchall()
-            for mid, content, deletable, persona in rows:
-                print(f"{mid:4d}{'' if deletable else ' (固定)'}  [{persona or '共通'}]  {content}")
+            has_speaker = "speaker_id" in {r[1] for r in con.execute("PRAGMA table_info(memories)")}
+            rows = con.execute(f"SELECT id, content, deletable, {'persona' if has_persona else 'NULL'}, "
+                               f"{'speaker_id' if has_speaker else 'NULL'} FROM memories ORDER BY id").fetchall()
+            for mid, content, deletable, persona, sid in rows:
+                speaker = "話者未割当"
+                if sid is not None:
+                    row = con.execute("SELECT name FROM speakers WHERE id=?", (sid,)).fetchone()
+                    speaker = f"声 {sid}: {row[0] if row and row[0] else '(名前未登録)'}"
+                print(f"{mid:4d}{'' if deletable else ' (固定)'}  [{persona or '共通'}] [{speaker}]  {content}")
             if not rows:
                 print("no memories")
     finally:
@@ -285,6 +290,7 @@ def cmd_speakers(args: argparse.Namespace, data_dir: Path) -> int:
         print(f"no database: {db}")
         return 1
     con = sqlite3.connect(str(db), isolation_level=None)
+    con.execute("PRAGMA foreign_keys=ON")
     try:
         if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='speakers'").fetchone():
             print("no speakers")

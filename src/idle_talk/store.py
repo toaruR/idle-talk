@@ -14,8 +14,8 @@ from typing import Any
 
 from .errors import ERR_DB
 
-SCHEMA_VERSION = 4  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)、
-# 4: speakers.alias (文字起こしモードの仮名、設計書 6.10)
+SCHEMA_VERSION = 5  # 2: speakers (話者識別、設計書 6.4)、3: memories.persona (ペルソナごとの記憶、設計書 6.6)、
+# 4: speakers.alias (文字起こしモードの仮名、設計書 6.10)、5: memories.speaker_id (声に紐づく記憶)
 
 log = logging.getLogger("idle_talk.store")
 
@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS memories (
     evidence_utterance_id INTEGER,
     updated_at INTEGER,
     deletable INTEGER,
-    persona TEXT NULL
+    persona TEXT NULL,
+    speaker_id INTEGER NULL REFERENCES speakers(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS speakers (
     id INTEGER PRIMARY KEY,
@@ -139,11 +140,14 @@ class Store:
             con = sqlite3.connect(str(self.path), check_same_thread=True, isolation_level=None)
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
+            con.execute("PRAGMA foreign_keys=ON")
             con.executescript(SCHEMA_SQL)
             if "persona" not in {r[1] for r in con.execute("PRAGMA table_info(memories)")}:
                 con.execute("ALTER TABLE memories ADD COLUMN persona TEXT NULL")  # v2 以前: 既存の記憶は全ペルソナ共通
             if "alias" not in {r[1] for r in con.execute("PRAGMA table_info(speakers)")}:
                 con.execute("ALTER TABLE speakers ADD COLUMN alias TEXT NULL")  # v3 以前: 仮名は文字起こしで初めて聞いたときに付ける
+            if "speaker_id" not in {r[1] for r in con.execute("PRAGMA table_info(memories)")}:
+                con.execute("ALTER TABLE memories ADD COLUMN speaker_id INTEGER NULL REFERENCES speakers(id) ON DELETE CASCADE")
             con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._ready.set_result(True)
         except BaseException as e:  # noqa: BLE001

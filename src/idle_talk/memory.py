@@ -3,7 +3,8 @@
 会話の利用者発話から、本人が明言した好み・習慣・続いている話題だけを LLM で抜き出して少量保存し、
 応答のシステムプロンプトに添える (最終アーキテクチャ §5「記憶」)。ASR の誤認識で確定させないよう、
 短い発話は対象外・1 発話あたりの件数と 1 件の長さに上限を設け、利用者が ctl から確認・削除できる。
-記憶はペルソナごとに分ける (persona 列、設計書 6.6)。persona が NULL の行 (v2 以前の記憶) は全ペルソナ共通。
+記憶は話者とペルソナごとに分ける。話者不明の既存記憶は、話者識別を使わないときだけ参照する。
+persona が NULL の行 (v2 以前の記憶) は同じ話者の全ペルソナ共通。
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import re
 
 from .store import Store
 
-MAX_MEMORIES = 30  # ペルソナごとの保存上限。超えたら古い deletable 行から消す
+MAX_MEMORIES = 30  # 話者・ペルソナごとの保存上限。超えたら古い deletable 行から消す
 MAX_PER_UTTERANCE = 3
 MAX_CHARS = 60  # 1 件の長さ上限 (超えたら捨てる: 要約に失敗した長文はプロンプトを圧迫する)
 MIN_UTTERANCE_CHARS = 6  # これより短い発話 (相づち・誤認識の断片) からは抜き出さない
@@ -19,9 +20,10 @@ SUBJECT = "利用者"  # 抽出結果はこの語で始まる行だけ採る
 _BULLET = re.compile(r"^(?:[-・*●]|\d+[.)、．])\s*")
 
 EXTRACT_PROMPT = ("あなたは会話記録から利用者についての事実を抜き出す係です。"
-                  "利用者の発言のうち、本人が自分について明言した好み・習慣・予定・続いている出来事だけを、"
+                  "利用者の発言のうち、本人が自分について明言した住んでいる地域・好きなもの・嫌いなもの・趣味・習慣・予定・続いている出来事だけを、"
                   "「利用者は〜」で始まる短い 1 文にして 1 行に 1 つずつ書いてください (最大 3 行)。"
-                  "推測・一般論・質問・AI の発言の内容は書かないでください。該当が無ければ「なし」とだけ書いてください。")
+                  "推測・一般論・質問・他人の情報・引用・AI の発言の内容は書かないでください。"
+                  "出身地や旅行先を居住地と取り違えないでください。該当が無ければ「なし」とだけ書いてください。")
 
 
 class MemoryError_(Exception):
@@ -29,12 +31,13 @@ class MemoryError_(Exception):
 
 
 def add_memory(store: Store, content: str, evidence_utterance_id: int | None,
-               updated_at: int, deletable: int = 1, persona: str | None = None) -> int:
+               updated_at: int, deletable: int = 1, persona: str | None = None,
+               speaker_id: int | None = None) -> int:
     if evidence_utterance_id is None:
         raise ValueError("evidence_utterance_id is required")
     return store.execute(
-        "INSERT INTO memories(content, evidence_utterance_id, updated_at, deletable, persona) VALUES (?,?,?,?,?)",
-        (content, evidence_utterance_id, updated_at, 1 if deletable else 0, persona),
+        "INSERT INTO memories(content, evidence_utterance_id, updated_at, deletable, persona, speaker_id) VALUES (?,?,?,?,?,?)",
+        (content, evidence_utterance_id, updated_at, 1 if deletable else 0, persona, speaker_id),
     )
 
 
@@ -85,10 +88,11 @@ def _norm(s: str) -> str:
 
 
 def remember(store: Store, items: list[str], evidence_utterance_id: int, now_ms: int,
-             persona: str | None = None) -> list[int]:
-    """候補を persona の記憶として保存する。同じ内容 (句読点・空白を除いて一致) は更新時刻だけ進める。
-    上限超過分はそのペルソナの行から古い順に消す。"""
-    existing = {_norm(r["content"]): r["id"] for r in list_memories(store, persona)}
+             persona: str | None = None, speaker_id: int | None = None) -> list[int]:
+    """候補を話者・persona の記憶として保存する。同じ内容は更新時刻と根拠だけ更新する。
+    上限超過分はその話者・ペルソナの行から古い順に消す。"""
+    existing = {_norm(r["content"]): r["id"] for r in store.query(
+        "SELECT id, content FROM memories WHERE persona IS ? AND speaker_id IS ?", (persona, speaker_id))}
     ids: list[int] = []
     for item in items:
         key = _norm(item)
@@ -98,19 +102,20 @@ def remember(store: Store, items: list[str], evidence_utterance_id: int, now_ms:
             store.execute("UPDATE memories SET updated_at=?, evidence_utterance_id=? WHERE id=?",
                           (now_ms, evidence_utterance_id, existing[key]))
             continue
-        existing[key] = add_memory(store, item, evidence_utterance_id, now_ms, persona=persona)
+        existing[key] = add_memory(store, item, evidence_utterance_id, now_ms, persona=persona, speaker_id=speaker_id)
         ids.append(existing[key])
-    over = store.query("SELECT COUNT(*) FROM memories WHERE persona IS ?", (persona,))[0][0] - MAX_MEMORIES
+    over = store.query("SELECT COUNT(*) FROM memories WHERE persona IS ? AND speaker_id IS ?",
+                       (persona, speaker_id))[0][0] - MAX_MEMORIES
     if over > 0:
         store.execute("DELETE FROM memories WHERE id IN (SELECT id FROM memories WHERE deletable=1 AND persona IS ? "
-                      "ORDER BY updated_at, id LIMIT ?)", (persona, over))
+                      "AND speaker_id IS ? ORDER BY updated_at, id LIMIT ?)", (persona, speaker_id, over))
     return ids
 
 
-def memory_prompt(store: Store, persona: str | None = None) -> str:
-    """システムプロンプトに添える記憶の節 (persona と共通の記憶)。記憶が無ければ空文字。"""
-    rows = store.query("SELECT content FROM memories WHERE persona IS ? OR persona IS NULL "
-                       "ORDER BY updated_at DESC, id DESC LIMIT ?", (persona, MAX_MEMORIES))
+def memory_prompt(store: Store, persona: str | None = None, speaker_id: int | None = None) -> str:
+    """今の話者だけの記憶の節 (persona と共通の記憶)。記憶が無ければ空文字。"""
+    rows = store.query("SELECT content FROM memories WHERE (persona IS ? OR persona IS NULL) AND speaker_id IS ? "
+                       "ORDER BY updated_at DESC, id DESC LIMIT ?", (persona, speaker_id, MAX_MEMORIES))
     if not rows:
         return ""
     lines = "\n".join(f"- {r['content']}" for r in rows)

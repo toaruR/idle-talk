@@ -89,15 +89,20 @@ def test_two_people_are_told_apart_and_persist(store, tmp_path):
 
 
 def test_same_name_merges_voices(store):
+    from idle_talk import memory
     book = VoiceBook(store, threshold=0.5)
     for _ in range(ENROLL_N):
         a = book.identify(vec(1), 1)
     book.set_name(a, "たろう", 1)
     for _ in range(ENROLL_N):
         b = book.identify(vec(0, 1), 1)  # マイクが変わって別人扱いになった
+    memory.remember(store, ["利用者は横浜に住んでいる。"], 1, 1, speaker_id=a)
+    memory.remember(store, ["利用者は猫が好き。"], 2, 2, speaker_id=b)
     assert book.set_name(b, "たろう", 2) == a
     assert store.count("speakers") == 1 and book.name(b) is None
     assert book.identify(vec(0.6, 1), 3) == a  # まとめた声のどちらにも近い
+    assert "横浜" in memory.memory_prompt(store, speaker_id=a) and "猫" in memory.memory_prompt(store, speaker_id=a)
+    assert {r["speaker_id"] for r in memory.list_memories(store)} == {a}
 
 
 # ---- 名前の抜き出し ----
@@ -291,13 +296,23 @@ def test_embedding_failure_keeps_conversation(tmp_path):
 
 # ---- ctl speakers ----
 def test_ctl_speakers_list_and_delete(tmp_path, capsys):
+    from idle_talk import memory
     s = Store(tmp_path / DB_FILE, db_backup=False)
     book = VoiceBook(s, 0.5)
     for _ in range(ENROLL_N):
         sid = book.identify(vec(1), 1)
     book.set_name(sid, "花子", 1)
+    memory.remember(s, ["利用者は横浜に住んでいる。"], 1, 1, speaker_id=sid)
     s.close()
+    assert ctl.main(["memories", "--data-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"声 {sid}: 花子" in out and "横浜" in out
     assert ctl.main(["speakers", "--data-dir", str(tmp_path)]) == 0
     assert "花子" in capsys.readouterr().out
     assert ctl.main(["speakers", "--data-dir", str(tmp_path), "--delete", str(sid)]) == 0
+    s = Store(tmp_path / DB_FILE, db_backup=False)
+    try:
+        assert s.count("memories") == 0
+    finally:
+        s.close()
     assert ctl.main(["speakers", "--data-dir", str(tmp_path), "--delete", str(sid)]) == 1
