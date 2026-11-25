@@ -319,6 +319,9 @@ HTML ファイルを直接（`file://` で）開くと接続できません。
   idle-talk.cmd speakers --delete ID  # 1 件削除
   idle-talk.cmd speakers --clear      # 全削除
   ```
+- 話者の居住地を覚えると、`[search].on = true` のとき、自発発話やラジオの合間にその地域の当日の天気予報をたまにつぶやきます（約 10 回に 1 回を候補にし、同じ話者・居住地は 3 時間以上空けます）。居住地が不明・取得失敗の場合は普段の話題を続けます。
+- 名前の分かった話者の居住地が未登録なら、通常の会話や自発発話の合間にたまに尋ねます（約 10 回に 1 回を候補にし、同じ話者は 1 日以上空けます）。質問への「横浜」のような短い返事や、会話中に明言された居住地は話者別に記録し、以後の天気予報に使います。
+- 天気は [Open-Meteo](https://open-meteo.com/) の予報を使い、市区町村までの地名と緯度経度を送信します。出典リンクは画面に表示します。
 
 ## 開発者向け
 
@@ -334,4 +337,4 @@ HTML ファイルを直接（`file://` で）開くと接続できません。
 
 - AivisSpeech と音声モデル（話者ごとに規約が異なり、合成音声の商用利用やクレジット表記に条件があるものがあります）
 - LLM のモデル（Gemma 4・Qwen3.5 など）と llama.cpp、sherpa-onnx・ReazonSpeech（faster-whisper）
-- 外部サービス（DuckDuckGo、Bing、r.jina.ai、Yahoo! リアルタイム検索、ニュースの RSS 配信元）
+- 外部サービス（DuckDuckGo、Bing、r.jina.ai、Yahoo! リアルタイム検索、ニュースの RSS 配信元、Open-Meteo）

@@ -2,7 +2,7 @@
 
 会話の利用者発話から、本人が明言した好み・習慣・続いている話題だけを LLM で抜き出して少量保存し、
 応答のシステムプロンプトに添える (最終アーキテクチャ §5「記憶」)。ASR の誤認識で確定させないよう、
-短い発話は新規保存の対象外・1 発話あたりの件数と 1 件の長さに上限を設け、利用者が ctl から確認・削除できる。
+短い発話は居住地への返事を除いて新規保存の対象外・1 発話あたりの件数と 1 件の長さに上限を設け、利用者が ctl から確認・削除できる。
 記憶は話者とペルソナごとに分ける。話者不明の既存記憶は、話者識別を使わないときだけ参照する。
 persona が NULL の行 (v2 以前の記憶) は同じ話者の全ペルソナ共通。
 人に属さない知識は knowledge に分け、全話者・全ペルソナで共有する。両方とも明確な訂正・撤回に対応する。
@@ -13,6 +13,7 @@ import json
 import re
 
 from .store import Store
+from .residence import residence_place
 
 MAX_MEMORIES = 30  # 話者・ペルソナごとの保存上限。超えたら古い deletable 行から消す
 MAX_KNOWLEDGE = 30  # 全話者・全ペルソナ共通。話者の記憶とは別枠
@@ -27,6 +28,9 @@ EXTRACT_PROMPT = (
     "speaker は本人が明言した地域・好み・趣味・習慣・予定・出来事など、その利用者に属する情報です。"
     "shared は全員で共有できる仕事・作品・用語・仕組みなど、人に属さない知識です。"
     "個人の好み・予定・私的情報・他人の個人情報を shared に入れないでください。出身地や旅行先を居住地と取り違えないでください。"
+    "現在の居住地は『利用者は〇〇に住んでいる。』の形にし、〇〇には市区町村までの地名だけを入れ、番地は含めません。"
+    "居住地を尋ねた直後の返事として明示された発話は、短い地名だけでも本人の現在の居住地として記録してください。"
+    "それ以外の地名だけの発話や、相づち・回答拒否から居住地を推測しません。会話中の本人の居住地の明言も必ず記録します。"
     "推測・質問・仮定・引用・AI の発言は記憶にせず、利用者が事実として明言した内容だけ扱ってください。"
     "保存済み記憶を利用者が明確に否定・訂正したときは、その kind と id を指定して置き換えてください。"
     "新しい事実が分かれば content に訂正後の短い文、単なる撤回で新しい事実が不明なら null を指定してください。"
@@ -34,6 +38,11 @@ EXTRACT_PROMPT = (
     "複数発話が矛盾するときは最後の明確な訂正を優先し、古い内容を新規保存しないでください。"
     "出力は 1 行 1 JSON、最大 3 行です。キーは kind, id, content, evidence のみ。kind は speaker または shared、"
     "id は新規保存なら null、訂正・撤回なら提示された整数です。content は 60 文字以内の 1 文で、speaker は『利用者は』で始めます。"
+    "ただし現在の話者の登録名が提示されている場合、本人が自分の名前・呼び名を明確に訂正したときだけ、"
+    "kind を speaker_name、id を現在の話者 ID、content を敬称なしで 12 文字以内の訂正後の名前、"
+    "evidence を訂正を明言した今回の発話の引用にしてください。名前は引用中にある表記をそのまま使います。"
+    "他人や AI の名前・引用・質問・仮定・曖昧な否定から登録名を変更しません。"
+    "名前の訂正は speaker の記憶として重複保存しません。"
     "evidence は今回の利用者発話から根拠となる箇所を一字一句そのまま引用してください。保存済み記憶は根拠にできません。"
     '例: {"kind":"speaker","id":12,"content":"利用者は大阪に住んでいる。","evidence":"横浜じゃなく大阪に住んでいる"}\n'
     '例: {"kind":"shared","id":null,"content":"この作品の舞台は横浜。","evidence":"この作品の舞台は横浜です"}\n'
@@ -92,13 +101,20 @@ def memory_snapshot(store: Store, persona: str | None = None, speaker_id: int | 
             + [dict(row, kind="shared") for row in shared])
 
 
-def extract_messages(utterances: list[str], snapshot: list[dict] | None = None) -> list[dict]:
+def extract_messages(utterances: list[str], snapshot: list[dict] | None = None,
+                     speaker: tuple[int, str] | None = None, residence_replies: list[str] | None = None) -> list[dict]:
     """抽出用の LLM 入力。utterances は利用者発話 (古い順)。"""
     body = "\n".join(f"利用者: {u}" for u in utterances)
     if snapshot:
         records = [{k: row[k] for k in ("kind", "id", "content")} for row in snapshot]
         body = ("訂正可能な保存済み記憶 (根拠発話ではありません):\n"
                 + json.dumps(records, ensure_ascii=False) + "\n今回の利用者発話 (古い順):\n" + body)
+    if speaker is not None:
+        body = ("現在の話者 (訂正の根拠ではありません):\n"
+                + json.dumps({"id": speaker[0], "name": speaker[1]}, ensure_ascii=False) + "\n" + body)
+    if residence_replies:
+        body = ("居住地を尋ねた直後の本人の返事:\n"
+                + json.dumps(residence_replies, ensure_ascii=False) + "\n" + body)
     return [{"role": "system", "content": EXTRACT_PROMPT}, {"role": "user", "content": body}]
 
 
@@ -167,7 +183,7 @@ def remember_knowledge(store: Store, items: list[str], evidence_utterance_id: in
     return ids
 
 
-def _operations(text: str, batch: list[tuple[int, str]]) -> list[dict]:
+def _operations(text: str, batch: list[tuple[int, str]], residence_reply_ids: set[int]) -> list[dict]:
     """モデルの変更案を検証する。実在する利用者発話の引用がない変更は採らない。"""
     operations: list[dict] = []
     for line in text.splitlines():
@@ -199,7 +215,9 @@ def _operations(text: str, batch: list[tuple[int, str]]) -> list[dict]:
             continue
         uid, utterance = matches[-1]
         if mid is None and len(utterance) < MIN_UTTERANCE_CHARS:
-            continue  # 短い発話からの新規保存は引き続き抑制。明確な訂正だけ許す。
+            place = residence_place(content) if op["kind"] == "speaker" else None
+            if uid not in residence_reply_ids or not place or _norm(place) not in _norm(evidence):
+                continue  # 質問直後の地名の返事だけ例外。相づち等の新規保存は引き続き抑制。
         operations.append(dict(op, content=content, evidence_utterance_id=uid))
     # 同じ行への複数の変更案は、どれが意図か不明なので全て捨てる。
     targets = [(op["kind"], op["id"]) for op in operations if op["id"] is not None]
@@ -207,10 +225,11 @@ def _operations(text: str, batch: list[tuple[int, str]]) -> list[dict]:
 
 
 def remember_extracted(store: Store, text: str, batch: list[tuple[int, str]], snapshot: list[dict],
-                       now_ms: int, persona: str | None = None, speaker_id: int | None = None) -> None:
+                       now_ms: int, persona: str | None = None, speaker_id: int | None = None,
+                       residence_reply_ids: set[int] | None = None) -> None:
     """抽出時の版・範囲が一致する行だけ訂正する。手動削除・更新された行を復活させない。"""
     offered = {(row["kind"], row["id"]): row for row in snapshot}
-    operations = _operations(text, batch)
+    operations = _operations(text, batch, residence_reply_ids or set())
     corrections = []
     blocked: dict[str, set[str]] = {"speaker": set(), "shared": set()}
     for op in operations:

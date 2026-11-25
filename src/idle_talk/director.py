@@ -56,8 +56,10 @@ from .silero_vad import SileroVad
 from .speaker_track import WINDOW_MS, ChangeDetector, SpeakerTrack
 from .vad import FRAME_MS, EnergyVad, Vad, rms
 from .voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, MIN_VOICE_MS, UNNAMED_PROMPT, VoiceBook,
-                       name_messages, parse_name, speaker_prompt, voice_word)
+                       name_messages, parse_name, parse_name_correction, speaker_prompt, voice_word)
 from .web_search import X_TREND, link_items
+from .weather import WEATHER_PROMPT, Forecast, WeatherTopics, residence
+from .residence import ASK_NOTE, REPLY_WINDOW_MS, ResidenceQuestions
 
 log = logging.getLogger("idle_talk.director")
 
@@ -276,6 +278,7 @@ class IdleTalkDirector:
         self.pipeline.fallback = lambda spoke: self.personas.fallback(spoke)  # 差し替え後も今のペルソナで選ぶ
         self.topic_worker = None  # TopicWorker。状態変化を伝えて休止中は取得を止める (設計書 7)
         self.web_search: Callable[[str], list[dict]] | None = None  # 利用者への返答で調べものをする (main が結線)
+        self.weather: WeatherTopics | None = None  # 居住地の天気を自発発話に混ぜる ([search].on のとき main が結線)
         self.remo = None  # RemoControl。利用者への通常応答だけで家電操作する (main が結線)
         self.page_reader: Callable[[], dict | None] | None = None  # 「このページどう思う？」で見ているページを読む (main が結線)
         self.page_capture: Callable[[], object] | None = None  # 本文が読めないとき代わりに撮る前面のウィンドウ (wincap.WindowCapture.grab)
@@ -288,6 +291,10 @@ class IdleTalkDirector:
         self._ask_sid: int | None = None  # 名前を尋ねた相手。その人の次の発話から名前を抜き出す
         self._ask_plan: int | None = None  # 名前を尋ねる応答を生成中の相手。最後まで再生されたら _ask_sid にする
         self._name_pending: list[str] = []  # 名前の抜き出し待ちの発話
+        self.residence_questions = ResidenceQuestions()
+        self._residence_plan: tuple[int, str] | None = None
+        self._residence_reply: tuple[int, str, int] | None = None  # 話者、ペルソナ、返事の期限
+        self._residence_answers: dict[int, int] = {}  # 居住地への返事の utterance_id -> 受信時の話者
         # ドラマモード (設計書 6.5)。画面でタブ共有を始めると ui.drama で on。main が [drama] の設定で差し替える
         self.drama = DramaListener(Drama(), EnergyVad(adaptive=True), self.cfg.MIN_SEG, clock)
         self.drama_on = False
@@ -736,7 +743,7 @@ class IdleTalkDirector:
             self.store.add_event(self.now_ms(), self.epoch.current, DRAMA_ECHO_KIND,
                                  json.dumps({"utterance_id": uid, "text": text, "by": why}, ensure_ascii=False))
             return False
-        if self._out_of_context(in_ai, text):
+        if self._out_of_context(in_ai, text) and not self._awaiting_residence():
             log.info("short transcript out of context discarded: utterance %d %r", uid, text)
             self.ingress.hold(uid)
             self.store.add_event(self.now_ms(), self.epoch.current, SHORT_KIND,
@@ -766,13 +773,19 @@ class IdleTalkDirector:
             return True
         talk_log.info("USER: %s", text)
         self.store.add_turn(self.now_ms(), "user", text, 0, None, uid)  # user 行は completed=0 (ai の再生完了のみ 1)
+        if self._awaiting_residence():
+            self._residence_answers[uid] = self._speaker
+            self._residence_reply = None
         if self._ask_sid is not None and self._speaker == self._ask_sid:  # 名前を尋ねた相手の返事
             self._name_pending = self._name_pending[-1:] + [text]
         if ((self.voices is None or self._speaker is not None)
                 and (len(text) >= MIN_UTTERANCE_CHARS
+                     or (text and self.voices is not None and self.voices.name(self._speaker))
                      or (text and memory_snapshot(self.store, self.personas.current_id, self._speaker)))):
             # 話者は受信時に固定する。未知の声の情報を直前の人や共通の記憶にしない。
             self._mem_pending = self._mem_pending[-(MEM_BATCH - 1):] + [(uid, text, self._speaker)]
+            pending_ids = {uid for uid, _, _ in self._mem_pending}
+            self._residence_answers = {uid: sid for uid, sid in self._residence_answers.items() if uid in pending_ids}
         return True
 
     # ---- ChatGPT への引き渡し (設計書 6.11) ----
@@ -1108,9 +1121,47 @@ class IdleTalkDirector:
         name, self._ask_sid = parse_name(text), None  # 名乗らなかったら、次の応答で (ASK_MAX まで) 改めて尋ねる
         if name is None:
             return
+        return self._save_name(sid, name)
+
+    def _awaiting_residence(self) -> bool:
+        reply = self._residence_reply
+        return bool(reply and reply[0] == self._speaker and reply[1] == self.personas.current_id
+                    and self.now_ms() <= reply[2]
+                    and not (self.pc_on or self.drama_on or self.transcribe_on or self.handoff_on))
+
+    def _plan_residence_question(self, spontaneous: bool = False) -> str:
+        self._residence_plan = None
+        sid = self._speaker
+        if (sid is None or self.voices is None or not self.voices.name(sid)
+                or self._ask_plan is not None or self._ask_sid == sid
+                or self.pc_on or self.drama_on or self.screen_on or self.transcribe_on or self.handoff_on
+                or self.spontaneous.radio or self._awaiting_residence()
+                or any(speaker == sid and uid in self._residence_answers for uid, _, speaker in self._mem_pending)
+                or (not spontaneous and re.search(r"住|暮ら|在住|引っ越|転居", self._text))
+                or self._question_note(history_window(self.store, self.cfg))):
+            return ""
+        question = self.residence_questions.choose(self.store, self.personas.current_id, sid, self.now_ms())
+        if question:
+            self._residence_plan = (sid, question)
+        return question
+
+    def _residence_question_heard(self, turn_id: int | None) -> None:
+        plan, self._residence_plan = self._residence_plan, None
+        if plan is None or turn_id is None or plan[0] != self._speaker:
+            return
+        row = self.store.query("SELECT text FROM turns WHERE id=? AND completed=1", (turn_id,))
+        if row and plan[1] in row[0]["text"]:
+            now = self.now_ms()
+            self.residence_questions.heard(self.store, plan[0], now, self.epoch.current)
+            self._residence_reply = (plan[0], self.personas.current_id, now + REPLY_WINDOW_MS)
+
+    def _save_name(self, sid: int, name: str) -> tuple[int, int]:
+        """登録名と、統合後の話者・抽出待ちの記憶の紐付けを揃える。"""
         kept = self.voices.set_name(sid, name, self.now_ms())
         self._mem_pending = [(uid, text, kept if speaker == sid else speaker)
                              for uid, text, speaker in self._mem_pending]
+        self._residence_answers = {uid: kept if speaker == sid else speaker
+                                   for uid, speaker in self._residence_answers.items()}
         if self._speaker == sid:
             self._speaker = kept
         log.info("speaker %d named %r%s", sid, name, f" (merged into {kept})" if kept != sid else "")
@@ -1179,7 +1230,8 @@ class IdleTalkDirector:
             if self._spont_hold:  # 利用者の発話か雑音かの判定待ち: 完了は保留解除で確定する
                 return
             if c is None or self._played_out(c):  # 自発発話の再生完了
-                self._finalize_utterance("spontaneous", interrupted=False)
+                turn_id = self._finalize_utterance("spontaneous", interrupted=False)
+                self._residence_question_heard(turn_id)
                 self.spontaneous.done()
                 self._idle_since = self.clock()  # 自発発話は IDLE のまま再生するので、沈黙の計測をここで始め直す
             return
@@ -1254,7 +1306,8 @@ class IdleTalkDirector:
     def _act_commit_history(self, a: Action) -> None:
         self._last_op = self.clock()
         self._asked(heard=True)
-        self._finalize_utterance("response", interrupted=False)
+        turn_id = self._finalize_utterance("response", interrupted=False)
+        self._residence_question_heard(turn_id)
         self._start_memory()
 
     def _act_duck(self, a: Action) -> None:
@@ -1294,13 +1347,30 @@ class IdleTalkDirector:
         return None
 
     async def _spontaneous_respond(self) -> None:
-        topic, card = await self._pick_topic()
+        me = asyncio.current_task()
+        weather = await self._pick_weather()
+        if self._spont_task is not me or not self.spontaneous.pending:
+            return
+        residence_question = "" if weather else self._plan_residence_question(spontaneous=True)
+        if residence_question:
+            topic, card = "身近な地域の話", None
+        else:
+            topic, card = (weather.summary, None) if weather else await self._pick_topic()
+        if weather:
+            self.pipeline.links = link_items([{"title": "天気予報（Open-Meteo）", "url": weather.url}])
+            self._emit({"t": "links", "items": self.pipeline.links})
         if card is not None and (card["source_url"] or "").startswith(("http://", "https://")):
             # カードで話すニュースは聞かれる前に画面の URL 欄へ出し、「URL を教えて」にも答えられるよう覚えておく
             self.pipeline.links = link_items([{"title": card["hook"], "url": card["source_url"]}])
             self._emit({"t": "links", "items": self.pipeline.links})
-        messages = self._chat_messages(CARD_TURNS if card else None)
-        if card:
+        messages = self._chat_messages(CARD_TURNS if card or weather else None)
+        if residence_question:
+            messages[0]["content"] += ASK_NOTE
+            prompt = ("(利用者は黙っています。住んでいる地域を後で軽く尋ねるので、近所の散歩などの身近な話を"
+                      "一言だけ自然に添えてください。まだ知らない利用者の地域や天気は推測せず、本文では質問しません)")
+        elif weather:
+            prompt = WEATHER_PROMPT.format(summary=weather.summary)
+        elif card:
             prompt = (RADIO_CARD_PROMPT if self.spontaneous.radio else CARD_PROMPT).format(topic=topic)
         elif self.spontaneous.radio:
             prompt = RADIO_PROMPT.format(topic=topic)
@@ -1311,11 +1381,27 @@ class IdleTalkDirector:
         messages.append({"role": "user", "content": prompt})
         self.path_calls.append(("spontaneous", "play_utterance"))  # 通常応答と同じ play_utterance を通る
         me = asyncio.current_task()
-        await self.pipeline.respond(messages)
+        await self.pipeline.respond(messages, tail=residence_question)
         if self._spont_task is not me or not self.spontaneous.pending:
             return
         self._gen_done = True
         self._check_done()
+
+    async def _pick_weather(self) -> Forecast | None:
+        """現在の話者だけ。天気を選ばない回・取得失敗時はいつもの話題へ戻す。"""
+        provider, sid, persona = self.weather, self._speaker, self.personas.current_id
+        if provider is None or sid is None or self.voices is None:
+            return None
+        place = residence(self.store, persona, sid)
+        now = self.now_ms()
+        if not place or not provider.due(sid, place, now):
+            return None
+        forecast = await asyncio.to_thread(provider.forecast, place, now)
+        if (forecast is None or self._speaker != sid or self.personas.current_id != persona
+                or residence(self.store, persona, sid) != place):
+            return None
+        provider.used(sid, place, self.now_ms())
+        return forecast
 
     # ---- ドラマモード (設計書 6.5): 一言は自発発話と同じ pending / 保留 / 取消 / 再生完了の経路を通る ----
     def _set_drama(self, on: bool) -> None:
@@ -1894,8 +1980,12 @@ class IdleTalkDirector:
                               speaker_id: int | None = None) -> None:
         """受信時の話者と、抜き出し開始時点のペルソナに紐づける。別の話者の発話は混ぜない。"""
         snapshot = memory_snapshot(self.store, persona, speaker_id)
+        name = self.voices.name(speaker_id) if self.voices is not None else None
+        speaker = (speaker_id, name) if speaker_id is not None and name else None
+        reply_ids = {uid for uid, _ in batch if speaker_id is not None and self._residence_answers.get(uid) == speaker_id}
         try:
-            text = await asyncio.to_thread(self._collect, extract_messages([t for _, t in batch], snapshot), stop)
+            text = await asyncio.to_thread(self._collect, extract_messages(
+                [t for _, t in batch], snapshot, speaker, [t for uid, t in batch if uid in reply_ids]), stop)
         except Exception as e:  # noqa: BLE001  LLM の失敗で会話を止めない (未処理分は次回に回す)
             log.warning("memory extraction failed: %s", e)
             return
@@ -1904,19 +1994,29 @@ class IdleTalkDirector:
         done = {uid for uid, _ in batch}
         if speaker_id is not None and not self.store.query("SELECT id FROM speakers WHERE id=?", (speaker_id,)):
             self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
+            self._residence_answers = {uid: sid for uid, sid in self._residence_answers.items() if uid not in done}
             return
         try:
-            remember_extracted(self.store, text, batch, snapshot, self.now_ms(), persona, speaker_id)
+            remember_extracted(self.store, text, batch, snapshot, self.now_ms(), persona, speaker_id, reply_ids)
+            correction = parse_name_correction(text, speaker_id, batch) if speaker else None
+            if correction and correction != name and self.voices.name(speaker_id) == name:
+                row = self.store.query("SELECT name FROM speakers WHERE id=?", (speaker_id,))
+                if row and row[0]["name"] == name:
+                    self._save_name(speaker_id, correction)
         except Exception as e:  # noqa: BLE001 保存失敗時も会話を止めず、未処理分を次回に回す
             log.warning("memory save failed: %s", e)
             return
         self._mem_pending = [p for p in self._mem_pending if p[0] not in done]
+        self._residence_answers = {uid: sid for uid, sid in self._residence_answers.items() if uid not in done}
         log.info("memory extraction processed (%s, speaker %s)", persona, speaker_id)
 
     # ---- 唯一の再生/キャンセル/確定経路 (不変条件 3) ----
     async def _respond(self) -> None:
         # ブラウザ補正なしモード: 名前の質問は相手に答えさせてしまう。ドラマモード: 動画の声は名乗らない (拾った台詞に尋ねた。2026-10-19)
         messages = self._chat_messages(ask=not (self.pc_on or self.drama_on), length=True)
+        residence_question = self._plan_residence_question()
+        if residence_question:
+            messages[0]["content"] += ASK_NOTE
         self.path_calls.append(("response", "play_utterance"))
         me = asyncio.current_task()
         ep = self.epoch.current
@@ -1925,7 +2025,7 @@ class IdleTalkDirector:
             await self.pipeline.respond(messages, search=self.web_search, page=self.page_reader,
                                         control=self.remo if not (self.pc_on or self.drama_on) else None,
                                         shot=self._page_shot if self.page_capture and self.drama_vision else None,
-                                        tail=ASK_QUESTION if self._ask_plan is not None else "")
+                                        tail=ASK_QUESTION if self._ask_plan is not None else residence_question)
         except asyncio.CancelledError:  # 準備中の再発話で生成が取り消された: 旧世代の結果は破棄扱い (E15)
             self.pipeline._discard(ep, "<cancelled generation>")
             raise
@@ -1957,6 +2057,7 @@ class IdleTalkDirector:
     def _cancel_path(self, route: str) -> None:
         """pipeline.cancel は await を含まないので eager 実行して epoch を即時に確定させる。"""
         self.path_calls.append((route, "cancel"))
+        self._residence_plan = None
         if route == "interrupt":
             self._asked(heard=False)
         t = asyncio.Task(self.pipeline.cancel(), loop=asyncio.get_running_loop(), eager_start=True)
@@ -1964,9 +2065,9 @@ class IdleTalkDirector:
         t.add_done_callback(self._cancels.discard)
         self._finalize_utterance(route, interrupted=True)
 
-    def _finalize_utterance(self, route: str, interrupted: bool) -> None:
+    def _finalize_utterance(self, route: str, interrupted: bool) -> int | None:
         self.path_calls.append((route, "_finalize_utterance"))
         c, self._cur = self._cur, None
         if c is None:
             return
-        self.history.commit(c["epoch"], c["utt"], self.now_ms(), interrupted=interrupted)
+        return self.history.commit(c["epoch"], c["utt"], self.now_ms(), interrupted=interrupted)

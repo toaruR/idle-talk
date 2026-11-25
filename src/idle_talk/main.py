@@ -225,6 +225,8 @@ def build_director(data_dir: Path, args: argparse.Namespace, cfg: Config) -> Idl
     search = load_search(args.config)
     if search.on:
         director.web_search = WebSearch(engines=search.engines, read_page=search.read_page, realtime=search.realtime)
+        from .weather import WeatherTopics
+        director.weather = WeatherTopics()
         if search.read_window and sys.platform == "win32":  # 見ているページを読む (URL だけ r.jina.ai に送る)
             director.page_reader = PageReader(http_fetch, screen.exclude)
             try:  # 本文が読めないときは前面のウィンドウの画面で答える (LLM が画像を読めるときだけ)

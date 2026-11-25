@@ -1,5 +1,6 @@
 """話者識別 (設計書 6.4): 特徴量・声の登録と照合・名前の抜き出し・Director での名前の尋ね方。"""
 import asyncio
+import json
 
 import numpy as np
 import pytest
@@ -11,11 +12,12 @@ from idle_talk.clients import AsrClient
 from idle_talk.config import VoiceId, load_voice_id
 from idle_talk.director import IdleTalkDirector
 from idle_talk.main import DB_FILE, enable_voice_id
+from idle_talk.memory import EXTRACT_PROMPT
 from idle_talk.store import Store
 from idle_talk.vad import EnergyVad
 from idle_talk.voice_id import (ASK_MAX, ASK_PROMPT, ASK_QUESTION, ASKED_PROMPT, ENROLL_N, NAME_PROMPT, VoiceBook, fbank,
                                 forget_unnamed,
-                                parse_name)
+                                parse_name, parse_name_correction)
 
 LONG = 100  # 2s の発話 (MIN_VOICE_MS 以上)
 
@@ -161,6 +163,9 @@ def make(tmp_path, embed, name_reply="たろう"):
 
     def llm(messages):
         system = messages[0]["content"]
+        if system == EXTRACT_PROMPT:
+            yield "なし"
+            return
         if system == NAME_PROMPT:
             yield name_reply
             return
@@ -292,6 +297,25 @@ def test_embedding_failure_keeps_conversation(tmp_path):
         finally:
             store.close()
     asyncio.run(run())
+
+
+# ---- 名前の訂正 ----
+@pytest.mark.parametrize("changes", [
+    {"id": 2}, {"id": True}, {"content": None}, {"content": "花子さん"},
+    {"content": "別名"}, {"content": "花子\n"}, {"evidence": ""},
+    {"evidence": "引用にない花子"}, {"extra": True},
+])
+def test_name_correction_rejects_invalid_or_ungrounded_output(changes):
+    op = dict(kind="speaker_name", id=1, content="花子", evidence="太郎ではなく花子です")
+    op.update(changes)
+    assert parse_name_correction(json.dumps(op), 1, [(4, "太郎ではなく花子です")]) is None
+
+
+def test_name_correction_requires_one_unambiguous_operation():
+    text = json.dumps(dict(kind="speaker_name", id=1, content="花子", evidence="太郎ではなく花子です"))
+    batch = [(4, "太郎ではなく花子です")]
+    assert parse_name_correction(text, 1, batch) == "花子"
+    assert parse_name_correction(text + "\n" + text, 1, batch) is None
 
 
 # ---- ctl speakers ----

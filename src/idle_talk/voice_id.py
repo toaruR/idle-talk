@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -264,3 +265,27 @@ def parse_name(text: str) -> str | None:
     if not line or "なし" in line or len(line) > NAME_MAX or not any(ch.isalnum() for ch in line):
         return None
     return line
+
+
+def parse_name_correction(text: str, sid: int, batch: list[tuple[int, str]]) -> str | None:
+    """本人の発話に根拠と新しい名前がある、現在の話者への訂正だけ採る。"""
+    candidates = []
+    for line in text.splitlines():
+        try:
+            op = json.loads(line.strip())
+        except (ValueError, TypeError):
+            continue
+        if isinstance(op, dict) and op.get("kind") == "speaker_name":
+            candidates.append(op)
+    if len(candidates) != 1:
+        return None
+    op = candidates[0]
+    if set(op) != {"kind", "id", "content", "evidence"} or type(op["id"]) is not int or op["id"] != sid:
+        return None
+    content, evidence = op["content"], op["evidence"]
+    if not isinstance(content, str) or not isinstance(evidence, str) or not evidence.strip():
+        return None
+    name = parse_name(content)
+    if name is None or name != content or name not in evidence or "\n" in content or "\r" in content:
+        return None
+    return name if any(evidence in utterance for _, utterance in batch) else None

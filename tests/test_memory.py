@@ -356,3 +356,81 @@ def test_speaker_deleted_during_extraction_drops_pending_without_learning(tmp_pa
             d.close()
             store.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("merge", [False, True])
+@pytest.mark.parametrize("has_memory", [False, True])
+def test_spoken_name_correction_updates_database_and_voice_cache(tmp_path, merge, has_memory):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        sid = add_speaker(store, "太郎")
+        kept = add_speaker(store, "花子") if merge else sid
+        d.voices = VoiceBook(store)
+        d._speaker = sid
+        if has_memory:
+            memory.remember(store, [FACT], 1, 1, d.personas.current_id, sid)
+        seen = []
+
+        def llm(messages):
+            seen.append(messages)
+            yield json.dumps(dict(kind="speaker_name", id=sid, content="花子", evidence="花子です"))
+
+        d._llm = llm
+        try:
+            # 新規の記憶抽出より短い発話でも、名前の訂正は受け付ける。
+            assert d._on_transcript(2, "花子です")
+            assert d._mem_pending == [(2, "花子です", sid)]
+            d._start_memory()
+            await d._mem_task
+            assert f'"id": {sid}, "name": "太郎"' in seen[0][1]["content"]
+            assert d._speaker == kept and d.voices.name(kept) == "花子"
+            assert "「花子」さん" in d._chat_messages()[0]["content"]
+            assert [r["speaker_id"] for r in memory.list_memories(store)] == ([kept] if has_memory else [])
+            assert d._mem_pending == []
+            again = Store(store.path, db_backup=False)
+            try:
+                assert VoiceBook(again).name(kept) == "花子"
+                assert [(r["id"], r["name"]) for r in again.query("SELECT id, name FROM speakers")] == [(kept, "花子")]
+            finally:
+                again.close()
+        finally:
+            d.close()
+            store.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutation", ["cancel", "rename", "delete", "switch"])
+def test_name_correction_does_not_overwrite_changed_or_cancelled_speaker(tmp_path, mutation):
+    async def run():
+        d, _, store, _, _ = make(tmp_path)
+        sid, other = add_speaker(store, "太郎"), add_speaker(store, "次郎")
+        d.voices = VoiceBook(store)
+        d._speaker = sid
+
+        def llm(messages):
+            if mutation == "cancel":
+                d._mem_stop.set()
+            elif mutation == "rename":
+                store.execute("UPDATE speakers SET name='三郎' WHERE id=?", (sid,))
+            elif mutation == "delete":
+                store.execute("DELETE FROM speakers WHERE id=?", (sid,))
+            elif mutation == "switch":
+                d._speaker = other
+            yield json.dumps(dict(kind="speaker_name", id=sid, content="花子", evidence="花子です"))
+
+        d._llm = llm
+        try:
+            d._mem_pending = [(2, "太郎ではなく花子です", sid)]
+            d._start_memory()
+            await d._mem_task
+            assert d.voices.name(other) == "次郎"
+            if mutation == "delete":
+                assert not store.query("SELECT id FROM speakers WHERE id=?", (sid,))
+            else:
+                expected = {"cancel": "太郎", "rename": "三郎", "switch": "花子"}[mutation]
+                assert store.query("SELECT name FROM speakers WHERE id=?", (sid,))[0][0] == expected
+            assert d._speaker == (other if mutation == "switch" else sid)
+        finally:
+            d.close()
+            store.close()
+    asyncio.run(run())
