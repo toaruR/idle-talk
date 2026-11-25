@@ -370,7 +370,7 @@ def load_voice_id(path: str | Path = SETTINGS_FILE) -> VoiceId:
 
 
 class Transcribe(NamedTuple):
-    """[transcribe]: 文字起こしモードの話者の見分け方 (設計書 6.10)。"""
+    """[transcribe]: 文字起こしモードの話者識別と発話検出 (設計書 6.10)。"""
     # 同じ人とみなす声の近さ。スピーカー越しの動画の声は BGM も混ざり、同じ人でも 0.4〜0.5 に下がって
     # [voice_id].threshold (0.6) では別人が増え続けた (実機 2026-10-27)。別人がまとまるなら上げる
     threshold: float = 0.45
@@ -378,6 +378,7 @@ class Transcribe(NamedTuple):
     # 発話とみなす閾値 = 雑音 x vad_ratio ([vad].ratio の代わり)。話者が替わると小さい声の人の台詞を拾わず、
     # 「私は」「もう」等の断片だけになった (実機 2026-10-28)。物音・BGM まで文字になるなら上げる
     vad_ratio: float = 2.0
+    silero_idle_reset: bool = True
 
 
 def load_transcribe(path: str | Path = SETTINGS_FILE) -> Transcribe:
@@ -392,7 +393,10 @@ def load_transcribe(path: str | Path = SETTINGS_FILE) -> Transcribe:
     ratio = raw.get("vad_ratio", Transcribe._field_defaults["vad_ratio"])
     if type(ratio) not in (int, float) or not 1 < ratio <= 10:
         raise ValueError(f"[transcribe].vad_ratio must be a number in (1, 10]: {ratio!r}")
-    return Transcribe(float(th), mx, float(ratio))
+    idle_reset = raw.get("silero_idle_reset", Transcribe._field_defaults["silero_idle_reset"])
+    if type(idle_reset) is not bool:
+        raise ValueError(f"[transcribe].silero_idle_reset must be a bool: {idle_reset!r}")
+    return Transcribe(float(th), mx, float(ratio), idle_reset)
 
 
 class VadSettings(NamedTuple):

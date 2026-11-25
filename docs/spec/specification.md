@@ -346,7 +346,7 @@ flowchart LR
 | `[voice_id]` | `on` (false) / `model` (`data/models/voxceleb_resnet34_LM.onnx`) / `threshold` (0.6、0 と 1 を含まない) / `forget_days` (3、0〜365) / `forget_few_days` (1、0〜365) | モデルや onnxruntime が無ければ warn し、識別なしで動く。`forget_*` は「話者識別」節 |
 | `[drama]` | 下表 | `log_prompt`・`mic` は bool、`window` は文字列、他は整数 |
 | `[screen]` | 下表 | 「画面モード」節 |
-| `[transcribe]` | `threshold` (0.45、0 と 1 を含まない) / `voice_max_s` (8、2〜60) / `vad_ratio` (2.0、1 を含まず 10 まで) | 「文字起こしモード」節 |
+| `[transcribe]` | `threshold` (0.45、0 と 1 を含まない) / `voice_max_s` (8、2〜60) / `vad_ratio` (2.0、1 を含まず 10 まで) / `silero_idle_reset` (true) | 「文字起こしモード」節 |
 | `[pc]` | `monitor` (空) / `mic` (空) | 機器の名前 (部分一致、100 字まで)。空なら Windows の既定の機器。「ブラウザ補正なしモード」節 |
 | `[chatgpt]` | `on` (false) / `phrases` (`["チャッピー"]`、2〜20 字を 1〜10 個) / `chrome` (空) / `port` (9333、1024〜65535) / `url` (`https://chatgpt.com/`) / `first_timeout_s` (20、5〜300) / `idle_timeout_s` (30、5〜600) / `max_s` (900、60〜7200) | 「ChatGPT への引き渡し」節。`url` は `https://` で始める |
 
@@ -1597,9 +1597,11 @@ flowchart LR
 - モード中は、E6 の無音判定を切る。
 - 音量の VAD を Silero VAD (`silero_vad.SileroVad`、`data/models/silero_vad_v6.onnx`) に差し替える (`Ingress.set_vad`)。
   - 声らしさ 0.5 以上で開始し、0.35 未満が 300ms 続いたら終える。
+  - 発話区間の外で 0.35 未満の判定が 32 ms × 62 ブロック連続したら、Silero の再帰状態を初期化する。直前の64サンプルと未処理の音は保持し、次の判定から初期状態を使う。`[transcribe].silero_idle_reset = false` と再起動で無効にできる。
+  - 初期化直後の5ブロック（160 ms）だけ、別々の2回の判定が連続で0.5以上になれば開始する。初期化直後にBGMだけで一時的に閾値を超えるケースを防ぐ。
   - モデルが無ければ音量の VAD を使う。そのときは雑音の推定を直近 10 秒の下位 5% で頭打ちにする (`EnergyVad.floor_track`)。閾値の倍率は `[transcribe].vad_ratio` である。
 - モード中は、文脈の無い短い認識結果を捨てない。
-- 5 秒ごとに、閾値・雑音の推定・音量の最大・閾値を超えた割合を idle_talk.log に `transcribe level` で出す。
+- 5 秒ごとに、閾値・雑音の推定・音量の最大・閾値を超えた割合を idle_talk.log に `transcribe level` で出す。`state_resets` は現在の Silero の再帰状態を初期化した累計（音量 VAD では `-`）、`asr_pending_max` はその区間の入力フレーム処理中に観測した確定認識の最大待ち件数（実行中を含む）。
 
 区間の切り方:
 

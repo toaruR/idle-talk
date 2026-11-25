@@ -352,7 +352,7 @@ class IdleTalkDirector:
         self._energy_vad: Vad | None = None  # 文字起こしの間だけ Silero に差し替えた元の VAD
         self._voiced_last = False
         self._vad_ratio: float | None = None  # 文字起こしの間だけ差し替えた [vad].ratio の元の値
-        self._level_log = (0, 0.0, 0)  # (区切りのフレーム番号, 最大の音量, 閾値を超えたフレーム数)。閾値の調整用のログ
+        self._level_log = (0, 0.0, 0, 0)  # (開始フレーム, 最大音量, 声のフレーム数, 確定認識の最大待ち件数)
         self._changes = ChangeDetector()
         self._mic_ref = (0, 0.0)  # (フレーム番号, そのフレームを受けた時刻)。talk.log の時刻をマイクの音の位置から出す
         self.wall = time.time
@@ -919,7 +919,7 @@ class IdleTalkDirector:
         # モデルが無ければ音量の VAD のまま、下の調整 (floor_track・vad_ratio) で使う
         if on and self.silero is not None and not isinstance(self.ingress.vad, SileroVad):
             self._energy_vad = self.ingress.vad
-            self.ingress.set_vad(SileroVad(self.silero))
+            self.ingress.set_vad(SileroVad(self.silero, idle_reset=self.transcribe.silero_idle_reset))
         elif not on and self._energy_vad is not None:
             self.ingress.set_vad(self._energy_vad)
             self._energy_vad = None
@@ -931,7 +931,7 @@ class IdleTalkDirector:
                 self._vad_ratio, vad.ratio = vad.ratio, self.transcribe.vad_ratio
             elif not on and self._vad_ratio is not None:
                 vad.ratio, self._vad_ratio = self._vad_ratio, None
-        self._level_log = (self.ingress._n, 0.0, 0)
+        self._level_log = (self.ingress._n, 0.0, 0, 0)
         log.info("transcribe mode %s", "on" if on else "off")
         self._bc_record("transcribe_mode", {"on": on})
 
@@ -962,20 +962,21 @@ class IdleTalkDirector:
         return rms(frame) >= getattr(vad, "current_threshold", 500.0)
 
     def _log_level(self, level: float) -> None:
-        """文字起こし中は LEVEL_LOG_S ごとに、閾値 (Silero なら -)・雑音の推定・音量の最大・声とみなした割合をログに出す
-        (取りこぼしの調査用)。"""
-        n0, peak, loud = self._level_log
+        """文字起こし中の音量・声の検出・確定認識待ちを LEVEL_LOG_S ごとに記録する。"""
+        n0, peak, loud, pending_max = self._level_log
         vad = self.ingress.vad
         peak, loud = max(peak, level), loud + self._voiced_last
+        pending_max = max(pending_max, self.ingress.asr_pending)
         frames = self.ingress._n - n0
         if frames < LEVEL_LOG_S * 1000 // FRAME_MS:
-            self._level_log = (n0, peak, loud)
+            self._level_log = (n0, peak, loud, pending_max)
             return
         noise = getattr(vad, "_noise_db", None)
-        log.info("transcribe level: vad %s threshold %.0f noise %s peak %.0f voiced %d%%", type(vad).__name__,
+        log.info("transcribe level: vad %s threshold %.0f noise %s peak %.0f voiced %d%% state_resets=%s asr_pending_max=%d",
+                 type(vad).__name__,
                  getattr(vad, "current_threshold", 0.0), "-" if noise is None else f"{10 ** (noise / 20):.0f}",
-                 peak, 100 * loud // frames)
-        self._level_log = (self.ingress._n, 0.0, 0)
+                 peak, 100 * loud // frames, getattr(vad, "state_resets", "-"), pending_max)
+        self._level_log = (self.ingress._n, 0.0, 0, 0)
 
     def _keep_partial(self, uid: int) -> bool:
         """文字起こしで区間の確定が捨てられた (認識の失敗・幻聴・語なし) とき、その区間の最後の仮の文字を確定にする。

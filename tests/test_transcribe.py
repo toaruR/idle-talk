@@ -226,10 +226,12 @@ def test_load_transcribe(tmp_path):
     f.write_text("[transcribe]\nthreshold = 0.5\nvoice_max_s = 6\n", encoding="utf-8")
     assert load_transcribe(f) == Transcribe(0.5, 6)
     f.write_text("[transcribe]\nvad_ratio = 1.5\n", encoding="utf-8")
-    assert load_transcribe(f).vad_ratio == 1.5
+    assert load_transcribe(f) == Transcribe(vad_ratio=1.5, silero_idle_reset=True)
+    f.write_text("[transcribe]\nsilero_idle_reset = false\n", encoding="utf-8")
+    assert load_transcribe(f).silero_idle_reset is False
     assert load_transcribe(tmp_path / "none.toml") == Transcribe()
     for bad in ("threshold = 1.5", "threshold = 0", "voice_max_s = 1", "voice_max_s = 2.5", "vad_ratio = 1",
-                "vad_ratio = 11", "x = 1"):
+                "vad_ratio = 11", "silero_idle_reset = 0", 'silero_idle_reset = "false"', "x = 1"):
         f.write_text(f"[transcribe]\n{bad}\n", encoding="utf-8")
         with pytest.raises(ValueError):
             load_transcribe(f)

@@ -17,6 +17,8 @@ CONTEXT = 64  # 前のチャンクの末尾を頭に足す長さ (faster-whisper
 SPEECH_ON = 0.5  # 声らしさがこれ以上で発話開始
 SPEECH_OFF = 0.35  # これ未満が MIN_SILENCE_MS 続いたら発話の終わり
 MIN_SILENCE_MS = 300  # 150 / 300 / 500ms で CER はほぼ同じ (2026-10-28)
+IDLE_RESET_BLOCKS = 62  # 32ms × 62 = 1984ms。低い判定が続く間だけ再帰状態を更新する
+RESET_CONFIRM_BLOCKS = 5  # 初期化後の160msは、BGMによる単発の閾値超過を採らない
 
 
 def load_session(path: str | Path):
@@ -36,8 +38,9 @@ class SileroVad:
     onset_frames = 1  # 開始の判定は声らしさで行う (Ingress は前の 300ms も ASR に渡す)
     current_threshold = 0.0  # 音量の閾値は使わない (EnergyVad と同じ名前で参照される)
 
-    def __init__(self, session) -> None:
+    def __init__(self, session, *, idle_reset: bool = False) -> None:
         self.session = session
+        self._idle_reset = idle_reset
         self.playing = self.bleed = False  # Director が設定する (使わない)
         self.reset()
 
@@ -49,6 +52,11 @@ class SileroVad:
         self.prob = 0.0  # 直近の声らしさ
         self._speaking = False
         self._quiet_ms = 0
+        self._idle_blocks = 0
+        self._reset_confirm_left = 0
+        self._previous_voiced = False
+        self._onset_confirmed = False
+        self.state_resets = 0
 
     def _run(self, chunk: np.ndarray) -> float:
         x = np.concatenate([self._ctx, chunk])[None, :]
@@ -56,14 +64,37 @@ class SileroVad:
         self._ctx = chunk[-CONTEXT:]
         return float(np.asarray(out).reshape(-1)[0])
 
+    def _update_onset(self) -> None:
+        voiced = self.prob >= SPEECH_ON
+        self._onset_confirmed = voiced
+        if self._reset_confirm_left:
+            self._onset_confirmed = voiced and self._previous_voiced
+            self._previous_voiced = voiced
+            self._reset_confirm_left -= 1
+        if self._speaking or not self.prob < SPEECH_OFF:
+            self._idle_blocks = 0
+            return
+        self._idle_blocks += 1
+        if self._idle_blocks == IDLE_RESET_BLOCKS:
+            # 直前のサンプルと未処理の音は保持し、次の推論から初期状態を使う。
+            self._h.fill(0)
+            self._c.fill(0)
+            self._idle_blocks = 0
+            self._reset_confirm_left = RESET_CONFIRM_BLOCKS
+            self._previous_voiced = False
+            self.state_resets += 1
+
     def process(self, frame: bytes) -> str | None:
         self._pending = np.concatenate([self._pending, np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768])
         while len(self._pending) >= CHUNK:
             self.prob = self._run(self._pending[:CHUNK])
             self._pending = self._pending[CHUNK:]
+            if self._idle_reset:
+                self._update_onset()
         frame_ms = len(frame) // 32
         if not self._speaking:
-            if self.prob >= SPEECH_ON:
+            onset = self._onset_confirmed if self._idle_reset else self.prob >= SPEECH_ON
+            if onset:
                 self._speaking, self._quiet_ms = True, 0
                 return SPEECH_START
             return None
