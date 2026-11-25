@@ -147,6 +147,24 @@ test('createClient: snap request goes to onSnap', () => {
   assert.deepEqual(seen, [{ t: 'snap', id: 3 }]);
 });
 
+test('createClient: AI text reaches the UI alongside transcripts and playback controls', () => {
+  const { WS, made } = fakeWs();
+  const texts = [], heard = [], controls = [];
+  C.createClient({ port: 8765, WebSocketCtor: WS,
+    player: { handleMessage: m => controls.push(m) },
+    onText: m => texts.push(m), onTranscript: m => heard.push(m) });
+  const messages = [
+    { t: 'transcript', speaker: 'あなた', text: 'こんにちは', uid: 1 },
+    { t: 'text', epoch: 0, utterance_id: 1, text: 'こんにちは。' },
+    { t: 'text', epoch: 0, utterance_id: 1, text: 'いい天気ですね。' },
+    { t: 'cancel', new_epoch: 1 },
+  ];
+  for (const m of messages) made[0].onmessage({ data: JSON.stringify(m) });
+  assert.deepEqual(texts, messages.slice(1, 3));
+  assert.deepEqual(heard, [messages[0]]);
+  assert.deepEqual(controls, [messages[3]]);
+});
+
 // AudioContext 等を差し替えて、映像トラックを残すか (vision) と止め方を見る
 function fakeDrama() {
   const stops = { audio: 0, video: 0 };

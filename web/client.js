@@ -106,11 +106,11 @@
     }
   }
 
-  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onHandoff(msg), onWake(msg), onLinks(msg), onSnap(msg), onVision(msg), onTranscript(msg), onPartial(msg), onOpen(), onClose(),
+  // opts: { port, WebSocketCtor, player, onState(msg), onError(msg), onSearch(msg), onHandoff(msg), onWake(msg), onLinks(msg), onSnap(msg), onVision(msg), onText(msg), onTranscript(msg), onPartial(msg), onOpen(), onClose(),
   //         clientId, reconnectMs, setTimeoutFn }
   // 接続が切れた・つながらなかったら reconnectMs 後につなぎ直す (サーバの再起動中に開始を押しても待てば動く)。close() で止める
   function createClient(opts) {
-    const { port, WebSocketCtor, player, onState, onError, onSearch, onHandoff, onWake, onLinks, onSnap, onVision, onTranscript, onPartial, onOpen, onClose } = opts;
+    const { port, WebSocketCtor, player, onState, onError, onSearch, onHandoff, onWake, onLinks, onSnap, onVision, onText, onTranscript, onPartial, onOpen, onClose } = opts;
     const clientId = opts.clientId || `web-${Math.random().toString(36).slice(2, 10)}`;
     const reconnectMs = opts.reconnectMs || RECONNECT_MS;
     const setTimeoutFn = opts.setTimeoutFn || setTimeout;
@@ -155,6 +155,7 @@
       else if (msg.t === 'links') { if (onLinks) onLinks(msg); }
       else if (msg.t === 'snap') { if (onSnap) onSnap(msg); }
       else if (msg.t === 'vision') { if (onVision) onVision(msg); }
+      else if (msg.t === 'text') { if (onText) onText(msg); }
       else if (msg.t === 'transcript') { if (onTranscript) onTranscript(msg); }
       else if (msg.t === 'partial') { if (onPartial) onPartial(msg); }
       else if (player) player.handleMessage(msg);

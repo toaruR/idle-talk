@@ -256,6 +256,7 @@
 
   // 文字起こしを下に積む (新しいものが下)。MAX_TRANSCRIPT 行を超えたら古い順 (上) から消す。文字列は textContent で入れる
   const MAX_TRANSCRIPT = 500;
+  let aiTranscript = null; // 同じ epoch・発話の本文は 1 行に足す。再接続時は番号が再利用されるのでリセットする
   let finalUid = 0; // 確定した区間の utterance_id の最大。これ以前の区間の仮の文字は出さない
   // 仮の文字 (話している途中の認識結果) は末尾の 1 行だけ。確定が来たら消して確定の行を足す
   function showPartial(m) {
@@ -281,11 +282,27 @@
     const who = document.createElement('span');
     who.className = 'who';
     who.textContent = String(m.speaker || '');
-    li.append(time, who, String(m.text || ''));
+    const text = document.createElement('span');
+    text.textContent = String(m.text || '');
+    li.append(time, who, text);
     const rest = list.querySelector('li.partial'); // 次の区間の仮の文字は確定の行の下に残す
     if (rest) list.insertBefore(li, rest); else list.append(li);
     while (list.children.length > MAX_TRANSCRIPT) list.firstElementChild.remove();
     $('transcript_box').hidden = false;
+    if (atBottom) list.scrollTop = list.scrollHeight;
+    return { li, text };
+  }
+  function showAiText(m) {
+    if (typeof m.text !== 'string' || !m.text) return;
+    const list = $('transcript');
+    if (!aiTranscript || aiTranscript.epoch !== m.epoch || aiTranscript.utterance_id !== m.utterance_id
+        || aiTranscript.li.parentNode !== list) {
+      aiTranscript = { epoch: m.epoch, utterance_id: m.utterance_id,
+        ...showTranscript({ speaker: 'AI', text: m.text }) };
+      return;
+    }
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 20;
+    aiTranscript.text.textContent += m.text;
     if (atBottom) list.scrollTop = list.scrollHeight;
   }
 
@@ -419,6 +436,7 @@
         },
         onLinks: (m) => showLinks(m.items),
         onVision: showVision,
+        onText: showAiText,
         onTranscript: showTranscript,
         onPartial: showPartial,
         onSnap: async (m) => { // 一言・感想の直前に今の画面を 1 枚返す。映像が無ければ jpeg を省いて理由を送る
@@ -427,6 +445,7 @@
           if (connection === session) session.client.sendJson(r.jpeg ? { t: 'snap', id: m.id, jpeg: r.jpeg, thumb: r.thumb } : { t: 'snap', id: m.id, reason: r.reason });
         },
         onOpen: () => { // 画面の設定 (自発発話 ON 等) を接続時に送る。変更時だけだとサーバ既定 (オフ) のまま
+          aiTranscript = null;
           showError('', null); pushUi();
           if (connection === session) { linked = true; showDrama(); }
         },
