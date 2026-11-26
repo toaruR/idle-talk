@@ -4,8 +4,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-OUT=~/lora/yamagata
-GGUF=/mnt/d/models/lora-yamagata-murayama.gguf
+# 第 3 版: DATA=data/dialect/v3 OUT=~/lora/yamagata-v3 GGUF=/mnt/d/models/lora-yamagata-murayama-v3.gguf bash train.sh
+DATA="${DATA:-data/dialect}"
+OUT="${OUT:-$HOME/lora/yamagata}"
+GGUF="${GGUF:-/mnt/d/models/lora-yamagata-murayama.gguf}"
 BASE=unsloth/gemma-4-12B-it-qat-q4_0-unquantized
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0  # GPU1 は他のアプリが使う
 
@@ -16,6 +18,6 @@ if [ "$used" -gt 1500 ]; then
 fi
 # shellcheck disable=SC1090
 source ~/venvs/dialect/bin/activate
-python "$HERE/train_lora.py" --data "$REPO/data/dialect" --out "$OUT" --base "$BASE" "$@"
+python "$HERE/train_lora.py" --data "$REPO/$DATA" --out "$OUT" --base "$BASE" "$@"
 python ~/src/llama.cpp/convert_lora_to_gguf.py "$OUT/adapter" --base-model-id "$BASE" --outtype f16 --outfile "$GGUF"
 echo "LoRA -> $GGUF"

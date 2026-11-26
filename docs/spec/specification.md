@@ -427,6 +427,7 @@ flowchart LR
 LoRA (`lora`、2026-11-08):
 
 - ペルソナに `lora = true` を書くと、`[llm].lora` の LoRA アダプタ (GGUF、例: 村山弁) をそのペルソナにだけ効かせる。
+- `idle_talk.toml` は村山弁 LoRA 第3版 (`lora-yamagata-murayama-v3.gguf`) を指定する。対象はさくらと、うず。第2版に戻すときは `[llm].lora` に同じフォルダの `lora-yamagata-murayama.gguf` を指定して再起動する。
 - Director は llama-server を `--lora-init-without-apply` で起動し、LoRA を読み込むだけにする。
 - Director は LLM の要求ごとに `"lora": [{"id": 0, "scale": 1 または 0}]` を付ける (`PersonaBook.lora_scale`)。
 - scale 1 は、今のペルソナが `lora = true` で、system にその人物設定が入る要求だけである。

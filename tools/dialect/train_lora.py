@@ -26,7 +26,7 @@ def render(tok, msgs: list[dict], gen: bool) -> str:
     return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=gen, enable_thinking=False)
 
 
-def encode(tok, ex: dict, max_len: int) -> dict:
+def encode(tok, ex: dict, max_len: int) -> dict | None:
     msgs = ex["messages"]
     answer = msgs[-1]["content"]
     # 推論 (llama-server) は生成プロンプトの形 (思考無効だと空の思考チャンネル付き) から続けるので、
@@ -38,8 +38,10 @@ def encode(tok, ex: dict, max_len: int) -> dict:
         raise ValueError("chat template: answer not found")
     full = prefix + answer + whole[at + len(answer):]
     p_ids = tok(prefix, add_special_tokens=False)["input_ids"]
-    ids = tok(full, add_special_tokens=False)["input_ids"][:max_len]
-    labels = [IGNORE] * min(len(p_ids), len(ids)) + ids[len(p_ids):]
+    ids = tok(full, add_special_tokens=False)["input_ids"]
+    if len(ids) > max_len:  # 切り詰めると返答の終わりが欠ける。飛ばす (第 3 版は system に検索の指示が入り長い)
+        return None
+    labels = [IGNORE] * len(p_ids) + ids[len(p_ids):]
     return {"input_ids": ids, "attention_mask": [1] * len(ids), "labels": labels}
 
 
@@ -52,7 +54,7 @@ def main() -> None:
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--base", default=BASE)
-    ap.add_argument("--max-len", type=int, default=1024)
+    ap.add_argument("--max-len", type=int, default=2048)
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--epochs", type=float, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -70,7 +72,10 @@ def main() -> None:
         use_gradient_checkpointing="unsloth")
 
     def ds(name: str) -> Dataset:
-        rows = [encode(tok, ex, a.max_len) for ex in load(a.data / f"{name}.jsonl")]
+        src = load(a.data / f"{name}.jsonl")
+        rows = [r for r in (encode(tok, ex, a.max_len) for ex in src) if r is not None]
+        if len(rows) < len(src):
+            print(f"{name}: skipped {len(src) - len(rows)} examples longer than {a.max_len} tokens")
         return Dataset.from_list(rows)
 
     train, valid = ds("train"), ds("valid")
